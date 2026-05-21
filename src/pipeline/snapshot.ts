@@ -1,6 +1,6 @@
 import { cp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { buildCatalog, readAllRecords } from "../domain/record.js";
+import { readAllRecords, writeCatalog } from "../domain/record.js";
 import type { SnapshotManifest } from "../domain/types.js";
 import { listFiles, nowIso, sha256, writeJson } from "../lib/fs.js";
 import { buildReadModels } from "./readModels.js";
@@ -9,8 +9,7 @@ export const buildSnapshot = async (repoRoot: string, distRoot = join(repoRoot, 
   const latestRoot = join(distRoot, "latest");
   const readModels = await buildReadModels(repoRoot, latestRoot);
   const records = await readAllRecords(repoRoot);
-  const catalog = await buildCatalog(repoRoot, generatedAt);
-  await writeJson(join(repoRoot, "catalog.json"), catalog);
+  const catalog = await writeCatalog(repoRoot, generatedAt);
 
   const fingerprint = sha256(JSON.stringify(catalog.records.map((record) => [record.id, record.updated_at]))).slice(0, 12);
   const snapshotId = `${generatedAt.replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}-${fingerprint}`;
