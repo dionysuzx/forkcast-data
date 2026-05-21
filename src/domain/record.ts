@@ -52,6 +52,21 @@ const mergeMetadata = (
   return merged;
 };
 
+const titleScore = (title: string): number => {
+  let score = title.length;
+  if (/\([A-Z0-9 -]{2,}\)/.test(title)) score += 50;
+  if (/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+20\d{2}\b/.test(title)) score += 50;
+  if (/#\s?\d+/.test(title)) score += 5;
+  if (/^[A-Za-z0-9 -]+ #\d+$/.test(title)) score -= 25;
+  return score;
+};
+
+const betterTitle = (existing: string, incoming: string): string =>
+  titleScore(incoming) > titleScore(existing) ? incoming : existing;
+
+const sameItems = (left: string[] | undefined, right: string[] | undefined): boolean =>
+  JSON.stringify([...(left ?? [])].sort()) === JSON.stringify([...(right ?? [])].sort());
+
 export const writeRecord = async (repoRoot: string, record: RecordManifest): Promise<void> => {
   const manifestPath = recordManifestPath(repoRoot, record);
   const existing = await readJson<RecordManifest>(manifestPath).catch(() => null);
@@ -62,10 +77,14 @@ export const writeRecord = async (repoRoot: string, record: RecordManifest): Pro
   const merged: RecordManifest = {
     ...existing,
     ...record,
-    updatedAt: record.updatedAt > existing.updatedAt ? record.updatedAt : existing.updatedAt,
     sources: mergeSources(existing.sources, record.sources),
     artifacts: mergeArtifacts(existing.artifacts, record.artifacts)
   };
+  merged.title = betterTitle(existing.title, record.title);
+  merged.updatedAt = merged.artifacts.reduce(
+    (latest, artifact) => artifact.updatedAt > latest ? artifact.updatedAt : latest,
+    existing.updatedAt
+  );
   const metadata = mergeMetadata(existing.metadata, record.metadata);
   if (metadata) merged.metadata = metadata;
   else delete merged.metadata;
@@ -90,6 +109,10 @@ export const writeArtifactText = async (args: {
 }): Promise<Artifact> => {
   const relativePath = `${args.layer}/${args.fileName}`;
   const target = artifactPath(args.repoRoot, args.record, relativePath);
+  const existingBody = await readFile(target, "utf8").catch(() => null);
+  const existingRecord = await readJson<RecordManifest>(recordManifestPath(args.repoRoot, args.record)).catch(() => null);
+  const existingArtifact = existingRecord?.artifacts.find((artifact) => artifact.path === relativePath);
+  if (existingBody === args.body && existingArtifact && sameItems(existingArtifact.from, args.from)) return existingArtifact;
   await writeText(target, args.body);
   const info = await stat(target);
   const digest = sha256(args.body);
@@ -137,9 +160,13 @@ export const copyArtifactFile = async (args: {
 }): Promise<Artifact> => {
   const relativePath = `${args.layer}/${args.targetFileName}`;
   const target = artifactPath(args.repoRoot, args.record, relativePath);
+  const digest = await sha256File(args.sourceFile);
+  const existingRecord = await readJson<RecordManifest>(recordManifestPath(args.repoRoot, args.record)).catch(() => null);
+  const existingArtifact = existingRecord?.artifacts.find((artifact) => artifact.path === relativePath);
+  const targetDigest = await sha256File(target).catch(() => null);
+  if (existingArtifact?.sha256 === digest && targetDigest === digest) return existingArtifact;
   await copyFileInto(args.sourceFile, target);
   const info = await stat(target);
-  const digest = await sha256File(target);
   const artifact: Artifact = {
     layer: args.layer,
     role: args.role,
@@ -197,6 +224,10 @@ export const buildCatalog = async (repoRoot: string, generatedAt = nowIso()): Pr
 
 export const writeCatalog = async (repoRoot: string, generatedAt = nowIso()): Promise<Catalog> => {
   const catalog = await buildCatalog(repoRoot, generatedAt);
+  const existing = await readJson<Catalog>(join(repoRoot, "catalog.json")).catch(() => null);
+  if (existing && JSON.stringify(existing.records) === JSON.stringify(catalog.records)) {
+    catalog.generated_at = existing.generated_at;
+  }
   await writeJson(join(repoRoot, "catalog.json"), catalog);
   return catalog;
 };

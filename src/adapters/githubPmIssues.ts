@@ -42,22 +42,28 @@ const discourseLinks = (issue: GhIssue): string[] =>
 
 const issueListViaGh = (limit: number): GhIssue[] => {
   const resolvedLimit = limit > 0 ? limit : 1000;
-  const list = spawnSync("gh", [
-    "issue",
-    "list",
-    "-R",
-    "ethereum/pm",
-    "--state",
-    "all",
-    "--limit",
-    String(resolvedLimit),
-    "--search",
-    "protocol-call",
-    "--json",
-    "number,title,body,state,url,updatedAt,labels,comments"
-  ], { encoding: "utf8", maxBuffer: 1024 * 1024 * 96 });
-  if (list.status !== 0) return [];
-  return JSON.parse(list.stdout) as GhIssue[];
+  let lastError = "unknown error";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const list = spawnSync("gh", [
+      "issue",
+      "list",
+      "-R",
+      "ethereum/pm",
+      "--state",
+      "all",
+      "--limit",
+      String(resolvedLimit),
+      "--search",
+      "protocol-call",
+      "--json",
+      "number,title,body,state,url,updatedAt,labels,comments"
+    ], { encoding: "utf8", maxBuffer: 1024 * 1024 * 512 });
+    if (list.status === 0) return JSON.parse(list.stdout) as GhIssue[];
+    lastError = list.stderr || list.error?.message || `gh exited with status ${list.status}`;
+    spawnSync("sleep", [String(attempt)], { encoding: "utf8" });
+  }
+  if (process.env.ENABLE_DUMMY_PIPELINE === "true") return [];
+  throw new Error(`gh issue list failed for ethereum/pm protocol-call issues after retries: ${lastError}`);
 };
 
 const fixtureIssues = (): GhIssue[] => [
@@ -75,7 +81,8 @@ const fixtureIssues = (): GhIssue[] => [
 
 export const ingestGithubPmIssues = async (repoRoot: string, limit = 8, generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const issues = issueListViaGh(limit);
-  const selected = issues.length ? issues : fixtureIssues();
+  const selected = issues.length ? issues : process.env.ENABLE_DUMMY_PIPELINE === "true" ? fixtureIssues() : [];
+  if (!selected.length) throw new Error("No ethereum/pm protocol-call issues were fetched; refusing to publish an empty GitHub PM issue corpus.");
   const records: RecordManifest[] = [];
   for (const issue of selected) {
     const identity = parseCallIdentity(issue);

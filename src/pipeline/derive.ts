@@ -15,6 +15,23 @@ const parseJsonArtifact = async <T>(repoRoot: string, record: RecordManifest, ro
   }
 };
 
+interface CallIntelligence {
+  schemaVersion: 1;
+  recordId: string;
+  title: string;
+  summary: string;
+  decisions: DecisionReadModel[];
+  agendaHash: string | null;
+  provenance: {
+    generatedAt: string;
+    generator: string;
+    inputArtifacts: Array<{ path: string; sha256: string }>;
+  };
+}
+
+const sameJson = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+
 export const derive = async (repoRoot: string, generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const records = await readAllRecords(repoRoot);
   const changed: RecordManifest[] = [];
@@ -42,6 +59,20 @@ export const derive = async (repoRoot: string, generatedAt = nowIso()): Promise<
           snippet: decision.decision
         }]
       }));
+      const outputPath = "derived/call-intelligence.json";
+      const inputArtifacts = record.artifacts
+        .filter((artifact) => artifact.path !== outputPath)
+        .map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }));
+      const agendaHash = agenda?.agendaMarkdown ? sha256(agenda.agendaMarkdown) : null;
+      const previous = await parseJsonArtifact<CallIntelligence>(repoRoot, record, "call-intelligence");
+      const stableGeneratedAt = previous &&
+        previous.title === record.title &&
+        previous.summary === summary &&
+        sameJson(previous.decisions, decisions) &&
+        previous.agendaHash === agendaHash &&
+        sameJson(previous.provenance.inputArtifacts, inputArtifacts)
+        ? previous.provenance.generatedAt
+        : generatedAt;
       record = upsertArtifact(record, await writeArtifactText({
         repoRoot,
         record,
@@ -54,16 +85,16 @@ export const derive = async (repoRoot: string, generatedAt = nowIso()): Promise<
           title: record.title,
           summary,
           decisions,
-          agendaHash: agenda?.agendaMarkdown ? sha256(agenda.agendaMarkdown) : null,
+          agendaHash,
           provenance: {
-            generatedAt,
+            generatedAt: stableGeneratedAt,
             generator: "forkcast-data/derive-call-intelligence",
-            inputArtifacts: record.artifacts.map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }))
+            inputArtifacts
           }
         }, null, 2)}\n`,
         source: "forkcast-data",
         generatedAt,
-        from: record.artifacts.map((artifact) => artifact.path)
+        from: inputArtifacts.map((artifact) => artifact.path)
       }));
       await writeRecord(repoRoot, record);
       changed.push(record);
@@ -87,7 +118,7 @@ export const derive = async (repoRoot: string, generatedAt = nowIso()): Promise<
           }, null, 2)}\n`,
           source: "forkcast-data",
           generatedAt,
-          from: record.artifacts.map((artifact) => artifact.path)
+          from: record.artifacts.filter((artifact) => artifact.path !== "derived/brief.json").map((artifact) => artifact.path)
         }));
         await writeRecord(repoRoot, record);
         changed.push(record);

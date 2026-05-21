@@ -25,6 +25,17 @@ const roleForResource = (resource: string): { layer: "raw" | "normalized" | "der
   return { layer: "derived", role: resource };
 };
 
+const displayDate = (date: string): string => {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(parsed.valueOf())) return date;
+  return parsed.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC"
+  });
+};
+
 export const ingestPmArtifacts = async (repoRoot: string, pmRoot: string, limit = 16, generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const manifestPath = join(pmRoot, ".github", "ACDbot", "artifacts", "manifest.json");
   if (!(await pathExists(manifestPath))) return [];
@@ -38,7 +49,7 @@ export const ingestPmArtifacts = async (repoRoot: string, pmRoot: string, limit 
       let record = newRecord({
         id: `${seriesSlug}/${canonicalDate}-${call.number}`,
         kind: "call",
-        title: `${series.name} #${call.number}`,
+        title: `${series.name} #${call.number}, ${displayDate(call.date)}`,
         generatedAt,
         sources: [
           { type: "pm", ref: call.path, url: `https://github.com/ethereum/pm/tree/master/.github/ACDbot/artifacts/${call.path}` }

@@ -42,4 +42,21 @@ describe("data pipeline", () => {
     const eip = await readJson<{ id: number }>(join(repo, "dist", "latest", "eips", "7702.json"));
     expect(eip.id).toBe(7702);
   });
+
+  it("keeps derived call intelligence stable across identical derives", async () => {
+    process.env.ENABLE_DUMMY_PIPELINE = "true";
+    const repo = await tempRepo();
+    await ingestDummy(repo, "2099-01-01T00:00:00.000Z");
+    await derive(repo, "2099-01-01T00:00:00.000Z");
+    const manifestPath = join(repo, "records", "call", "dummy-acde", "2099.01.01-1", "manifest.json");
+    const first = await readJson<{ artifacts: Array<{ path: string; sha256: string; from?: string[] }> }>(manifestPath);
+    const firstArtifact = first.artifacts.find((artifact) => artifact.path === "derived/call-intelligence.json");
+    expect(firstArtifact?.from).not.toContain("derived/call-intelligence.json");
+
+    await derive(repo, "2099-01-02T00:00:00.000Z");
+    const second = await readJson<{ artifacts: Array<{ path: string; sha256: string; from?: string[] }> }>(manifestPath);
+    const secondArtifact = second.artifacts.find((artifact) => artifact.path === "derived/call-intelligence.json");
+    expect(secondArtifact?.sha256).toBe(firstArtifact?.sha256);
+    expect(secondArtifact?.from).not.toContain("derived/call-intelligence.json");
+  });
 });
