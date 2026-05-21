@@ -6,7 +6,6 @@ import { ingestDummy } from "../adapters/dummy.js";
 import { ingestEips } from "../adapters/eips.js";
 import { ingestForkcast } from "../adapters/forkcast.js";
 import { ingestGithubPmIssues } from "../adapters/githubPmIssues.js";
-import { ingestPmArtifacts } from "../adapters/pm.js";
 import { ingestPmLean } from "../adapters/pmLean.js";
 import { nowIso } from "../lib/fs.js";
 
@@ -15,7 +14,6 @@ export interface IngestOptions {
   source: string;
   dummy: boolean;
   limit: number;
-  pmRoot: string;
   pmLeanOut: string;
   forkcastRoot: string;
   eipsRoot: string;
@@ -32,14 +30,12 @@ export const ingest = async (options: IngestOptions): Promise<RecordManifest[]> 
   if (isCanonical) {
     records.push(...await ingestEips(options.repoRoot, options.eipsRoot, options.forkcastRoot, generatedAt));
     records.push(...await ingestForkcast(options.repoRoot, options.forkcastRoot, generatedAt));
-    records.push(...await ingestPmArtifacts(options.repoRoot, options.pmRoot, options.limit, generatedAt));
     records.push(...await ingestPmLean(options.repoRoot, options.pmLeanOut, generatedAt));
     records.push(...await ingestGithubPmIssues(options.repoRoot, options.limit, generatedAt));
     records.push(...await ingestDiscordArchive(options.repoRoot, options.ethRndArchiveRoot, options.limit, generatedAt));
   }
   if (source === "all" || source === "eips") records.push(...await ingestEips(options.repoRoot, options.eipsRoot, options.forkcastRoot, generatedAt));
   if (source === "all" || source === "forkcast") records.push(...await ingestForkcast(options.repoRoot, options.forkcastRoot, generatedAt));
-  if (source === "all" || source === "pm") records.push(...await ingestPmArtifacts(options.repoRoot, options.pmRoot, options.limit, generatedAt));
   if (source === "all" || source === "pm-lean") records.push(...await ingestPmLean(options.repoRoot, options.pmLeanOut, generatedAt));
   if (source === "all" || source === "github-pm-issues" || source === "fixture") records.push(...await ingestGithubPmIssues(options.repoRoot, options.limit, generatedAt));
   if (source === "all" || source === "discord-archive") records.push(...await ingestDiscordArchive(options.repoRoot, options.ethRndArchiveRoot, options.limit, generatedAt));

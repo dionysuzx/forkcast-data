@@ -47,6 +47,7 @@ export interface SourceRef {
     | "forkcast"
     | "eips"
     | "pm"
+    | "pm-legacy"
     | "pm-lean"
     | "fixture-live"
     | "github-pm-issues"

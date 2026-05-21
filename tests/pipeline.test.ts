@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ingestDummy } from "../src/adapters/dummy.js";
+import { ingestPmLegacyArchive } from "../src/adapters/pmLegacy.js";
 import { derive } from "../src/pipeline/derive.js";
 import { buildSnapshot } from "../src/pipeline/snapshot.js";
 import { buildSearchIndex, searchDocuments } from "../src/pipeline/search.js";
@@ -108,5 +109,22 @@ describe("data pipeline", () => {
     expect(hit?.id).toBe("acde/2099.01.02-2");
     await compactDist(join(repo, "dist"));
     await expect(readJson(join(repo, "dist", "snapshots", manifest.snapshot_id, "calls", "acde", "2.json"))).resolves.toMatchObject({ id: "acde/2099.01.02-2" });
+  });
+
+  it("migrates PM legacy archive files into searchable source-close topic records", async () => {
+    const repo = await tempRepo();
+    const pm = await mkdtemp(join(tmpdir(), "forkcast-pm-legacy-test-"));
+    dirs.push(pm);
+    await mkdir(join(pm, "AllCoreDevs-EL-Meetings"), { recursive: true });
+    await writeFile(join(pm, "AllCoreDevs-EL-Meetings", "Meeting 999.md"), "# ACDE 999\n\nGlamsterdam history expiry agenda item.\n");
+
+    const records = await ingestPmLegacyArchive(repo, pm, 0, "2099-01-03T00:00:00.000Z");
+    expect(records.some((record) => record.sources.some((source) => source.type === "pm-legacy"))).toBe(true);
+    expect((await validate(repo)).ok).toBe(true);
+    await buildSnapshot(repo, join(repo, "dist"), "2099-01-03T00:00:00.000Z");
+    const docs = await buildSearchIndex(join(repo, "dist", "latest"));
+    const hit = searchDocuments(docs, "Glamsterdam history expiry", 3)[0];
+    expect(hit?.title).toContain("AllCoreDevs-EL-Meetings");
+    expect(hit?.body).toContain("history expiry");
   });
 });

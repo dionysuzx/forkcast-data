@@ -9,6 +9,7 @@ import { runEvals } from "./pipeline/evals.js";
 import { compactDist } from "./pipeline/compactDist.js";
 import { buildSite } from "./site/build.js";
 import { nowIso } from "./lib/fs.js";
+import { ingestPmLegacyArchive } from "./adapters/pmLegacy.js";
 
 type Args = Record<string, string | boolean>;
 
@@ -43,7 +44,6 @@ const ingestOptions = (args: Args) => ({
   source: str(args, "source", "all"),
   dummy: bool(args, "dummy", process.env.ENABLE_DUMMY_PIPELINE === "true" && str(args, "source", "") === "dummy"),
   limit: num(args, "limit", 12),
-  pmRoot: str(args, "pm-root", process.env.PM_ROOT ?? "/Users/lucy/fun/pm"),
   pmLeanOut: str(args, "pm-lean-out", process.env.PM_LEAN_OUT ?? "/Users/lucy/fun/pm-lean/out"),
   forkcastRoot: str(args, "forkcast-root", process.env.FORKCAST_ROOT ?? "/Users/lucy/fun/forkcast"),
   eipsRoot: str(args, "eips-root", process.env.EIPS_ROOT ?? "/Users/lucy/fun/acd-process/EIPs"),
@@ -52,9 +52,10 @@ const ingestOptions = (args: Args) => ({
 
 const help = (): void => {
   console.log(`forkcast-data commands:
-  ingest --source canonical|all|eips|forkcast|pm|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
+  ingest --source canonical|all|eips|forkcast|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
   derive
   backfill
+  migrate-pm-legacy --pm-root /path/to/ethereum/pm [--limit 0]
   validate
   build-snapshot
   build-search
@@ -84,6 +85,16 @@ const main = async (): Promise<void> => {
       const records = await ingest(ingestOptions(args));
       const derived = await derive(process.cwd());
       console.log(`Backfilled ${records.length} records and derived ${derived.length}`);
+      break;
+    }
+    case "migrate-pm-legacy": {
+      const records = await ingestPmLegacyArchive(
+        process.cwd(),
+        str(args, "pm-root", process.env.PM_ROOT ?? "/Users/lucy/fun/pm"),
+        num(args, "limit", 0),
+        nowIso()
+      );
+      console.log(`Migrated ${records.length} PM legacy archive records`);
       break;
     }
     case "validate": {

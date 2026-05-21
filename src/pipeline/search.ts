@@ -210,9 +210,18 @@ export const buildSearchIndex = async (latestRoot: string): Promise<SearchDocume
       tags: ["discord", "thread", thread.channel ?? "", thread.date ?? ""].filter(Boolean)
     });
   }
-  const topics = await readJson<Array<{ id: string; title: string; canonical_json_url: string; citations: SearchDocument["citations"] }>>(join(latestRoot, "topics", "index.json")).catch(() => []);
+  const topics = await readJson<Array<{ id: string; title: string; summary?: string; canonical_json_url: string; citations: SearchDocument["citations"] }>>(join(latestRoot, "topics", "index.json")).catch(() => []);
   for (const topic of topics) {
-    docs.push({ id: topic.id, kind: "topic", title: topic.title, body: topic.title, url: topic.canonical_json_url, citations: topic.citations, tags: ["ethereum-magicians", "topic"] });
+    const isPmLegacy = topic.id.startsWith("pm-legacy/");
+    docs.push({
+      id: topic.id,
+      kind: "topic",
+      title: topic.title,
+      body: topic.summary ?? topic.title,
+      url: topic.canonical_json_url,
+      citations: topic.citations,
+      tags: [isPmLegacy ? "pm-legacy" : "ethereum-magicians", "topic"]
+    });
   }
   for (const dir of ["upgrades", "devnets"]) {
     const root = join(latestRoot, dir);

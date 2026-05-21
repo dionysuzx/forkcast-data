@@ -24,7 +24,6 @@ MCP, search, admin, API functions, and the Netlify site are serving layers over 
 ```bash
 npm install
 npm run backfill -- --source canonical --limit 0 \
-  --pm-root /Users/lucy/fun/pm \
   --forkcast-root /Users/lucy/fun/forkcast \
   --eips-root /Users/lucy/fun/acd-process/EIPs \
   --eth-rnd-archive-root /Users/lucy/fun/ro-repos/eth-rnd-archive
@@ -39,11 +38,17 @@ npm run mcp
 ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ```
 
+One-time PM archive migration is intentionally separate from the canonical loop:
+
+```bash
+npm run migrate-pm-legacy -- --pm-root /Users/lucy/fun/pm --limit 0
+```
+
 ## Sources
 
 - current Forkcast data and curated records
 - official `ethereum/EIPs` markdown for the full EIP corpus, enriched by Forkcast where available
-- upstream PM artifacts
+- migrated PM legacy/archive files, stored as canonical `pm-legacy` records in this repo
 - optional `pm-lean` output
 - `ethereum/pm` GitHub protocol-call issues, including agenda bodies, labels, comments, and linked resources
 - `ethereum/eth-rnd-archive` Discord archive day/channel partitions
@@ -52,7 +57,9 @@ ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 
 ## Alive Automation
 
-The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; and publishes only when canonical files changed or `force_rebuild=true`.
+The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; and publishes only when canonical files changed or `force_rebuild=true`.
+
+The pipeline no longer checks out or ingests live `ethereum/pm` repository contents. Historical PM folders are migrated into `forkcast-data` once and remain provenance-rich records here. New PM-like artifacts should flow through `pm-lean` feed artifacts or direct `forkcast-data` records instead of automated commits to `ethereum/pm` master.
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 

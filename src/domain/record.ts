@@ -161,6 +161,7 @@ export const copyArtifactFile = async (args: {
   role: string;
   targetFileName: string;
   source: string;
+  sourcePath?: string;
   sourceUrl?: string;
   generatedAt: string;
 }): Promise<Artifact> => {
@@ -183,7 +184,7 @@ export const copyArtifactFile = async (args: {
     source: args.source,
     provenance: {
       source: args.source,
-      sourcePath: args.sourceFile,
+      sourcePath: args.sourcePath ?? args.sourceFile,
       sourceHash: digest,
       generatedAt: args.generatedAt,
       generator: GENERATOR_NAME,

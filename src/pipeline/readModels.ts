@@ -122,12 +122,14 @@ export const buildReadModels = async (repoRoot: string, outRoot: string): Promis
     id: string;
     title: string;
     kind: string;
+    summary: string;
     canonical_json_url: string;
     citations: Citation[];
   }> = [];
   for (const record of records.filter((candidate) => candidate.kind === "thread" || candidate.kind === "topic")) {
     const messagesArtifact = record.artifacts.find((entry) => entry.role === "messages");
-    const data = messagesArtifact ? JSON.parse(await readArtifactText(repoRoot, record, messagesArtifact)) as Record<string, unknown> : {};
+    const textArtifact = messagesArtifact ?? record.artifacts.find((entry) => entry.role === "source-text");
+    const data = textArtifact ? JSON.parse(await readArtifactText(repoRoot, record, textArtifact)) as Record<string, unknown> : {};
     const source = record.sources[0];
     const canonical = `/latest/${record.kind}s/${record.id.replaceAll("/", "__")}.json`;
     const model = {
@@ -139,12 +141,12 @@ export const buildReadModels = async (repoRoot: string, outRoot: string): Promis
       message_count: typeof record.metadata?.messageCount === "number" ? record.metadata.messageCount : undefined,
       summary: compact(String(data.searchText ?? record.metadata?.note ?? source?.url ?? record.title), 1000),
       canonical_json_url: canonical,
-      citations: [citationFor(record, messagesArtifact?.path ?? "manifest.json", record.title)]
+      citations: [citationFor(record, textArtifact?.path ?? "manifest.json", record.title)]
     };
     await writeJson(join(outRoot, `${record.kind}s`, `${record.id.replaceAll("/", "__")}.json`), model);
     readModels.push(`${record.kind}s/${record.id.replaceAll("/", "__")}.json`);
     if (record.kind === "thread") threadModels.push(model);
-    else topicModels.push({ id: model.id, title: model.title, kind: model.kind, canonical_json_url: model.canonical_json_url, citations: model.citations });
+    else topicModels.push({ id: model.id, title: model.title, kind: model.kind, summary: model.summary, canonical_json_url: model.canonical_json_url, citations: model.citations });
   }
   await writeJson(join(outRoot, "threads", "index.json"), threadModels.sort((a, b) => String(b.date).localeCompare(String(a.date))));
   await writeJson(join(outRoot, "topics", "index.json"), topicModels.sort((a, b) => a.title.localeCompare(b.title)));
