@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/Zilkworm execution witness checks",
+  "date": "2026-03-27",
+  "messageCount": 37,
+  "sourceHash": "9cf41eef9022bb07fe45f6a46e34a31d3c07a62f041771d4bc6dd32d3da8f4e3",
+  "searchText": "<@976542403269910539> can continue here! Thanks <@427491045308235776> I will put my thoughts here soon Basically four things - Does anybody even fully check it inside zkVM? - The pre-check would be very expensive - Pre-check is a stronger guarantee from state_root_a -> state_root_a_plus_1 - A bad witness can also come with a bad block header (incorrect root), so is it worth it? Since post check wont match good blocks. A world with malicious block builders + malicious witness generators and a well-crafted transaction that can take advantage of the \"skip validating read-only\" would suffer. More analysis is needed on all 4 of these points - Yes, checking that the state being read is correct is needed. I’m not aware of any guest programs that do not check this. - Yes, you need to check MPT proofs for account and storage reads - Yep, this is what we are proving, ie that there is a correct state transition without any state - Not sure I understand, when any type of node (whether stateful or stateless) validates a block, they need to have a source of truth. A new block with mpt proofs is checked against this source of truth. This is usually just the block hash and state root of the previous block To extend more on the logic behind the necessity of the guest program validating the execution witness. If this does not happen, a block builder can easily create a proof that 95% attestations levels. Indirectly, zkCL attestors are just trusting the block builder. In a reality with single slot finality it basically means a wrong block can be finalized. In 3SF, just means if the next 2 blocks are from the same block builder or colluded ones, then wrong blocks can be easily finalized. Inherent assumption being block builders are proving? I do agree with the premise of stronger security, but forcing block builders to be provers isn't something given (this is related and unrelated) There is no assumption here. If the prover is the builder or not, still holds what I mentioned that whoever is proving is still having the liberty to make 95% of attestations in an invalid block From Telegram chat with <@427491045308235776> > For completeness you can view it being done partially in rsp here (didn't want to grep go through their code to check where the other part is done): https://github.com/succinctlabs/rsp/blob/6275f932bafb26486a08cb67d8b1f124fabcf708/crates/mpt/src/execution_witness.rs#L85 > > and for reth: https://github.com/paradigmxyz/stateless/blob/ed189a51931e8589102f3139d48fdbb3bbe4c1f7/crates/tries/src/zeth.rs#L126 I cannot see validate_storage_tries being called from the guest program, from these URL alone. Again the point wasn't if there is a code that validates this somewhere, i need to know if this is being done in the ELF today. It's not hard to find or make code for this I don't understand: what's attestation rate got to do with anything here? Whether one person is wrong or 95% of people are wrong, it's still wrong. My argument isn't against the fact that this can be done, but the fact that if prover is malicious it might as well feed an incorrect state-root, not just incorrect witness - the guest has no way to know the previous root belongs to block N of actual Ethereum chain. Now if you convince the network of an incorrect previous root somehow, as you seem powerful enough to do quite a bit more than that, checking the witness won't help > My argument isn't against the fact that this can be done, but the fact that if prover is malicious it might as well feed an incorrect state-root, not just incorrect witness - the guest has no way to know the previous root belongs to block N of actual Ethereum chain. The previous block was proven, so the proposed block can't invent the parent state root - Expensive: Now pre and post check being expensive: We need to find a way to do this separately, outside of zkVM, the current keccak is astronomical. For zilkworm itself, we need some design changes to appropriately handle issues related to possible state spoofing. We pre-index to plain-state, we may need to re-think the way EVM is executed and so, just using the trie or witness directly to do all of pre-check, post-check, execution is not a good solution from performance standpoint. - My arguments in favour of not including pre-check is that most of the nodes would still be full nodes and provers relying on full nodes (with actual full MPT validation). So, a good MPT root can never be reached at with a bad ExecutionWitness no matter what. Your argument is that a bad state root for the current block can be popularized enough and in a world without full nodes will pass as well. Does not mean I am saying you are wrong, I am asking if you understand what i am saying. So the CL has record of all past state roots? For this point of discussion, it doesn't require to have all past state roots. The CL receives a new beacon block which build the chain on top of a previous becon block that was already validated. The proposed block has an execution paylaod `parent_hash` that links the \"state of the world\" to that parent block -- a block builder can't in a block proposal modify the claim of the parent block about this fact. The proof of the proposed block only has the assumption that the parent block is correct. So, the \"state of the world\" before this proposed block is executed is out of control of the block builder/prover if adversary. To try to forge the pre-state `state_root`, this implies the proposed block would have a different `parent_hash`... thus that block doesn't build on top of the expected previous one (prob that theoretical parent' doesn't even exist since was invented out of thin air) > My arguments in favour of not including pre-check is that most of the nodes would still be full nodes... I don't think this is the goal of doing block proving. The goal is that you can rely on a proof for checking an EL block validity without having to run a EL full node. If you still have to run a full EL node, then the proof might help only to \"offload\" the computational part of the block execution, but then you'll have to still check the execution witness out of the proof thus accesing a big database and prob be bottlenecked by it. Yeah one can't rely on that beyond a single transition. And that transition might be a fork so there may be several competing proofs for a single block. But correctness overall takes priority, so better to check the witness than to not. This is a stronger and more complete guarantee of the transition. Also the possibility to arrive at 2 different state roots with the same parent block is a flaw. I am mostly not convinced of other points mentioned in the thread in this regard. > Also the possibility to arrive at 2 different state roots with the same parent block is a flaw. This is the main argument :), all the rest are just touching on consequences of that bad situation that not checking the execution witness would lead to. <@976542403269910539>, you might be interested in looking at some analysis I did some weeks ago reg the cost of the guest program for Ethrex and Reth. https://hackmd.io/@jsign/eth-zisk-air-cost-reth-ethrex From there you can check the pre-state and post-state root cost relative to the whole proving block cost. (Working now in updating this for latest Zisk v0.16.1 and a newer libssz lib) Numbers are looking a little fishy to me but that may just be completely unrelated to zilkworm. (not that i have dived deeper into reth) Thanks for sharing Keccak and memory might be dirt cheap on Zisk, only explanantion These are using Zisk keccak precompile And in Zisk v0.16.0 the keccak precompile looks like it got even faster -- I'll share the new HackMD doc as soon as I can finish with the runs. Anywho, with keccak and memory as expensive as it is in SP1 Hypercube, it will take time to re-design Zilkworm (again) to do the whole thing with small footprint increase. For now, no pre-validation, only post-validation. What do you mean by \"redesign\"? Shouldn't do pre-state validation be extra logic you should add to the codebase? The check is being done, there are different ways to do it but it’s definitely being done. Even if rsp was not doing it, it doesn’t mean that zilkworm should not do it (rsp is not even a client that will be shipped on mainnet) See the reth codepath for where it is definitely being done Yeah this is just extra logic that checks the state being read it correct by validating merkle proofs Seems <@425274498732916736> was looking into this already here https://discord.com/channels/595666850260713488/1481587270367842396/1481633301021065317 Okay you guys are mixing different things I am not so sure reth's checking, i can see it's deriving. I may challenge this if I cared, as you mentioned. For zilkworm, if you read above, under an assumption of a bad post-state root being a real problem, it becomes necessary to include pre-check. This can only be alleviated if the proof consumer had a way to not be affected by this problem. The fact that a proof consumer may think the post-root is an authority and not just a verification this becomes a problem for sure. It is a stricter guarantee and not a necessary one, i can see you don't see that yet, or maybe you do. It matters not as I mention here again, and previously. If A -> B is the correct transition with correct execution witness it will be that with zilkworm too. A -> B with invalid witness is an impossibility (of course). But, The post state root with a bad withness would be B' instead of B. Now if there are nodes on the network that would definitely penalize for this behaviour to both provers and verifiers, it becomes not a problem. But i have moved on from that aspect. For zilkworm this check would have to be included. The problem highlighted here is about incomplete or wrong ExecutionWitness leading to state read misses or incorrect reads leading to problems on a valid block with an honest state root + receipts root. It's a problem for the node that is generating the ExecutionWitness. This problem would still exist with pre-check, again, you may see that or maybe you can't. Both need to be fixed, pre-check is unrelated but important, fixing this is unrelated but important as well. Okay the designers and authors reserve the right to re-design their software as needs change. Re-design here is referring to the re-design of handling the input data and further processing, details of which shouldn't matter to the consumer (that includes you, here). Now there are different ways to handle a problem and I am trying to find an optimal way that's secure but doesn't perform much worse. How to implement it is up to me. Now when you throw more complexity, naturally a re-design may not neutralize all performance regressions, but one must try. Of course all problems have naiive solutions as well. To be clear, it was just a question. You're free to do whatever you prefer in your codebase -- just trying to dig deeper if worth sharing any of my experience by reading other guest programs. :)",
+  "excerpts": [
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "",
+      "createdAt": "2026-03-27T11:12:05.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@976542403269910539> can continue here!",
+      "createdAt": "2026-03-27T11:12:06.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Thanks <@427491045308235776> I will put my thoughts here soon",
+      "createdAt": "2026-03-27T11:13:55.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Basically four things\n- Does anybody even fully check it inside zkVM?\n- The pre-check would be very expensive\n- Pre-check is a stronger guarantee from state_root_a -> state_root_a_plus_1\n- A bad witness can also come with a bad block header (incorrect root), so is it worth it? Since post check wont match good blocks. A world with malicious block builders + malicious witness generators and a well-crafted transaction that can take advantage of the \"skip validating read-only\" would suffer.\n\nMore analysis is needed on all 4 of these points",
+      "createdAt": "2026-03-27T11:17:14.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "- Yes, checking that the state being read is correct is needed. I’m not aware of any guest programs that do not check this.\n\n- Yes, you need to check MPT proofs for account and storage reads \n\n- Yep, this is what we are proving, ie that there is a correct state transition without any state\n\n-  Not sure I understand, when any type of node (whether stateful or stateless) validates a block, they need to have a source of truth. A new block with mpt proofs is checked against this source of truth. This is usually just the block hash and state root of the previous block",
+      "createdAt": "2026-03-27T11:37:09.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "To extend more on the logic behind the necessity of the guest program validating the execution witness.\n\nIf this does not happen, a block builder can easily create a proof that 95% attestations levels. Indirectly, zkCL attestors are just trusting the block builder.\n\nIn a reality with single slot finality it basically means a wrong block can be finalized. In 3SF, just means if the next 2 blocks are from the same block builder or colluded ones, then wrong blocks can be easily finalized.",
+      "createdAt": "2026-03-27T11:49:54.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Inherent assumption being block builders are proving?\n\nI do agree with the premise of stronger security, but forcing block builders to be provers isn't something given (this is related and unrelated)",
+      "createdAt": "2026-03-27T16:16:24.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "There is no assumption here. If the prover is the builder or not, still holds what I mentioned that whoever is proving is still having the liberty to make 95% of attestations in an invalid block",
+      "createdAt": "2026-03-27T16:22:52.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "From Telegram chat with <@427491045308235776> \n\n\n> For completeness you can view it being done partially in rsp here (didn't want to grep go through their code to check where the other part is done): https://github.com/succinctlabs/rsp/blob/6275f932bafb26486a08cb67d8b1f124fabcf708/crates/mpt/src/execution_witness.rs#L85\n> \n> and for reth: https://github.com/paradigmxyz/stateless/blob/ed189a51931e8589102f3139d48fdbb3bbe4c1f7/crates/tries/src/zeth.rs#L126\nI cannot see validate_storage_tries being called from the guest program, from these URL alone. Again the point wasn't if there is a code that validates this somewhere, i need to know if this is being done in the ELF today. It's not hard to find or make code for this",
+      "createdAt": "2026-03-27T16:24:55.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I don't understand: what's attestation rate got to do with anything here? Whether one person is wrong or 95% of people are wrong, it's still wrong.\n\nMy argument isn't against the fact that this can be done, but the fact that if prover is malicious it might as well feed an incorrect state-root, not just incorrect witness - the guest has no way to know the previous root belongs to block N of actual Ethereum chain.\n\nNow if you convince the network of an incorrect previous root somehow, as you seem powerful enough to do quite a bit more than that, checking the witness won't help",
+      "createdAt": "2026-03-27T16:28:55.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> My argument isn't against the fact that this can be done, but the fact that if prover is malicious it might as well feed an incorrect state-root, not just incorrect witness - the guest has no way to know the previous root belongs to block N of actual Ethereum chain.\nThe previous block was proven, so the proposed block can't invent the parent state root",
+      "createdAt": "2026-03-27T16:31:25.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "- Expensive: Now pre and post check being expensive: We need to find a way to do this separately, outside of zkVM, the current keccak is astronomical.\nFor zilkworm itself, we need some design changes to appropriately handle issues related to possible state spoofing. We pre-index to plain-state, we may need to re-think the way EVM is executed and so, just using the trie or witness directly to do all of pre-check, post-check, execution is not a good solution from performance standpoint.\n- My arguments in favour of not including pre-check is that most of the nodes would still be full nodes and provers relying on full nodes (with actual full MPT validation). So, a good MPT root can never be reached at with a bad ExecutionWitness no matter what. Your argument is that a bad state root for the current block can be popularized enough and in a world without full nodes will pass as well. Does not mean I am saying you are wrong, I am asking if you understand what i am saying.",
+      "createdAt": "2026-03-27T16:36:58.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So the CL has record of all past state roots?",
+      "createdAt": "2026-03-27T16:38:41.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "For this point of discussion, it doesn't require to have all past state roots. The CL receives a new beacon block which build the chain on top of a previous becon block that was already validated. \nThe proposed block has an execution paylaod `parent_hash` that links the \"state of the world\" to that parent block -- a block builder can't in a block proposal modify the claim of the parent block about this fact.",
+      "createdAt": "2026-03-27T16:47:17.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The proof of the proposed block only has the assumption that the parent block is correct. So, the \"state of the world\" before this proposed block is executed is out of control of the block builder/prover if adversary.",
+      "createdAt": "2026-03-27T16:48:21.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "To try to forge the pre-state `state_root`, this implies the proposed block would have a different `parent_hash`... thus that block doesn't build on top of the expected previous one (prob that theoretical parent' doesn't even exist since was invented out of thin air)",
+      "createdAt": "2026-03-27T16:50:39.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> My arguments in favour of not including pre-check is that most of the nodes would still be full nodes...\nI don't think this is the goal of doing block proving. The goal is that you can rely on a proof for checking an EL block validity without having to run a EL full node.",
+      "createdAt": "2026-03-27T16:55:02.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If you still have to run a full EL node, then the proof might help only to \"offload\" the computational part of the block execution, but then you'll have to still check the execution witness out of the proof thus accesing a big database and prob be bottlenecked by it.",
+      "createdAt": "2026-03-27T16:56:47.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah one can't rely on that beyond a single transition. And that transition might be a fork so there may be several competing proofs for a single block.",
+      "createdAt": "2026-03-27T17:15:56.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But correctness overall takes priority, so better to check the witness than to not. This is a stronger and more complete guarantee of the transition.\n\nAlso the possibility to arrive at 2 different state roots with the same parent block is a flaw.\n\nI am mostly not convinced of other points mentioned in the thread in this regard.",
+      "createdAt": "2026-03-27T17:19:26.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> Also the possibility to arrive at 2 different state roots with the same parent block is a flaw.\nThis is the main argument :), all the rest are just touching on consequences of that bad situation that not checking the execution witness would lead to.",
+      "createdAt": "2026-03-27T17:22:04.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@976542403269910539>, you might be interested in looking at some analysis I did some weeks ago reg the cost of the guest program for Ethrex and Reth. https://hackmd.io/@jsign/eth-zisk-air-cost-reth-ethrex\nFrom there you can check the pre-state and post-state root cost relative to the whole proving block cost. (Working now in updating this for latest Zisk v0.16.1 and a newer libssz lib)",
+      "createdAt": "2026-03-27T17:24:28.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Numbers are looking a little fishy to me but that may just be completely unrelated to zilkworm. (not that i have dived deeper into reth) Thanks for sharing",
+      "createdAt": "2026-03-27T17:32:57.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Keccak and memory might be dirt cheap on Zisk, only explanantion",
+      "createdAt": "2026-03-27T17:33:58.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "These are using Zisk keccak precompile",
+      "createdAt": "2026-03-27T17:34:44.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "And in Zisk v0.16.0 the keccak precompile looks like it got even faster -- I'll share the new HackMD doc as soon as I can finish with the runs.",
+      "createdAt": "2026-03-27T17:36:05.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Anywho, with keccak and memory as expensive as it is in SP1 Hypercube, it will take time to re-design Zilkworm (again) to do the whole thing with small footprint increase. For now, no pre-validation, only post-validation.",
+      "createdAt": "2026-03-27T17:40:30.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "What do you mean by \"redesign\"? Shouldn't do pre-state validation be extra logic you should add to the codebase?",
+      "createdAt": "2026-03-27T17:42:48.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The check is being done, there are different ways to do it but it’s definitely being done.\n\nEven if rsp was not doing it, it doesn’t mean that zilkworm should not do it (rsp is not even a client that will be shipped on mainnet)",
+      "createdAt": "2026-03-27T18:07:54.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "See the reth codepath for where it is definitely being done",
+      "createdAt": "2026-03-27T18:08:05.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah this is just extra logic that checks the state being read it correct by validating merkle proofs",
+      "createdAt": "2026-03-27T18:10:45.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Seems <@425274498732916736> was looking into this already here https://discord.com/channels/595666850260713488/1481587270367842396/1481633301021065317",
+      "createdAt": "2026-03-27T18:12:21.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Okay you guys are mixing different things",
+      "createdAt": "2026-03-27T18:36:43.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I am not so sure reth's checking, i can see it's deriving. I may challenge this if I cared, as you mentioned.\n\nFor zilkworm, if you read above, under an assumption of a bad post-state root being a real problem, it becomes necessary to include pre-check. This can only be alleviated if the proof consumer had a way to not be affected by this problem.\n\nThe fact that a proof consumer may think the post-root is an authority and not just a verification this becomes a problem for sure. It is a stricter guarantee and not a necessary one, i can see you don't see that yet, or maybe you do. It matters not as I mention here again, and previously.\n\nIf A -> B is the correct transition with correct execution witness it will be that with zilkworm too. A -> B with invalid witness is an impossibility (of course). \n\nBut,\n\nThe post state root with a bad withness would be B' instead of B. Now if there are nodes on the network that would definitely penalize for this behaviour to both provers and verifiers, it becomes not a problem. \n\nBut i have moved on from that aspect. For zilkworm this check would have to be included.",
+      "createdAt": "2026-03-27T18:45:18.659000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The problem highlighted here is about incomplete or wrong ExecutionWitness leading to state read misses or incorrect reads leading to problems on a valid block with an honest state root + receipts root. It's a problem for the node that is generating the ExecutionWitness. This problem would still exist with pre-check, again, you may see that or maybe you can't. \n\nBoth need to be fixed, pre-check is unrelated but important, fixing this is unrelated but important as well.",
+      "createdAt": "2026-03-27T18:48:22.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "somnergy",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Okay the designers and authors reserve the right to re-design their software as needs change. Re-design here is referring to the re-design of handling the input data and further processing, details of which shouldn't matter to the consumer (that includes you, here).\n\nNow there are different ways to handle a problem and I am trying to find an optimal way that's secure but doesn't perform much worse. How to implement it is up to me.\n\nNow when you throw more complexity, naturally a re-design may not neutralize all performance regressions, but one must try.\n\nOf course all problems have naiive solutions as well.",
+      "createdAt": "2026-03-27T18:51:44.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "To be clear, it was just a question. You're free to do whatever you prefer in your codebase -- just trying to dig deeper if worth sharing any of my experience by reading other guest programs. :)",
+      "createdAt": "2026-03-27T19:18:13.016000+00:00",
+      "attachments": []
+    }
+  ]
+}

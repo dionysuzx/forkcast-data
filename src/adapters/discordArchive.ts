@@ -34,15 +34,18 @@ export const ingestDiscordArchive = async (repoRoot: string, archiveRoot: string
   const records: RecordManifest[] = [];
   for (const file of selectedFiles) {
     const rel = file.slice(archiveRoot.length + 1);
-    const [channel = "unknown", dateFile = "unknown.json"] = rel.split("/");
+    const relParts = rel.split("/");
+    const dateFile = relParts.at(-1) ?? "unknown.json";
+    const channel = relParts.slice(0, -1).join("/") || "unknown";
     const date = dateFile.replace(/\.json$/, "");
     const messages = await readJson<DiscordMessage[]>(file);
     const normalized = messages.map(normalizedMessage);
     const searchText = compactText(normalized.map((message) => message.content).join(" "), 12000);
     const sourceText = await import("node:fs/promises").then((fs) => fs.readFile(file, "utf8"));
     const sourceHash = sha256(sourceText);
+    const channelPath = channel.split("/").map((part) => slugify(part) || "unknown").join("/");
     let record = newRecord({
-      id: `discord-archive/${slugify(channel)}/${date}`,
+      id: `discord-archive/${channelPath}/${date}`,
       kind: "thread",
       title: `${channel} Discord archive ${date}`,
       generatedAt,

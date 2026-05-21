@@ -1,0 +1,682 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/engine_newPayloadWithWitness",
+  "date": "2026-02-09",
+  "messageCount": 84,
+  "sourceHash": "3f3a600f8ccde8342f5ad7b52311b6caea39a833486d3b49951e04047d63bc18",
+  "searchText": "The benchmark report is ready; https://hackmd.io/nz8dncoPRY6btL_uOQmWpQ#Total-Round-Trip-Time Raw log: https://github.com/developeruche/witness-bench/blob/main/RAW_REPORT.md Report shows latency improvement whe `debug_executionWitness` is paired with `engine_newPayload` <@944007601400741989> can you inform us of what transport mechanism you used here? Was this http? Can you evaluate performance with ipc? Great work by the way Yeah… http Sure, I can evaluate over IPC Awesome, thanks! My takeaway is that the transport and serialization overhead is huge for large witnesses. I think we want to bypass transport entirely. I think we will need to have both the prover and the node on the same server. Using either a fast ssd drive or ram (memfd) to pass the witness from the node to the prover. cc: <@774033563732541451> <@466102668138512394> <@427491045308235776> I think makes sense. We can use files at the \"software layer\" (i.e. CL), and leave to the node operator to optimize further using memfd if everything runs in the same machine (which prob is a good idea in general). Thanks for you analysis! Did you have the chance to experiment with doing some ssz serialization to experiment how to see how changes a bit the JSON-overhead? > I think we will need to have both the prover and the node on the same server. This would be non-ideal I think because then the prover would have a stateful component. Perhaps this is where we eventually land at though after more investigation. For further investigation, I think it may make sense to play around with different serializations/compression formats. Another route is pricing out these worse case witnesses (by having the witness size be a requirement instead of a byproduct) and or not fully committing until we verify what it looks like with binary trees What does the /Overhead part mean in \"Transport / Overhead\" ? If possible would be great if you had more detail on whats happening here 🙏 (just trying to figure out exactly what and why its so high) <@774033563732541451> I haven't tested SSZ yet since I was sticking to the current Engine API JSON-RPC specs, but you're right sending 500MB of hex-encoded bytes is definitely a worst-case scenario for transport ovrhead. Could explain more on what you mean me here? with what I have in my head, it would entail changing the transport layer data format of the node to SSZ which is quite a heavy lift for a PoC 🙂 Ah, I was thinking on maybe some potential benefit of a currently proposed EIP to use SSZ at the EL. I was thinking more like just compraing raw JSON vs SSZ serialization maybe isolated -- not sure it is worth redoing the whole engineAPI to use SSZ for this since hta sounds quite a lot of work. got you! this would be really nice IMO, it cuts down data size by 50% > Another route is pricing out these worse case witnesses (by having the witness size be a requirement instead of a byproduct) and or not fully committing until we verify what it looks like with binary trees Yeah, actually 500MiB will be small compared with upcoming gas limit increases. ha These worst cases should become better with BT due to bytecode chunking -- this will be a must to solve the killers coming from the bytecode attacks that generate those cases, so makes senes to maybe not overfit trying to deal with those Some extra thoguhts about the: \"files API interface\". Might be good to see what some CL-core-devs think about this.. feels like a new \"interface type\" that is quite weirdish compared with what exist today in their impls? Sophisticated builders prob will build their own pipeline ofc The \"transport/overhead\" here is essentially how long it takes for the witness data to move from the EL to the CL via the EngineAPI. This was the way it was calculated; `Total_Round_Trip_Latency (CL Side) - (Block_Execution + Witness_Generation + JSON_Serialization (EL Side))` > This would be non-ideal I think because then the prover would have a stateful component. Perhaps this is where we eventually land at though after more investigation. Could you elaborate on this a little more, please? I don't follow > Some extra thoguhts about the: \"files API interface\". Might be good to see what some CL-core-devs think about this.. feels like a new \"interface type\" that is quite weirdish compared with what exist today in their impls? <@774033563732541451> Does the CL layer have to be involved here? The expectation would be that the prover has access to the witnesses required to execute the block / new payload request that the CL requests via the api. Currently we can send a prover the initial witness + program to prove, so they don't hold any state and are not aware of \"Ethereum state\" essentially Yep that makes sense but it looked like transport was a pretty considerable overhead from the benchmarks. I 'd like to see if ipc improves things Ah okay I see -- might be good to know exactly what is taking up the majority of the time http is likely a significant overhead ipc will improve it somewhat serialization format reduces data size I also wonder how compressible it is on average good point, regarding compression. <@944007601400741989> was this benchmark performed on localhost? i.e. both services on the same machine? This would make sense -- it would be good to get the exact measurements so I can extrapolate to what it means in terms of isolated components (haven't checked out the code, so I may just be being overly cautious) For example, for the JSON part, I'm extrapolating that these benchmarks are saying that it takes 2 seconds to json serialize a 500MB payload yep that was my interpretation and then 4.6 seconds to transfer over the wire but 4.6 seconds seems very high for 500mb of data I wonder if JSON serialisation is bloating the size yeah... local host, same machine <@944007601400741989> would you be able to report on the size of the json serialized witness please? you mean the size of the witness data before it was serialize to json? before and after Yeah exactly, I wonder how much data is being transferred here and the transfer rate I assumed the size you have in the report is before seriliaztion? This size is after JSON serialization I didn't add this to the log report, but for all the cases it was approx 50% less the JSON serialized output wow yeah thats pretty bad super useful that we have these statistics early so we can design to optimise this <@944007601400741989> I would propose you add a note about the json serialisation size bloat, I think thats a pretty important point Github seems to still be down 🙁 <@944007601400741989> could you put the repo and branch in the hackmd? Why is that? When I saw to log, it felt reasonable to me, the log I mean. ``` if witness && proofs != nil { serStart := time.Now() encoded, err := rlp.EncodeToBytes(proofs) serDuration := time.Since(serStart) if err != nil { log.Warn(\"Failed to serialize witness\", \"err\", err) } else { log.Info(\"[WITNESS_BENCH] Approx Serialization Time\", \"block\", block.Number(), \"duration\", serDuration) log.Info(\"[WITNESS_BENCH] Witness Size\", \"block\", block.Number(), \"bytes\", len(encoded)) wb := hexutil.Bytes(encoded) witnessBytes = &wb } } ``` Seeing that the data was RLP encoded sure! If the size is halved, then does it mean that 250MB is taking ~4 seconds to transfer over the wire on localhost? I think if it doubles the size of the data for the encoding format, then it's inefficient. Why do you think its reasonable? I suspect that transport overhead is also capturing json deserialization? json deserialization is also pretty annoying becuase you have to wait for the full data to arrive until you can start to deserialize `witnessBytes = &wb` is this just rlp encoded bytes? I think it is still 500mb data size, since the 250mb would be serialized before transit, though, I was exepcting a faster speed even with 500mb data size bytes are inefficient with json becuase its encoded to a hex string, essentially doubling the size (2 nibble chars per byte). which is consistent with what you reported. Yeah, that makes alot of sense thinking on this If the way that the witness is provided is via engine_{get|new}Payload, doesn't this mean that the CL should transfer the witness to the prover (e.g. zkboost)? This is why I was assuming this \"file API\" involved CL. yeah Could you elaborate on what you mean by \"file API\" here? I was thinking the prover should be expected to fetch a witness from a co-located witness database or file. What I mean is that if the prover (e.g. zkboost) will read from a co-located database/file/folder, then the entity creating that database-entry/file/folder is the CL, no? I guess it depends how we architect things So the CL should invoke new_payload on the engineAPI. Then call request_proofs on the prover, and the prover should fetch the witness from the witness database. Are you proposing that the CL should provide a reference to the file for the prover to fetch from? If the prover relies in some co-located file/database/etc, then from my perspective the CL is doing the write to that place. Thus this is some new responsibility of the CL, compared to only have as a communication layer the current RPCs. If not, who is saving that witness into the database/file/etc? The idea would be the EL I.e. a reth exex Shouldn't this be a standarized feature in all ELs? Feels to me if this is critical to have good enough performance, we need to add it as a full feature in ELs. (My point is that if this is done by CL or ELs -- feels like a new kind of feature in them to get some feedback from those core devs) Right got you yes agreed By the way we have implemented a witness indexer using reth exex that uses postcard to serialize and persist in reth db. I will try and complete testing this week and share with you guys. Also, if this is done by ELs instead of CLs, sounds like in that case we wouldn't go the engine_{get|new}Payload route providing the witness, no? Yes agreed I think it would be a really nice interface to use engine_* methods but this overhead is prohibitive imo I suppose we can explore binary encoding + compression to see if we can make it viable. <@944007601400741989> could you also try with ethrex? They added in some optimzations recently related to the execution witness like: https://github.com/lambdaclass/ethrex/pull/6058 Perhaps we also need instructions on reproducing the results? It seems that we start off from a empty chain, so witness generation might be lower than it would be on a chain like mainnet with a lot of state (it may not affect things significantly here, but might be good to note) <@427491045308235776> https://discord.com/channels/595666850260713488/1463293742457815329/1468304939909513370 I believe the SSTORE method is used, at least thats what we discussed Yes sure, I can do this I am working on a way to make this reproducible ending to end. But this is plan is still working with an empty chain, I have not figure how to do this otherwise Nah, spamming with SSTORE intensiive contract calls didn't work saddly, to be able to do this, we would significantly pass the current gaslimit, which would make the benchmark hypothetical I spammed this witnesses data with large contract runtime code (about 24kb), the idea was to call different(producing new codehash) very large contracts so many time, the witness would have to house these(over a thousand) contract codes so the stateless executor can validate the spammed block. To get 100mb, 300mb, 500mb, i just took note of the gas limit of the spam block of the respective sizes and added is to the `SpamStrategy` config, this way I could reproduce specific sizes of witness. for example `8_000_000` gaslimit produces 100mb, `24_000_000` t0 300mb and `38_000_000` to 500mb",
+  "excerpts": [
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The benchmark report is ready;\n\nhttps://hackmd.io/nz8dncoPRY6btL_uOQmWpQ#Total-Round-Trip-Time\n\nRaw log: https://github.com/developeruche/witness-bench/blob/main/RAW_REPORT.md\n\nReport shows latency improvement whe `debug_executionWitness` is paired with `engine_newPayload`",
+      "createdAt": "2026-02-09T13:43:03.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@944007601400741989> can you inform us of what transport mechanism you used here? Was this http? Can you evaluate performance with ipc?",
+      "createdAt": "2026-02-09T13:55:33.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Great work by the way",
+      "createdAt": "2026-02-09T13:55:51.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah… http",
+      "createdAt": "2026-02-09T13:57:07.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Sure, I can evaluate over IPC",
+      "createdAt": "2026-02-09T13:57:43.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Awesome, thanks!",
+      "createdAt": "2026-02-09T13:58:53.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "My takeaway is that the transport and serialization overhead is huge for large witnesses. I think we want to bypass transport entirely. I think we will need to have both the prover and the node on the same server. Using either a fast ssd drive or ram (memfd) to pass the witness from the node to the prover. cc: <@774033563732541451> <@466102668138512394> <@427491045308235776>",
+      "createdAt": "2026-02-09T14:17:06.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think makes sense. We can use files at the \"software layer\" (i.e. CL), and leave to the node operator to optimize further using memfd if everything runs in the same machine (which prob is a good idea in general).",
+      "createdAt": "2026-02-09T14:47:51.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Thanks for you analysis! Did you have the chance to experiment with doing some ssz serialization to experiment how to see how changes a bit the JSON-overhead?",
+      "createdAt": "2026-02-09T14:49:06.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> I think we will need to have both the prover and the node on the same server.\nThis would be non-ideal I think because then the prover would have a stateful component. Perhaps this is where we eventually land at though after more investigation. \n\nFor further investigation, I think it may make sense to play around with different serializations/compression formats. \n\nAnother route is pricing out these worse case witnesses (by having the witness size be a requirement instead of a byproduct) and or not fully committing until we verify what it looks like with binary trees",
+      "createdAt": "2026-02-09T15:24:34.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "What does the /Overhead part mean in \"Transport / Overhead\" ?\n\nIf possible would be great if you had more detail on whats happening here 🙏  (just trying to figure out exactly what and why its so high)",
+      "createdAt": "2026-02-09T15:29:33.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@774033563732541451> I haven't tested SSZ yet since I was sticking to the current Engine API JSON-RPC specs, but you're right sending 500MB of hex-encoded bytes is definitely a worst-case scenario for transport ovrhead.\n\nCould explain more on what you mean me here? with what I have in my head, it would entail changing the transport layer data format of the node to SSZ which is quite a heavy lift for a PoC 🙂",
+      "createdAt": "2026-02-09T15:42:38.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah, I was thinking on maybe some potential benefit of a currently proposed EIP to use SSZ at the EL. \nI was thinking more like just compraing raw JSON vs SSZ serialization maybe isolated -- not sure it is worth redoing the whole engineAPI to use SSZ for this since hta sounds quite a lot of work.",
+      "createdAt": "2026-02-09T15:45:53.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "got you! this would be really nice IMO, it cuts down data size by 50%",
+      "createdAt": "2026-02-09T15:47:39.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> Another route is pricing out these worse case witnesses (by having the witness size be a requirement instead of a byproduct) and or not fully committing until we verify what it looks like with binary trees\nYeah, actually 500MiB will be small compared with upcoming gas limit increases. ha\nThese worst cases should become better with BT due to bytecode chunking -- this will be a must to solve the killers coming from the bytecode attacks that generate those cases, so makes senes to maybe not overfit trying to deal with those",
+      "createdAt": "2026-02-09T15:48:24.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Some extra thoguhts about the: \"files API interface\". Might be good to see what some CL-core-devs think about this.. feels like a new \"interface type\" that is quite weirdish compared with what exist today in their impls?",
+      "createdAt": "2026-02-09T15:50:42.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Sophisticated builders prob will build their own pipeline ofc",
+      "createdAt": "2026-02-09T15:51:14.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The \"transport/overhead\" here is essentially how long it takes for the witness data to move from the EL to the CL via the EngineAPI.\n\nThis was the way it was calculated;\n`Total_Round_Trip_Latency (CL Side) - (Block_Execution + Witness_Generation + JSON_Serialization (EL Side))`",
+      "createdAt": "2026-02-09T15:54:28.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> This would be non-ideal I think because then the prover would have a stateful component. Perhaps this is where we eventually land at though after more investigation. \n\nCould you elaborate on this a little more, please? I don't follow",
+      "createdAt": "2026-02-09T16:47:20.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> Some extra thoguhts about the: \"files API interface\". Might be good to see what some CL-core-devs think about this.. feels like a new \"interface type\" that is quite weirdish compared with what exist today in their impls? \n\n<@774033563732541451>  Does the CL layer have to be involved here? The expectation would be that the prover has access to the witnesses required to execute the block / new payload request that the CL requests via the api.",
+      "createdAt": "2026-02-09T16:49:25.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Currently we can send a prover the initial witness + program to prove, so they don't hold any state and are not aware of \"Ethereum state\" essentially",
+      "createdAt": "2026-02-09T16:49:31.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yep that makes sense but it looked like transport was a pretty considerable overhead from the benchmarks.",
+      "createdAt": "2026-02-09T16:51:05.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I 'd like to see if ipc improves things",
+      "createdAt": "2026-02-09T16:51:17.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah okay I see -- might be good to know exactly what is taking up the majority of the time",
+      "createdAt": "2026-02-09T16:52:10.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "http is likely a significant overhead",
+      "createdAt": "2026-02-09T16:52:26.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "ipc will improve it somewhat",
+      "createdAt": "2026-02-09T16:52:32.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "serialization format reduces data size",
+      "createdAt": "2026-02-09T16:52:46.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I also wonder how compressible it is on average",
+      "createdAt": "2026-02-09T16:52:50.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "good point, regarding compression.",
+      "createdAt": "2026-02-09T16:53:24.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@944007601400741989> was this benchmark performed on localhost?",
+      "createdAt": "2026-02-09T16:54:39.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "i.e. both services on the same machine?",
+      "createdAt": "2026-02-09T16:54:57.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "This would make sense -- it would be good to get the exact measurements so I can extrapolate to what it means in terms of isolated components (haven't checked out the code, so I may just be being overly cautious)\n\nFor example, for the JSON part, I'm extrapolating that these benchmarks are saying that it takes 2 seconds to json serialize a 500MB payload",
+      "createdAt": "2026-02-09T16:57:44.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yep that was my interpretation and then 4.6 seconds to transfer over the wire",
+      "createdAt": "2026-02-09T16:58:39.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "but 4.6 seconds seems very high for 500mb of data",
+      "createdAt": "2026-02-09T16:58:54.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I wonder if JSON serialisation is bloating the size",
+      "createdAt": "2026-02-09T16:59:43.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah... local host, same machine",
+      "createdAt": "2026-02-09T16:59:44.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@944007601400741989> would you be able to report on the size of the json serialized witness please?",
+      "createdAt": "2026-02-09T17:02:15.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "you mean the size of the witness data before it was serialize to json?",
+      "createdAt": "2026-02-09T17:03:19.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "before and after",
+      "createdAt": "2026-02-09T17:03:32.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah exactly, I wonder how much data is being transferred here and the transfer rate",
+      "createdAt": "2026-02-09T17:03:45.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I assumed the size you have in the report is before seriliaztion?",
+      "createdAt": "2026-02-09T17:03:46.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "This size is after JSON serialization",
+      "createdAt": "2026-02-09T17:04:39.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I didn't add this to the log report, but for all the cases it was approx 50% less the JSON serialized output",
+      "createdAt": "2026-02-09T17:06:11.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "wow yeah thats pretty bad",
+      "createdAt": "2026-02-09T17:06:46.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "super useful that we have these statistics early so we can design to optimise this",
+      "createdAt": "2026-02-09T17:08:06.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@944007601400741989> I would propose you add a note about the json serialisation size bloat, I think thats a pretty important point",
+      "createdAt": "2026-02-09T17:12:14.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Github seems to still be down 🙁 <@944007601400741989> could you put the repo and branch in the hackmd?",
+      "createdAt": "2026-02-09T17:12:16.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Why is that?\n\nWhen I saw to log, it felt reasonable to me, the log I mean.\n\n\n```\nif witness && proofs != nil {\n        serStart := time.Now()\n        encoded, err := rlp.EncodeToBytes(proofs)\n        serDuration := time.Since(serStart)\n        if err != nil {\n            log.Warn(\"Failed to serialize witness\", \"err\", err)\n        } else {\n            log.Info(\"[WITNESS_BENCH] Approx Serialization Time\", \"block\", block.Number(), \"duration\", serDuration)\n            log.Info(\"[WITNESS_BENCH] Witness Size\", \"block\", block.Number(), \"bytes\", len(encoded))\n            wb := hexutil.Bytes(encoded)\n            witnessBytes = &wb\n        }\n    }\n```\n\n\nSeeing that the data was RLP encoded",
+      "createdAt": "2026-02-09T17:12:27.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "sure!",
+      "createdAt": "2026-02-09T17:12:50.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If the size is halved, then does it mean that 250MB is taking ~4 seconds to transfer over the wire on localhost?",
+      "createdAt": "2026-02-09T17:13:27.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think if it doubles the size of the data for the encoding format, then it's inefficient. Why do you think its reasonable?",
+      "createdAt": "2026-02-09T17:14:58.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I suspect that transport overhead is also capturing json deserialization?",
+      "createdAt": "2026-02-09T17:15:27.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "json deserialization is also pretty annoying becuase you have to wait for the full data to arrive until you can start to deserialize",
+      "createdAt": "2026-02-09T17:15:51.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "`witnessBytes = &wb` is this just rlp encoded bytes?",
+      "createdAt": "2026-02-09T17:17:14.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think it is still 500mb data size, since the 250mb would be serialized before transit, though, I was exepcting a faster speed even with 500mb data size",
+      "createdAt": "2026-02-09T17:17:26.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "bytes are inefficient with json becuase its encoded to a hex string, essentially doubling the size (2 nibble chars per byte). which is consistent with what you reported.",
+      "createdAt": "2026-02-09T17:18:12.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah, that makes alot of sense thinking on this",
+      "createdAt": "2026-02-09T17:18:41.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If the way that the witness is provided is via engine_{get|new}Payload, doesn't this mean that the CL should transfer the witness to the prover (e.g. zkboost)? This is why I was assuming this \"file API\" involved CL.",
+      "createdAt": "2026-02-09T17:19:31.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah",
+      "createdAt": "2026-02-09T17:19:36.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Could you elaborate on what you mean by \"file API\" here? I was thinking the prover should be expected to fetch a witness from a co-located  witness database or file.",
+      "createdAt": "2026-02-09T17:21:05.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "What I mean is that if the prover (e.g. zkboost) will read from a co-located database/file/folder, then the entity creating that database-entry/file/folder is the CL, no?",
+      "createdAt": "2026-02-09T17:22:25.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I guess it depends how we architect things",
+      "createdAt": "2026-02-09T17:23:02.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So the CL should invoke new_payload on the engineAPI. Then call request_proofs on the prover, and the prover should fetch the witness from the witness database.",
+      "createdAt": "2026-02-09T17:23:50.399000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Are you proposing that the CL should provide a reference to the file for the prover to fetch from?",
+      "createdAt": "2026-02-09T17:24:09.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If the prover relies in some co-located file/database/etc, then from my perspective the CL is doing the write to that place. Thus this is some new responsibility of the CL, compared to only have as a communication layer the current RPCs.",
+      "createdAt": "2026-02-09T17:26:16.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If not, who is saving that witness into the database/file/etc?",
+      "createdAt": "2026-02-09T17:26:38.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The idea would be the EL",
+      "createdAt": "2026-02-09T17:26:48.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I.e. a reth exex",
+      "createdAt": "2026-02-09T17:27:01.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Shouldn't this be a standarized feature in all ELs? Feels to me if this is critical to have good enough performance, we need to add it as a full feature in ELs.\n(My point is that if this is done by CL or ELs -- feels like a new kind of feature in them to get some feedback from those core devs)",
+      "createdAt": "2026-02-09T17:27:54.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Right got you",
+      "createdAt": "2026-02-09T17:28:11.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yes agreed",
+      "createdAt": "2026-02-09T17:28:15.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "By the way we have implemented a witness indexer using reth exex that uses postcard to serialize and persist in reth db. I will try and complete testing this week and share with you guys.",
+      "createdAt": "2026-02-09T17:29:14.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Also, if this is done by ELs instead of CLs, sounds like in that case we wouldn't go the engine_{get|new}Payload route providing the witness, no?",
+      "createdAt": "2026-02-09T17:29:27.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yes agreed",
+      "createdAt": "2026-02-09T17:29:56.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think it would be a really nice interface to use engine_* methods but this overhead is prohibitive imo",
+      "createdAt": "2026-02-09T17:30:36.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I suppose we can explore binary encoding + compression to see if we can make it viable.",
+      "createdAt": "2026-02-09T17:31:05.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@944007601400741989> could you also try with ethrex? They added in some optimzations recently related to the execution witness like: https://github.com/lambdaclass/ethrex/pull/6058",
+      "createdAt": "2026-02-09T17:57:35.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Perhaps we also need instructions on reproducing the results?\n\nIt seems that we start off from a empty chain, so witness generation might be lower than it would be on a chain like mainnet with a lot of state (it may not affect things significantly here, but might be good to note)",
+      "createdAt": "2026-02-09T18:15:54.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@427491045308235776> https://discord.com/channels/595666850260713488/1463293742457815329/1468304939909513370",
+      "createdAt": "2026-02-09T18:51:40.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I believe the SSTORE method is used, at least thats what we discussed",
+      "createdAt": "2026-02-09T18:51:59.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yes sure, I can do this",
+      "createdAt": "2026-02-09T20:34:22.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I am working on a way to make this reproducible ending to end.\n\nBut this is plan is still working with an empty chain, I have not figure how to do this otherwise",
+      "createdAt": "2026-02-09T20:41:13.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nah, spamming with SSTORE intensiive contract calls didn't work saddly, to be able to do this, we would significantly pass the current gaslimit, which would make the benchmark hypothetical",
+      "createdAt": "2026-02-09T20:44:10.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I spammed this witnesses data with large contract runtime code (about 24kb), the idea was to call different(producing new codehash) very large contracts so many time, the witness would have to house these(over a thousand) contract codes so the stateless executor can validate the spammed block. To get 100mb, 300mb, 500mb, i just took note of the gas limit of the spam block of the respective sizes and added is to the `SpamStrategy` config, this way I could reproduce specific sizes of witness.\n\nfor example `8_000_000` gaslimit produces 100mb, `24_000_000` t0 300mb and `38_000_000` to 500mb",
+      "createdAt": "2026-02-09T20:54:20.628000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/REST-based `new-payload-with-witness` with SSZ response",
+  "date": "2026-03-25",
+  "messageCount": 22,
+  "sourceHash": "4f0ab62dd25854adbfe147362519e33b0a891a9ebbf5413684fc3760944de07c",
+  "searchText": "Yeah, they’re effectively serial right now. they are flattened into a single batch and processed together rather than in parallel. All storage trie nodes are expanded first, followed by account trie nodes, and the combined set is inserted into a single `FxHashMap` via `put_batch`. When I looked more closely a \"store\", the primary bottleneck was not the MPT op it literally tooks a couple micro secs. The main bottlenecks was influenced by the two factors; - Storing witness in the database: This was on the critical path, serializing a ~300MB witness and writing it to RocksDB *before* `store_block` could proceed. Since this data is only required for `debug_executionWitness` RPC calls and not for block execution, it was moved to a fire-and-forget background thread. - Trie worker: The trie update worker was implemented as a single thread handling two sequential phases; 1. In-memory diff-layer update (this takes microseconds) 2. Flushing to RocksDB (this takes milliseconds to seconds) Because the channel was `sync_channel(0)` (zero-buffered), block *N* was forced to wait until both phases of block *N−1* completed. This effectively serialized block processing on the slow disk flush, despite Phase 1 being negligible. To address this, the pipeline was split into two threads connected by a buffered channel: * A **Phase 1 thread** handles the in-memory updates and immediately releases block processing * A **Phase 2 thread** performs the disk flush asynchronously This reduced the store phase from **3,791ms to 739ms** (~5× improvement). Regarding parallelizing storage tries, i am still trying to wrap my head around it. but I think we are in a good place right now, CL pov round trip now takes about 1.54seconds for our worst case scenario block (execution witness size is about 500MB) Could we either upstream those changes for store or perhaps save the execution witness to a static file? For the 1.54 seconds, what would the new bottleneck be? Sure! We can do that… Why save the execution witness to a a static file though? Store still… it runs within the range of 600ms - 900ms About 80-90% of EL time Im thinking that it should be very quick to save to file since it removes the db abstraction and also it never changes so it doesnt need to be in a db What was the new breakdown for this 900ms? Also do we get 1.54s total latency when store is 900ms? Nah, for this the store took 739ms Just to clarify too, by the time we call store, we already have the executionWitness? Everything that happens in store are literally negligible except writing RockDB (block data) and RockDB flush (during tx commit) both of these cost about 400ms This rest; - Witness storage (background) - MPT update (now takes about <100ms) This rest of the time should be going to witness generation, I didn't include a log for this, would confirm this in a bit yeah we do could we do the entire store operation async? Rationale being that we have the result of the block and the execution witness Yeah… we can do that. Would drop some stats in a bit So sorry, this is wrong... After adding more log, I saw RockDB write and Read was taking little to no time, about 1.26ms and 2.21ms for write and flush respectively. The chuck of the time spent was on witnesses generation, just after the \"store\" timer starts, first operation that is done is witness generation. for our 500mb witness block, it cost about 600ms. Went on to implement the async \"store\"(after witness generation), this shaved off about 300ms, with this current implementation, CL pov round trip takes 1.2secs now I have evaluated all other metrics and confirmed there is no other misinterpretations Cool! Where does the 1.2 seconds come from? Or do you have a new breakdown of where the next bottleneck is? Still from the EL's store optimization, the influencing factors were; - store_block (though just 3.4ms) - MPT (optimized) - some extra ~100ms I can't account for all these shaved off ~200ms from the total round trip time from the CL PoV Yeah... the next bottleneck is \"witness generation\", about 80% of exec time and 50% of total round trip time is spent on witness generation ran the 500mb witness block a couple time and on average the witness gen time was ~600ms Makes sense, so worse case would be roughly 1 second roundtrip latency — what would the average case be?",
+  "excerpts": [
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah, they’re effectively serial right now.\n\nthey are flattened into a single batch and processed together rather than in parallel. All storage trie nodes are expanded first, followed by account trie nodes, and the combined set is inserted into a single `FxHashMap` via `put_batch`.",
+      "createdAt": "2026-03-25T02:14:06.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "When I looked more closely a \"store\", the primary bottleneck was not the MPT op it literally tooks a couple micro secs. The main bottlenecks was influenced by the two factors;\n- Storing witness in the database: This was on the critical path, serializing a ~300MB witness and writing it to RocksDB *before* `store_block` could proceed. Since this data is only required for `debug_executionWitness` RPC calls and not for block execution, it was moved to a fire-and-forget background thread.\n- Trie worker: The trie update worker was implemented as a single thread handling two sequential phases;\n1. In-memory diff-layer update (this takes microseconds)\n2. Flushing to RocksDB (this takes milliseconds to seconds)\n\nBecause the channel was `sync_channel(0)` (zero-buffered), block *N* was forced to wait until both phases of block *N−1* completed. This effectively serialized block processing on the slow disk flush, despite Phase 1 being negligible.\n\nTo address this, the pipeline was split into two threads connected by a buffered channel:\n\n* A **Phase 1 thread** handles the in-memory updates and immediately releases block processing\n* A **Phase 2 thread** performs the disk flush asynchronously\n\nThis reduced the store phase from **3,791ms to 739ms** (~5× improvement).\n\nRegarding parallelizing storage tries, i am still trying to wrap my head around it. but I think we are in a good place right now, CL pov round trip now takes about 1.54seconds for our worst case scenario block (execution witness size is about 500MB)",
+      "createdAt": "2026-03-25T02:20:49.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Could we either upstream those changes for store or perhaps save the execution witness to a static file?",
+      "createdAt": "2026-03-25T08:25:08.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "For the 1.54 seconds, what would the new bottleneck be?",
+      "createdAt": "2026-03-25T08:26:03.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Sure! We can do that… \n\nWhy save the execution witness to a a static file though?",
+      "createdAt": "2026-03-25T08:26:29.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Store still… it runs within the range of 600ms - 900ms\n\nAbout 80-90% of EL time",
+      "createdAt": "2026-03-25T08:27:59.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Im thinking that it should be very quick to save to file since it removes the db abstraction and also it never changes so it doesnt need to be in a db",
+      "createdAt": "2026-03-25T08:28:16.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "What was the new breakdown for this 900ms?",
+      "createdAt": "2026-03-25T08:29:03.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Also do we get 1.54s total latency when store is 900ms?",
+      "createdAt": "2026-03-25T08:30:04.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nah, for this the store took 739ms",
+      "createdAt": "2026-03-25T08:31:09.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Just to clarify too, by the time we call store, we already have the executionWitness?",
+      "createdAt": "2026-03-25T08:32:09.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Everything that happens in store are literally negligible except writing RockDB (block data) and RockDB flush (during tx commit) both of these cost about 400ms \n\nThis rest;\n- Witness storage (background)\n- MPT update (now takes about <100ms)\n\nThis rest of the time should be going to witness generation, I didn't include a log for this, would confirm this in a bit",
+      "createdAt": "2026-03-25T08:46:09.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah we do",
+      "createdAt": "2026-03-25T08:46:37.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "could we do the entire store operation async? Rationale being that we have the result of the block and the execution witness",
+      "createdAt": "2026-03-25T09:10:27.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah… we can do that. \n\nWould drop some stats in a bit",
+      "createdAt": "2026-03-25T11:08:02.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So sorry, this is wrong...\n\nAfter adding more log, I saw RockDB write and Read was taking little to no time, about 1.26ms and 2.21ms for write and flush respectively. The chuck of the time spent was on witnesses generation, just after the \"store\" timer starts, first operation that is done is witness generation. for our 500mb witness block, it cost about 600ms. \n\n\nWent on to implement the async \"store\"(after witness generation), this shaved off about 300ms, with this current implementation, CL pov round trip takes 1.2secs now\n\n\nI have evaluated all other metrics and confirmed there is no other misinterpretations",
+      "createdAt": "2026-03-25T14:18:41.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Cool! Where does the 1.2 seconds come from?",
+      "createdAt": "2026-03-25T19:01:24.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Or do you have a new breakdown of where the next bottleneck is?",
+      "createdAt": "2026-03-25T19:02:07.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Still from the EL's store optimization, the influencing factors were;\n- store_block (though just 3.4ms)\n- MPT (optimized)\n- some extra ~100ms I can't account for\n\nall these shaved off ~200ms from the total round trip time from the CL PoV",
+      "createdAt": "2026-03-25T19:13:50.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah... the next bottleneck is \"witness generation\", about 80% of exec time and 50% of total round trip time is spent on witness generation",
+      "createdAt": "2026-03-25T19:15:36.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "developeruche",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "ran the 500mb witness block a couple time and on average the witness gen time was ~600ms",
+      "createdAt": "2026-03-25T19:16:39.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Makes sense, so worse case would be roughly 1 second roundtrip latency — what would the average case be?",
+      "createdAt": "2026-03-25T23:54:49.553000+00:00",
+      "attachments": []
+    }
+  ]
+}

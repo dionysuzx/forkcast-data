@@ -30,11 +30,19 @@ const mergeSources = (existing: RecordManifest["sources"], incoming: RecordManif
     sources.findIndex((candidate) => sourceKey(candidate) === sourceKey(source)) === index
   );
 
-const mergeArtifacts = (existing: Artifact[], incoming: Artifact[]): Artifact[] =>
-  [
+const sameItems = (left: string[] | undefined, right: string[] | undefined): boolean =>
+  JSON.stringify([...(left ?? [])].sort()) === JSON.stringify([...(right ?? [])].sort());
+
+const mergeArtifacts = (existing: Artifact[], incoming: Artifact[]): Artifact[] => {
+  const mergedIncoming = incoming.map((candidate) => {
+    const previous = existing.find((artifact) => artifact.path === candidate.path);
+    return previous?.sha256 === candidate.sha256 && sameItems(previous.from, candidate.from) ? previous : candidate;
+  });
+  return [
     ...existing.filter((artifact) => !incoming.some((candidate) => candidate.path === artifact.path)),
-    ...incoming
+    ...mergedIncoming
   ].sort((a, b) => a.path.localeCompare(b.path));
+};
 
 const mergeMetadata = (
   existing: RecordManifest["metadata"],
@@ -62,10 +70,7 @@ const titleScore = (title: string): number => {
 };
 
 const betterTitle = (existing: string, incoming: string): string =>
-  titleScore(incoming) > titleScore(existing) ? incoming : existing;
-
-const sameItems = (left: string[] | undefined, right: string[] | undefined): boolean =>
-  JSON.stringify([...(left ?? [])].sort()) === JSON.stringify([...(right ?? [])].sort());
+  titleScore(incoming) >= titleScore(existing) ? incoming : existing;
 
 export const writeRecord = async (repoRoot: string, record: RecordManifest): Promise<void> => {
   const manifestPath = recordManifestPath(repoRoot, record);
@@ -112,10 +117,11 @@ export const writeArtifactText = async (args: {
   const existingBody = await readFile(target, "utf8").catch(() => null);
   const existingRecord = await readJson<RecordManifest>(recordManifestPath(args.repoRoot, args.record)).catch(() => null);
   const existingArtifact = existingRecord?.artifacts.find((artifact) => artifact.path === relativePath);
-  if (existingBody === args.body && existingArtifact && sameItems(existingArtifact.from, args.from)) return existingArtifact;
+  const digest = sha256(args.body);
+  const existingDigest = existingBody === null ? null : sha256(existingBody);
+  if (existingDigest === digest && existingArtifact?.sha256 === digest && sameItems(existingArtifact.from, args.from)) return existingArtifact;
   await writeText(target, args.body);
   const info = await stat(target);
-  const digest = sha256(args.body);
   const artifact: Artifact = {
     layer: args.layer,
     role: args.role,

@@ -4,9 +4,13 @@ import { nowIso, slugify } from "../lib/fs.js";
 
 export const ingestDiscourseLinks = async (repoRoot: string, links: string[], generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const records: RecordManifest[] = [];
-  const unique = links.filter((link, index, values) => values.indexOf(link) === index);
-  for (const link of unique) {
+  const topics = new Map<string, string>();
+  for (const link of links) {
     const id = link.match(/\/t\/(?:[^/]+\/)?(\d+)/)?.[1] ?? slugify(link);
+    const existing = topics.get(id);
+    if (!existing || link.length < existing.length) topics.set(id, link);
+  }
+  for (const [id, link] of [...topics.entries()].sort(([left], [right]) => left.localeCompare(right))) {
     let record = newRecord({
       id: `ethereum-magicians/${id}`,
       kind: "topic",

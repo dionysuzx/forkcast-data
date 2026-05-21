@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/BiB_ Adding payload blob count to ExecutionPayload",
+  "date": "2026-02-02",
+  "messageCount": 126,
+  "sourceHash": "b31b9959ec93459760b45bf4b05fae3d641fa5f7dd468a5731391ab0f9d5916b",
+  "searchText": "<@774033563732541451> github UX is killing me 😄 on this last comment: https://github.com/ethereum/EIPs/pull/11212#discussion_r2756186243 Why would ⁨`payload_kzg_commitments`⁩ be a public input? In the current design, ⁨`payload_kzg_commitments`⁩ and ⁨`payload_kzg_proofs`⁩ are used to link the ⁨`ExecutionPayload`⁩ to ⁨`payload_kzg_commitments`⁩ Then we show that the first ⁨`payload_blob_count`⁩ version hashes link to ⁨`payload_kzg_commitments`⁩ Implying that the the first ⁨`payload_blob_count`⁩ version hashes link to the payload blobs <@427491045308235776> , copying reply 😅 : > Wouldn't be needed by the CL to connect the proof used kzg commitments of payload with whatever was DASed? > > Mainly the same reason why type-3 verisoned hashes are public input since they're part of NewPayloadRequest (which is what we defined as public input) i.e. check that what was DASed is really what hte block asserted as used blobs. LMK if makes sense Does this imply that ⁨⁨`NewPayloadRequest`⁩⁩ has the kzg commitments for all blobs (including type-3)? `NewPayloadRequest` already has the hashed kzg commitments for type3 txs. From my perspective should also have the ones for payload If not, how would hte CL know which kzg commitments were validated in the proof? yep exactly So the ⁨`expected_versioned_hashes`⁩ includes the payload blobs But I don't see why the ⁨`payload_kzg_commitments`⁩ also needs to be a public input too From the CLs perspective, they would not be any different than normal blobs Sorry, i think i missed this line ` expected_blob_versioned_hashes: List[VersionedHash], # public input` I think i originally read it as the already existing versioned hashes from type3 txs Ahh right So that includes type3 and payload versioned hashes, no? yeah exactly ` assert expected_blob_versioned_hashes[:n] == payload_versioned_hashes` makes sense. Although this code feels weirdish that i don't see where the [n:] existing checks are but maybe that is somewhat implicit that that still exist before the ` return execute_payload(payload)` Ah right, yeah I was being lazy and didn't want to add in all of the previous checks before BiB, I think a comment can be added to say \"we are extending newPayload and the existing checks apply\" Sounds good! Ah this would still mean that we would need a parameter to distinguish which of the ⁨`payload_blob_count`⁩ are for the payload blobs -- which can be done by adding it into ExecutionPayload or as something else > which of the ⁨payload_blob_count⁩ are for the payload blobs got a bit lost there Ah in the case where we verify a proof and I know that these 10 version hashes correspond to the blob But then I want to fetch the ones that correspond to only the payload blobs Ah you mean for data fetching reasons for reconstruciton For this, I would need to know the ⁨`payload_blob_count`⁩ so I can say get the first 3 blobs Yeah, makes sense. From the guets program perspective you can avoid it since you have the private inputs as help. But as an external \"data fetcher\" needs, looks like you need it to know which one to pull but perhaps it can just be an extra parameter and then the ExecutionPayload would be left untouched So maybe something only at the CL outside execution payload? yeah exactly There would be a field in the EL block header, thats not in the ExecutionPayload, which I guess is fine To triple check: So this would mean the only \"change\" is no new fields in the NewPayloadRequest but only including pyaload versioned hashes in the already existing `versoined_hashes` field as prefixes If we want to make ⁨`payload_blob_count`⁩ public, I think we would need to put it either in ExecutionPayload or in NewPayloadRequest Though apart from that, the CL is left untouched If it is in the EL block, it is already public (not in the sense of guets public input, but easily available)? But yeah, maybe it is better to formally include it in the execution payload Ah yeah that is true, so for blob retrieval, someone would need to fetch the corresponding EL block header to figure out the blob count yeah Technically since the proof proved the block_hash, it is indirectly commited Right thats true, just thinking about the workflow for fetching the EL block header But not sure if relyin on EL header for this is \"nice\" for CL layer I would trust more a CL expert opinion on this front Seems like it would be nicer if the CL knew, but payload retrieval would happen on the EL, since the EL knows how to convert those blobs back into the transactions Yeah, this data is basically EL related Just thinking out loud: So I think one of the questions is: Will the nodes that want to do payload blob retrieval already have a working EL p2p? If so, then they should already have the EL block headers. If they are zk-attesters though for example, then it becomes more convenient to have it in the ExecutionPayload, because they don't need an EL okay still thinking Makes sense, to not rely on an EL RPC for the use case I guess Just thinking about the usecase where you download BALs + proofs Note that BALs are not related to payload blobs no? There was a comment in the EIP about whether they should go into payload blobs too -- I was thinking of the case where the BALs are not on lets say the ⁨`bals_topic`⁩ on the CL, so you need to get it from blobs Mmm Wondering how including BALs in the payload blobs would be managed reg \"blob boundaries\" if we only want to pull BALs and not tx or viceversa maybe aren't part of the same payload blobs list So in the case where the BALs is not on the fast path, the ⁨`bals_topic`⁩ , I think the node would then need to download payload blobs and reconstruct, though as a side note, perhaps we want to be smart here since we may want the BAL and not the transaction Ah haha yeah same concern 😄 We could put the BALs first, if its less than a blob, then we download the BAL plus some of the payload data then have a header on the first blob that tells us how big the BAL is and how big the payload is so you would need to pull the first blob always, read the bal length, and from that derive the remaining blob count to pull for hte ocmplete BALs yeah exactly -- though we need to pull the first blob always today because the first four bytes tells us how big the payload is yeah but without BALs in payload blobs, you alreayd know how many blobs to pull withotu reading the first i.e. `payload_blob_count` Ah yeah thats true we could also have `payload_bal_blob_count` as a helper but maybe is wasted 4 bytes ha Yeah 😄 I think thats not so bad, so payload_bal_blob_count and then in the first blob we still need to know how many bytes is for the BAL and how many for the payload Would BAL reconstruction via blob be a perf concern maybe for the hw setup of entities interested in them? I think ideally its the fallback case And only one person needs to do it and then seed the bals gossip topic <@774033563732541451> was thinking to maybe put it in NewPayloadRequest instead of in ExecutionPayload header, but ⁨`tree_hash_root`⁩ seems to be hashing the payload? The public input we defined in EIP-8025 is the ⁨⁨`tree_hash_root`⁩⁩ of ⁨⁨`NewPayloadRequest`⁩⁩, so that means indirectly ⁨⁨`ExecutionPayload`⁩⁩ plus all the sidecar fields i.e. versioned_hashes, parent_beacon_root, requests. https://github.com/eth-act/ere-guests/blob/a629f4937379a67263070e28324d7ff65ea4c401/crates/stateless-validator-common/src/new_payload_request.rs#L240-L246 Yeah was checking this out, with ⁨`block_hash`⁩ we can have a proof reveal ⁨`parent_block_hash`⁩ and ⁨`child_block_hash`⁩ then its possible to link the previous proof with the current proof via blockhashes -- How does this work with NewPayloadRequest.tree_hash_root again? ExecutionPayload has ⁨`block_hash`⁩ as a field so you can still do that linking if you're interested The attester/verifier would need to download the ExecutionPayload? Ah hmm I guess this NewPayloadRequest will change for mandatory proofs, since an attester won't have the ExecutionPayload ⁨`hash_tree_root`⁩ is the SSZ commitment, so you can prove internal fields with merkle proofs Ah remember that ⁨`hash_tree_root`⁩ of the ExecutionPayload is the same of the ExecutionPayloadHeader Ah thats confusing 😄 The ExecutionPayloadHeader for the transactions have the hash_tree_root of the tx list so ta the end of the day doing ⁨`hash_tree_root`⁩ of the ExecutionPayload you can think about it as calculating the ExecutionPayloadHeader and then do hash_tree_root again So its skipping transactions, logs_bloom and withdrawals? Nop, for withdrawals is the same thinking as with txs logs bloom is an array of bytes tough so not a list That ⁨⁨`Root`⁩⁩ type used in fields is ⁨⁨`hash_tree_root`⁩⁩ of the corresponding lists in the ExecutionPayload So it is basically a tree. If you look it fro mthe ExecutionPayload perspective is a deeper tree -- but the \"Top tree\" is the ExecutionPayloadHeader angle of looking at it (hopefully i'm not confusing you more) Ah right, its not skipping fields This is why ⁨⁨`hash_tree_root`⁩⁩ calcl from the guest program perspective using ExecutionPayload as public input works for 8025, since the CL has the ExecutionPaylaodHeader Since both are teh same, all is good for public input verification from the CL side The transaction list is tree_hash_root ed and it corresponds to the root in the header struct Just to double check with you -- this won't be the case. The current strategy works fine for zkCL (mandatory proofs) Yeah exactly, since tree hash root converts: ⁨```rust struct NewPayloadRequest { payload: ExecutionPayload } ```⁩ into ⁨```rust struct NewPayloadRequest { header: ExecutionPayloadHeader } ```⁩ Then into a single root Yep I think you would still need a proof for the block_hash no? You would need a merkel proof for the ⁨`block_hash`⁩ field in the SSZ tree yes (with root = ⁨`hash_tree_root`⁩ we discussed so far) yep, does that come with the proof? Which proof? the zkVM proof Nop When we had the ⁨`block_hash`⁩ and ⁨`parent_hash`⁩ as public inputs that was somewhat a lie too since we actually commited to sha256 of all public inputs or zkVM \"public input\" design reasons. But I guess we could include it \"manually\" as part of the proof i.e. the preimage of the thing When I replied \"Nop\" i mean as part of the proof constructed by zkVM SDKs I remember Vitalik mentioning would be useful to be sure the ExecutionPayloadHeader is part of the proof in the L1 (which I guess could be a wrapper of hte zkVM SDK one) Maybe would be useful to define a bit better this in some spec? I think he was thinking for wallets or some use cases that could try to use the L1 proofs for other reasons The CL gets this \"preimage\" (i.e. NewPayloadRequestHeader) by its own means, but this might not apply so easily for other cases (which I think is what you're thinking of?) Ah I was thinking of the CL currently, ie the flow for it to get the preimage without downloading the whole payload Isn't the ExecutionPayloadHeader planned to be pulled from the network? In ePBS or something else? ePBS yes Yeah I think it is getting pulled, AFAICT it was being used for blind signing Right for mevboost stuff But I think it makes sense to add it back as a proper data structure instead of having a flat data structure On our original question, so it would be okay to add payload_blob_count into ExecutionPayload technically in the ExecutionPayloadHeader. Though it seems we may need to think a bit more about how this public input flow works with PayloadBid -- does that sound correct? Not sure yet if as part of ExecutionPayload or at the same level of ⁨⁨`versioned_hashes`⁩⁩ and other CL-related fields in ⁨⁨`NewPayloadRequest`⁩⁩ But I don't think that changes much the conclusion Yeah was just writing that since I think we want to have the preimage for NewPayloadRequest, not just ExecutionPayload > though it seems we may need to think a bit more about how this public input flow works with PayloadBid 👍 NewPayloadRequestHeader, no? Ah yeah exac",
+  "excerpts": [
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "",
+      "createdAt": "2026-02-02T21:33:40.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@774033563732541451> github UX is killing me 😄",
+      "createdAt": "2026-02-02T21:33:41.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "on this last comment: https://github.com/ethereum/EIPs/pull/11212#discussion_r2756186243",
+      "createdAt": "2026-02-02T21:34:05.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Why would ⁨`payload_kzg_commitments`⁩ be a public input?",
+      "createdAt": "2026-02-02T21:34:31.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "In the current design, ⁨`payload_kzg_commitments`⁩ and ⁨`payload_kzg_proofs`⁩  are used to link the ⁨`ExecutionPayload`⁩ to ⁨`payload_kzg_commitments`⁩\n\nThen we show that the first ⁨`payload_blob_count`⁩ version hashes link to ⁨`payload_kzg_commitments`⁩\n\nImplying that the the first ⁨`payload_blob_count`⁩ version hashes link to the payload blobs",
+      "createdAt": "2026-02-02T21:38:43.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@427491045308235776> , copying reply 😅 :\n> Wouldn't be needed by the CL to connect the proof used kzg commitments of payload with whatever was DASed?\n> \n> Mainly the same reason why type-3 verisoned hashes are public input since they're part of NewPayloadRequest (which is what we defined as public input) i.e. check that what was DASed is really what hte block asserted as used blobs.",
+      "createdAt": "2026-02-02T21:40:08.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "LMK if makes sense",
+      "createdAt": "2026-02-02T21:40:43.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Does this imply that ⁨⁨`NewPayloadRequest`⁩⁩ has the kzg commitments for all blobs (including type-3)?",
+      "createdAt": "2026-02-02T21:41:24.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "`NewPayloadRequest` already has the hashed kzg commitments for type3 txs.",
+      "createdAt": "2026-02-02T21:42:33.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "From my perspective should also have the ones for payload",
+      "createdAt": "2026-02-02T21:42:40.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If not, how would hte CL know which kzg commitments were validated in the proof?",
+      "createdAt": "2026-02-02T21:42:50+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yep exactly",
+      "createdAt": "2026-02-02T21:42:55.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So the ⁨`expected_versioned_hashes`⁩ includes the payload blobs",
+      "createdAt": "2026-02-02T21:43:23.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But I don't see why the ⁨`payload_kzg_commitments`⁩ also needs to be a public input too",
+      "createdAt": "2026-02-02T21:43:41.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "From the CLs perspective, they would not be any different than normal blobs",
+      "createdAt": "2026-02-02T21:44:20.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Sorry, i think i missed this line `    expected_blob_versioned_hashes: List[VersionedHash], # public input`",
+      "createdAt": "2026-02-02T21:45:32.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think i originally read it as the already existing versioned hashes from type3 txs",
+      "createdAt": "2026-02-02T21:45:46.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ahh right",
+      "createdAt": "2026-02-02T21:45:58.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So that includes type3 and payload versioned hashes, no?",
+      "createdAt": "2026-02-02T21:46:07.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah exactly",
+      "createdAt": "2026-02-02T21:46:14.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "`    assert expected_blob_versioned_hashes[:n] == payload_versioned_hashes`\nmakes sense.\n\nAlthough this code feels weirdish that i don't see where the [n:] existing checks are",
+      "createdAt": "2026-02-02T21:47:29.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "but maybe that is somewhat implicit that that still exist before the `    return execute_payload(payload)`",
+      "createdAt": "2026-02-02T21:47:48.490000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah right, yeah I was being lazy and didn't want to add in all of the previous checks before BiB, I think a comment can be added to say \"we are extending newPayload and the existing checks apply\"",
+      "createdAt": "2026-02-02T21:48:42.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Sounds good!",
+      "createdAt": "2026-02-02T21:48:57.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah this would still mean that we would need a parameter to distinguish which of the ⁨`payload_blob_count`⁩ are for the payload blobs -- which can be done by adding it into ExecutionPayload or as something else",
+      "createdAt": "2026-02-02T21:49:49.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> which of the ⁨payload_blob_count⁩ are for the payload blobs\ngot a bit lost there",
+      "createdAt": "2026-02-02T21:50:39.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah in the case where we verify a proof and I know that these 10 version hashes correspond to the blob",
+      "createdAt": "2026-02-02T21:51:22.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But then I want to fetch the ones that correspond to only the payload blobs",
+      "createdAt": "2026-02-02T21:51:39.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah you mean for data fetching reasons for reconstruciton",
+      "createdAt": "2026-02-02T21:52:07.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "For this, I would need to know the ⁨`payload_blob_count`⁩ so I can say get the first 3 blobs",
+      "createdAt": "2026-02-02T21:52:09.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah, makes sense. From the guets program perspective you can avoid it since you have the private inputs as help. But as an external \"data fetcher\" needs, looks like you need it to know which one to pull",
+      "createdAt": "2026-02-02T21:52:38.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "but perhaps it can just be an extra parameter and then the ExecutionPayload would be left untouched",
+      "createdAt": "2026-02-02T21:53:35.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So maybe something only at the CL outside execution payload?",
+      "createdAt": "2026-02-02T21:54:00.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah exactly",
+      "createdAt": "2026-02-02T21:54:14.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "There would be a field in the EL block header, thats not in the ExecutionPayload, which I guess is fine",
+      "createdAt": "2026-02-02T21:54:22.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "To triple check: So this would mean the only \"change\"  is no new fields in the NewPayloadRequest but only including pyaload versioned hashes in the already existing `versoined_hashes` field as prefixes",
+      "createdAt": "2026-02-02T21:54:55.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If we want to make ⁨`payload_blob_count`⁩ public, I think we would need to put it either in ExecutionPayload or in NewPayloadRequest",
+      "createdAt": "2026-02-02T21:56:04.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Though apart from that, the CL is left untouched",
+      "createdAt": "2026-02-02T21:56:21.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "If it is in the EL block, it is already public (not in the sense of guets public input, but easily available)?",
+      "createdAt": "2026-02-02T21:56:48.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But yeah, maybe it is better to formally include it in the execution payload",
+      "createdAt": "2026-02-02T21:57:37.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah yeah that is true, so for blob retrieval, someone would need to fetch the corresponding EL block header to figure out the blob count",
+      "createdAt": "2026-02-02T21:58:05.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah",
+      "createdAt": "2026-02-02T21:58:14.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Technically since the proof proved the block_hash, it is indirectly commited",
+      "createdAt": "2026-02-02T21:58:56.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Right thats true, just thinking about the workflow for fetching the EL block header",
+      "createdAt": "2026-02-02T21:59:21.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But not sure if relyin on EL header for this is \"nice\" for CL layer",
+      "createdAt": "2026-02-02T21:59:23.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I would trust more a CL expert opinion on this front",
+      "createdAt": "2026-02-02T21:59:29.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Seems like it would be nicer if the CL knew, but payload retrieval would happen on the EL, since the EL knows how to convert those blobs back into the transactions",
+      "createdAt": "2026-02-02T22:00:48.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah, this data is basically EL related",
+      "createdAt": "2026-02-02T22:01:05.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Just thinking out loud:\n\nSo I think one of the questions is: Will the nodes that want to do payload blob retrieval already have a working EL p2p?\n\nIf so, then they should already have the EL block headers. \nIf they are zk-attesters though for example, then it becomes more convenient to have it in the ExecutionPayload, because they don't need an EL",
+      "createdAt": "2026-02-02T22:11:38.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "okay still thinking",
+      "createdAt": "2026-02-02T22:13:10.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Makes sense, to not rely on an EL RPC for the use case I guess",
+      "createdAt": "2026-02-02T22:16:01.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Just thinking about the usecase where you download BALs + proofs",
+      "createdAt": "2026-02-02T22:16:38.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Note that BALs are not related to payload blobs no?",
+      "createdAt": "2026-02-02T22:16:51.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "There was a comment in the EIP about whether they should go into payload blobs too -- I was thinking of the case where the BALs are not on lets say the ⁨`bals_topic`⁩ on the CL, so you need to get it from blobs",
+      "createdAt": "2026-02-02T22:17:48.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Mmm",
+      "createdAt": "2026-02-02T22:19:55.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Wondering how including BALs in the payload blobs would be managed reg \"blob boundaries\" if we only want to pull BALs and not tx or viceversa",
+      "createdAt": "2026-02-02T22:20:36.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "maybe aren't part of the same payload blobs list",
+      "createdAt": "2026-02-02T22:20:50.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So in the case where the BALs is not on the fast path, the ⁨`bals_topic`⁩ , I think the node would then need to download payload blobs and reconstruct, though as a side note, perhaps we want to be smart here since we may want the BAL and not the transaction",
+      "createdAt": "2026-02-02T22:20:55.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah haha yeah same concern 😄",
+      "createdAt": "2026-02-02T22:21:11.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "We could put the BALs first, if its less than a blob, then we download the BAL plus some of the payload data",
+      "createdAt": "2026-02-02T22:21:58.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "then have a header on the first blob that tells us how big the BAL is and how big the payload is",
+      "createdAt": "2026-02-02T22:22:21.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "so you would need to pull the first blob always, read the bal length, and from that derive the remaining blob count to pull for hte ocmplete BALs",
+      "createdAt": "2026-02-02T22:23:12.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah exactly -- though we need to pull the first blob always today because the first four bytes tells us how big the payload is",
+      "createdAt": "2026-02-02T22:23:52.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeah but without BALs in payload blobs, you alreayd know how many blobs to pull withotu reading the first i.e. `payload_blob_count`",
+      "createdAt": "2026-02-02T22:24:27.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah yeah thats true",
+      "createdAt": "2026-02-02T22:25:13.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "we could also have `payload_bal_blob_count` as a helper but maybe is wasted 4 bytes ha",
+      "createdAt": "2026-02-02T22:25:31.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah 😄",
+      "createdAt": "2026-02-02T22:25:39.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think thats not so bad, so payload_bal_blob_count and then in the first blob we still need to know how many bytes is for the BAL and how many for the payload",
+      "createdAt": "2026-02-02T22:26:30.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Would BAL reconstruction via blob be a perf concern maybe for the hw setup of entities interested in them?",
+      "createdAt": "2026-02-02T22:26:46.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think ideally its the fallback case",
+      "createdAt": "2026-02-02T22:27:11.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "And only one person needs to do it and then seed the bals gossip topic",
+      "createdAt": "2026-02-02T22:27:32.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@774033563732541451> was thinking to maybe put it in NewPayloadRequest instead of in ExecutionPayload header, but ⁨`tree_hash_root`⁩ seems to be hashing the payload?",
+      "createdAt": "2026-02-02T23:13:49.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The public input we defined in EIP-8025 is the ⁨⁨`tree_hash_root`⁩⁩ of ⁨⁨`NewPayloadRequest`⁩⁩, so that means indirectly ⁨⁨`ExecutionPayload`⁩⁩ plus all the sidecar fields i.e. versioned_hashes, parent_beacon_root, requests.",
+      "createdAt": "2026-02-02T23:17:54.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "https://github.com/eth-act/ere-guests/blob/a629f4937379a67263070e28324d7ff65ea4c401/crates/stateless-validator-common/src/new_payload_request.rs#L240-L246",
+      "createdAt": "2026-02-02T23:19:09.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah was checking this out,  with ⁨`block_hash`⁩ we can have a proof reveal ⁨`parent_block_hash`⁩ and ⁨`child_block_hash`⁩ then its possible to link the previous proof with the current proof via blockhashes -- How does this work with NewPayloadRequest.tree_hash_root again?",
+      "createdAt": "2026-02-02T23:21:19.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "ExecutionPayload has ⁨`block_hash`⁩ as a field",
+      "createdAt": "2026-02-02T23:23:35.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "so you can still do that linking if you're interested",
+      "createdAt": "2026-02-02T23:23:44.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The attester/verifier would need to download the ExecutionPayload?",
+      "createdAt": "2026-02-02T23:24:03.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah hmm I guess this NewPayloadRequest will change for mandatory proofs, since an attester won't have the ExecutionPayload",
+      "createdAt": "2026-02-02T23:24:46.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "⁨`hash_tree_root`⁩ is the SSZ commitment, so you can prove internal fields with merkle proofs",
+      "createdAt": "2026-02-02T23:25:08.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah remember that ⁨`hash_tree_root`⁩ of the ExecutionPayload is the same of the ExecutionPayloadHeader",
+      "createdAt": "2026-02-02T23:25:52.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah thats confusing 😄",
+      "createdAt": "2026-02-02T23:26:28.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The ExecutionPayloadHeader for the transactions have the hash_tree_root of the tx list",
+      "createdAt": "2026-02-02T23:26:43.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "so ta the end of the day doing ⁨`hash_tree_root`⁩ of the ExecutionPayload you can think about it as calculating the ExecutionPayloadHeader and then do hash_tree_root again",
+      "createdAt": "2026-02-02T23:27:04.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So its skipping transactions, logs_bloom and withdrawals?",
+      "createdAt": "2026-02-02T23:27:46.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nop, for withdrawals is the same thinking as with txs",
+      "createdAt": "2026-02-02T23:28:54.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "logs bloom is an array of bytes tough so not a list",
+      "createdAt": "2026-02-02T23:29:01.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "",
+      "createdAt": "2026-02-02T23:29:36.002000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "0a3c2eae879f19709588e5320fdcc1458ad8fee9557d4a42b861f8acf268ef21"
+        }
+      ]
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "That ⁨⁨`Root`⁩⁩ type used in fields is ⁨⁨`hash_tree_root`⁩⁩ of the corresponding lists in the ExecutionPayload",
+      "createdAt": "2026-02-02T23:29:54.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So it is basically a tree. \nIf you look it fro mthe ExecutionPayload perspective is a deeper tree -- but the \"Top tree\" is the ExecutionPayloadHeader angle of looking at it",
+      "createdAt": "2026-02-02T23:30:52.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "(hopefully i'm not confusing you more)",
+      "createdAt": "2026-02-02T23:31:05.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah right, its not skipping fields",
+      "createdAt": "2026-02-02T23:32:12.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "This is why ⁨⁨`hash_tree_root`⁩⁩ calcl from the guest program perspective using ExecutionPayload as public input works for 8025, since the CL has the ExecutionPaylaodHeader",
+      "createdAt": "2026-02-02T23:32:16.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Since both are teh same, all is good for public input verification from the CL side",
+      "createdAt": "2026-02-02T23:32:33.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The transaction list is tree_hash_root ed and it corresponds to the root in the header struct",
+      "createdAt": "2026-02-02T23:32:50.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Just to double check with you -- this won't be the case. The current strategy works fine for zkCL (mandatory proofs)",
+      "createdAt": "2026-02-02T23:34:40.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah exactly, since tree hash root converts:\n\n⁨```rust\nstruct NewPayloadRequest {\n  payload: ExecutionPayload\n}\n```⁩\n\ninto\n\n⁨```rust\nstruct NewPayloadRequest {\n  header: ExecutionPayloadHeader\n}\n```⁩\n\nThen into a single root",
+      "createdAt": "2026-02-02T23:37:07.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yep",
+      "createdAt": "2026-02-02T23:37:32.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think you would still need a proof for the block_hash no?",
+      "createdAt": "2026-02-02T23:37:48.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "You would need a merkel proof for the ⁨`block_hash`⁩ field in the SSZ tree yes (with root = ⁨`hash_tree_root`⁩ we discussed so far)",
+      "createdAt": "2026-02-02T23:38:30.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yep, does that come with the proof?",
+      "createdAt": "2026-02-02T23:39:06.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Which proof?",
+      "createdAt": "2026-02-02T23:39:15.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "the zkVM proof",
+      "createdAt": "2026-02-02T23:39:21.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nop",
+      "createdAt": "2026-02-02T23:39:24.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "When we had the ⁨`block_hash`⁩ and ⁨`parent_hash`⁩ as public inputs that was somewhat a lie too since we actually commited to sha256 of all public inputs or zkVM \"public input\" design reasons.",
+      "createdAt": "2026-02-02T23:40:09.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But I guess we could include it \"manually\" as part of the proof i.e. the preimage of the thing",
+      "createdAt": "2026-02-02T23:40:22.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "When I replied \"Nop\" i mean as part of the proof constructed by zkVM SDKs",
+      "createdAt": "2026-02-02T23:40:38.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I remember Vitalik mentioning would be useful to be sure the ExecutionPayloadHeader is part of the proof in the L1 (which I guess could be a wrapper of hte zkVM SDK one)",
+      "createdAt": "2026-02-02T23:41:18.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Maybe would be useful to define a bit better this in some spec?",
+      "createdAt": "2026-02-02T23:41:28.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think he was thinking for wallets or some use cases that could try to use the L1 proofs for other reasons",
+      "createdAt": "2026-02-02T23:42:13.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The CL gets this \"preimage\" (i.e. NewPayloadRequestHeader) by its own means, but this might not apply so easily for other cases (which I think is what you're thinking of?)",
+      "createdAt": "2026-02-02T23:44:04.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah I was thinking of the CL currently, ie the flow for it to get the preimage without downloading the whole payload",
+      "createdAt": "2026-02-02T23:45:09.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Isn't the ExecutionPayloadHeader planned to be pulled from the network?",
+      "createdAt": "2026-02-02T23:45:27.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "In ePBS or something else?",
+      "createdAt": "2026-02-02T23:45:55.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "ePBS yes",
+      "createdAt": "2026-02-02T23:46:02.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah I think it is getting pulled, AFAICT it was being used for blind signing",
+      "createdAt": "2026-02-02T23:46:22.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Right for mevboost stuff",
+      "createdAt": "2026-02-02T23:46:54.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "But I think it makes sense to add it back as a proper data structure instead of having a flat data structure",
+      "createdAt": "2026-02-02T23:47:01.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "On our original question, so it would be okay to add payload_blob_count into ExecutionPayload technically in the ExecutionPayloadHeader. Though it seems we may need to think a bit more about how this public input flow works with PayloadBid -- does that sound correct?",
+      "createdAt": "2026-02-02T23:48:59.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Not sure yet if as part of ExecutionPayload or at the same level of ⁨⁨`versioned_hashes`⁩⁩ and other CL-related fields in ⁨⁨`NewPayloadRequest`⁩⁩",
+      "createdAt": "2026-02-02T23:50:10.783000+00:00",
+      "attachments": []
+    }
+  ]
+}

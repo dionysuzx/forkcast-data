@@ -83,12 +83,24 @@ export const ingestGithubPmIssues = async (repoRoot: string, limit = 8, generate
   const issues = issueListViaGh(limit);
   const selected = issues.length ? issues : process.env.ENABLE_DUMMY_PIPELINE === "true" ? fixtureIssues() : [];
   if (!selected.length) throw new Error("No ethereum/pm protocol-call issues were fetched; refusing to publish an empty GitHub PM issue corpus.");
-  const records: RecordManifest[] = [];
-  for (const issue of selected) {
+  const entries = selected.map((issue) => {
     const identity = parseCallIdentity(issue);
     const canonicalDate = identity.date.replaceAll("-", ".");
+    return {
+      issue,
+      identity,
+      recordId: `${identity.series}/${canonicalDate}-${identity.number}`
+    };
+  });
+  const primaryIssueByRecord = new Map<string, number>();
+  for (const entry of entries) {
+    const current = primaryIssueByRecord.get(entry.recordId) ?? 0;
+    if (entry.issue.number > current) primaryIssueByRecord.set(entry.recordId, entry.issue.number);
+  }
+  const records: RecordManifest[] = [];
+  for (const { issue, identity, recordId } of entries) {
     let record = newRecord({
-      id: `${identity.series}/${canonicalDate}-${identity.number}`,
+      id: recordId,
       kind: "call",
       title: issue.title,
       generatedAt,
@@ -113,24 +125,26 @@ export const ingestGithubPmIssues = async (repoRoot: string, limit = 8, generate
       sourceUrl: issue.url,
       generatedAt
     }));
-    record = upsertArtifact(record, await writeArtifactText({
-      repoRoot,
-      record,
-      layer: "normalized",
-      role: "agenda",
-      fileName: "agenda.json",
-      body: `${JSON.stringify({
-        issue: issue.number,
-        title: issue.title,
-        agendaMarkdown: extractAgenda(issue.body),
-        bodyHash: sha256(issue.body),
-        links: discourseLinks(issue)
-      }, null, 2)}\n`,
-      source: "github-pm-issues",
-      sourceUrl: issue.url,
-      from: [`raw/issue-${issue.number}.json`],
-      generatedAt
-    }));
+    if (primaryIssueByRecord.get(recordId) === issue.number) {
+      record = upsertArtifact(record, await writeArtifactText({
+        repoRoot,
+        record,
+        layer: "normalized",
+        role: "agenda",
+        fileName: "agenda.json",
+        body: `${JSON.stringify({
+          issue: issue.number,
+          title: issue.title,
+          agendaMarkdown: extractAgenda(issue.body),
+          bodyHash: sha256(issue.body),
+          links: discourseLinks(issue)
+        }, null, 2)}\n`,
+        source: "github-pm-issues",
+        sourceUrl: issue.url,
+        from: [`raw/issue-${issue.number}.json`],
+        generatedAt
+      }));
+    }
     await writeRecord(repoRoot, record);
     records.push(record);
   }
