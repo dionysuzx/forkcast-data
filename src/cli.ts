@@ -6,6 +6,7 @@ import { validate } from "./pipeline/validate.js";
 import { buildSnapshot } from "./pipeline/snapshot.js";
 import { buildSearchIndex } from "./pipeline/search.js";
 import { runEvals } from "./pipeline/evals.js";
+import { compactDist } from "./pipeline/compactDist.js";
 import { buildSite } from "./site/build.js";
 import { nowIso } from "./lib/fs.js";
 
@@ -59,6 +60,7 @@ const help = (): void => {
   build-search
   run-evals
   build-site
+  compact-dist
   dummy-e2e
 `);
 };
@@ -111,6 +113,11 @@ const main = async (): Promise<void> => {
       console.log("Built data site");
       break;
     }
+    case "compact-dist": {
+      const result = await compactDist(distRoot);
+      console.log(`Compacted dist for snapshot ${result.snapshotId}`);
+      break;
+    }
     case "publish": {
       console.log("Static site is ready in dist/. Use npx netlify deploy --prod after Netlify link.");
       break;
@@ -132,6 +139,7 @@ const main = async (): Promise<void> => {
       const evals = await runEvals(latestRoot);
       if (!evals.ok) throw new Error("Fixture evals failed");
       await buildSite(distRoot);
+      await compactDist(distRoot);
       console.log(`Dummy e2e complete: ${manifest.snapshot_id}`);
       break;
     }

@@ -13,7 +13,7 @@ records/
   topic/ethereum-magicians/<id>/manifest.json
   thread/discord-archive/<channel>/<date>/manifest.json
 dist/
-  latest/...
+  _redirects                  # /latest/* and /records/* rewrite to current snapshot
   snapshots/<snapshotId>/...
 ```
 
@@ -34,6 +34,7 @@ npm run build-snapshot
 npm run build-search
 npm run run-evals
 npm run build-site
+npm run compact-dist
 npm run mcp
 ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ```
@@ -54,6 +55,8 @@ ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; builds snapshots/search/evals/site; deploys Netlify; then dispatches `forkcast-astro`.
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
+
+Before deploy, `compact-dist` keeps the current immutable snapshot and writes Netlify rewrites for `/latest/*` and `/records/*`. This keeps public URLs stable without uploading duplicate copies of the full Discord/EIP corpus every 10 minutes.
 
 ## Netlify
 

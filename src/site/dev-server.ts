@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
 
@@ -23,7 +23,21 @@ const resolvePath = async (urlPath: string): Promise<string | null> => {
   if (file?.isFile()) return filePath;
   const index = join(filePath, "index.html");
   const indexFile = await stat(index).catch(() => null);
-  return indexFile?.isFile() ? index : null;
+  if (indexFile?.isFile()) return index;
+
+  const snapshotIndex = await readFile(join(distRoot, "snapshots", "index.json"), "utf8")
+    .then((body) => JSON.parse(body) as { latest?: string })
+    .catch(() => null);
+  const latest = snapshotIndex?.latest;
+  if (!latest) return null;
+
+  if (clean.startsWith("/latest/")) {
+    return resolvePath(`/snapshots/${latest}/${clean.slice("/latest/".length)}`);
+  }
+  if (clean.startsWith("/records/")) {
+    return resolvePath(`/snapshots/${latest}/records/${clean.slice("/records/".length)}`);
+  }
+  return null;
 };
 
 createServer(async (request, response) => {

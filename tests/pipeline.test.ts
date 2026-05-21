@@ -6,6 +6,7 @@ import { ingestDummy } from "../src/adapters/dummy.js";
 import { derive } from "../src/pipeline/derive.js";
 import { buildSnapshot } from "../src/pipeline/snapshot.js";
 import { buildSearchIndex, searchDocuments } from "../src/pipeline/search.js";
+import { compactDist } from "../src/pipeline/compactDist.js";
 import { validate } from "../src/pipeline/validate.js";
 import { readJson } from "../src/lib/fs.js";
 import type { SearchDocument } from "../src/domain/types.js";
@@ -41,6 +42,9 @@ describe("data pipeline", () => {
     expect(`${hit?.title} ${hit?.body}`).toContain("BAL");
     const eip = await readJson<{ id: number }>(join(repo, "dist", "latest", "eips", "7702.json"));
     expect(eip.id).toBe(7702);
+    await compactDist(join(repo, "dist"));
+    await expect(readJson(join(repo, "dist", "snapshots", manifest.snapshot_id, "eips", "7702.json"))).resolves.toMatchObject({ id: 7702 });
+    await expect(readJson(join(repo, "dist", "latest", "eips", "7702.json"))).rejects.toThrow();
   });
 
   it("keeps derived call intelligence stable across identical derives", async () => {

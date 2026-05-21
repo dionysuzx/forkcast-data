@@ -11,7 +11,7 @@ cd /Users/lucy/fun/forkcast-data
 ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ```
 
-The latest snapshot ID is in `dist/latest/manifest.json`.
+The latest snapshot ID is printed by the command. After `compact-dist`, `/latest/*` is served through Netlify rewrites to the current snapshot.
 
 ## Real Backfill
 
@@ -28,13 +28,14 @@ npm run build-snapshot
 npm run build-search
 npm run run-evals
 npm run build-site
+npm run compact-dist
 ```
 
 ## Live GitHub Actions Loop
 
 1. `forkcast-data` runs `data-pipeline.yml` every 10 minutes with `source=canonical`.
 2. The pipeline checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and optional `pm-lean-feed`.
-3. The pipeline ingests all sources into one shared record layout, validates, builds immutable snapshots, builds search, runs fixture evals, deploys Netlify, and dispatches `forkcast-astro`.
+3. The pipeline ingests all sources into one shared record layout, validates, builds immutable snapshots, builds search, runs fixture evals, compacts the deploy artifact, deploys Netlify, and dispatches `forkcast-astro`.
 4. `pm-lean` may also dispatch `forkcast-data` with `source=pm-lean`, but pm-lean is an optional upstream source, not the canonical data plane.
 
 Manual dispatch:
@@ -58,7 +59,7 @@ Required variables:
 ## MCP Smoke
 
 ```bash
-FORKCAST_DATA_LATEST_ROOT=/Users/lucy/fun/forkcast-data/dist/latest npm run mcp
+FORKCAST_DATA_LATEST_ROOT=/Users/lucy/fun/forkcast-data/dist/snapshots/<snapshotId> npm run mcp
 ```
 
 Tools: `search_forkcast`, `get_upgrade`, `get_eip`, `get_call`, `get_decisions`, `get_devnet`, `trace_fact`.
