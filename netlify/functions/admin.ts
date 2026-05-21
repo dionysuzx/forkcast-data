@@ -1,6 +1,5 @@
 import type { Config } from "@netlify/functions";
 import { adminSecretStatus, isAuthorized } from "./_shared/admin-auth.js";
-import { readLatestJson } from "./_shared/static-data.js";
 
 type AdminAction = "ingestCanonical" | "ingestFull" | "evals" | "snapshot" | "dataDeploy" | "astroRebuild";
 
@@ -15,8 +14,14 @@ const controls = (authed: boolean) => ({
   astroRebuild: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"] }
 });
 
-const readStaticJson = async <T>(path: string, fallback: T): Promise<T> => {
-  return readLatestJson(path, fallback);
+const readStaticJson = async <T>(request: Request, path: string, fallback: T): Promise<T> => {
+  try {
+    const response = await fetch(new URL(`/latest/${path}`, request.url));
+    if (!response.ok) return fallback;
+    return await response.json() as T;
+  } catch {
+    return fallback;
+  }
 };
 
 const dispatchWorkflow = async (repo: string, workflow: string, inputs: Record<string, string | boolean>): Promise<Response> => {
@@ -79,9 +84,9 @@ export default async (request: Request) => {
     }
   }
   const missing = adminSecretStatus();
-  const stats = await readStaticJson("stats.json", {});
-  const evals = await readStaticJson("evals/results.json", { ok: false, results: [] });
-  const manifest = await readStaticJson("manifest.json", {});
+  const stats = await readStaticJson(request, "stats.json", {});
+  const evals = await readStaticJson(request, "evals/results.json", { ok: false, results: [] });
+  const manifest = await readStaticJson(request, "manifest.json", {});
   return Response.json({
     ok: true,
     authorized: authed,

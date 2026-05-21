@@ -1,5 +1,4 @@
 import type { Config } from "@netlify/functions";
-import { readLatestJson } from "./_shared/static-data.js";
 
 const stopwords = new Set([
   "a",
@@ -44,7 +43,8 @@ const eipNumberFromQuery = (query: string): string | undefined =>
 export default async (request: Request) => {
   const url = new URL(request.url);
   const query = url.searchParams.get("q") ?? "";
-  const docs = await readLatestJson<Array<{ title: string; body: string; tags: string[]; kind: string }>>("search/index.json");
+  const searchUrl = new URL("/latest/search/index.json", request.url);
+  const docs = await fetch(searchUrl).then((response) => response.json()) as Array<{ title: string; body: string; tags: string[]; kind: string }>;
   const terms = tokenize(query);
   const kind = url.searchParams.get("kind");
   const exactEip = eipNumberFromQuery(query);
