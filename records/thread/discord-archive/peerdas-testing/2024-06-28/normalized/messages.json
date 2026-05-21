@@ -1,0 +1,192 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2024-06-28",
+  "messageCount": 22,
+  "sourceHash": "56a3dbcf3ba8aa5c32ce9ef0c7d7696479bdae80f45a1dd81be0f514657b1ed3",
+  "searchText": "How are other clients currently finding peers for data column rpcs? ENR isn't always available - we never get them if a peer connects to us. Do clients fallback to the `CUSTODY_REQUIREMENT` if enr is not present? Is it worth adding custody column count to `MetaData` query? (thanks to <@688748669268132001> for suggesting) https://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#metadata just checked out lighthouse das branch specific metrics; - Full runtime of data column sidecars gossip verification (counter) - Number of data column sidecars verified for gossip (counter) - Total count of reconstructed columns (counter) - Time taken to reconstruct columns (histogram) - Time taken to compute data column sidecar, including cells, proofs and inclusion proof (histogram) - Time taken to verify data_column sidecar inclusion proof (histogram) - Runtime of batched data column kzg verification (histogram) - Runtime of single data column kzg verification (histogram) Counts on custody could be useful. `column_index` as labels? - Total count of columns in custody (counter) Gossipsub domain metrics will be very handy imo. Should contain topic `data_column_sidecar_{subnet_id}` as labels; - Number of gossip messages sent to each topic (counter) - Number of bytes sent to each topic (counter) - Number of gossip messages received from each topic (including duplicates) (counter) - Number of bytes received from each topic (including duplicates) (counter) - Number of gossip messages received from each topic (deduplicated) (counter) - Number of bytes received from each topic (deduplicated) (counter) Req/Resp domain metrics would be nice to have. Should contain protocol ID `/eth2/beacon_chain/req/data_column_sidecars_by_root/1/` and `/eth2/beacon_chain/req/data_column_sidecars_by_range/1/` as labels; - Number of requests sent (counter) - Number of requests received (counter) - Number of responses sent (counter) - Number of responses bytes sent (counter) - Number of responses received (counter) - Number of responses bytes received (counter) any update on this <@466006586477772831> ? I am not able to range sync lodestar to head > Do clients fallback to the CUSTODY_REQUIREMENT if enr is not present? Prysm does. Hey sorry about the delay, I’ve got a fix for it I think but I’m not comfortable rolling out to all lighthouse nodes yet, as we have issues range syncing ourselves and I’m still investigating. But I can get the change onto a branch and perhaps we can have that deployed onto one supernode? There are also prysm and teku supernodes as well, is lodestar not able to query it from them? could locally test on kurtosis if the fix is working Yeah I’ve been testing locally. There are few fixes made that could potentially fix the rpc server but lighthouse still doesn’t sync. Now I’m adding other clients into the mix to identify whether the sync issue is on the rpc server or rpc client side We don't use enr at all, we check subscriptions of the peer, we assume that node custodies all active column subscriptions well seems like my my node either didn't connect to them, will check it I would also favour adding it to metadata and could just remove from enr, but in absense of the enr info minimum custody would be correct to assume i guess I'll see if I can get lodestar to sync with the new lighthouse version yep that should be ok on bigger networks, but testnets with small number of nodes would rely a lot more on supernodes to serve columns we've considered this as well - although that means you won't catch & penalise peers that are not satifying their custody requirements right? yeah, no scoring at this moment Seeing this in pryms logs on my local devnet, look like it's not able to request data columns by range from Teku, is the by range method supported in Teku? Prysm -> Teku: ``` time=\"2024-06-28 12:17:59\" level=warning msg=\"Remote peer 16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH does not have wanted columns\" prefix=initial-sync time=\"2024-06-28 12:17:59\" level=debug msg=\"Requesting Columns\" capacity=47 count=16 peer=16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH prefix=initial-sync score=\"[0.0%, raw: 0.00, blocks: 0/640]\" start=5 time=\"2024-06-28 12:17:59\" level=debug msg=\"Sending data column by range request\" count=16 prefix=sync startSlot=5 topic=\"/eth2/beacon_chain/req/data_column_sidecars_by_range/1\" time=\"2024-06-28 12:17:59\" level=debug msg=\"Could not request data columns by range from peer\" error=\"failed to negotiate protocol: protocols not supported: [/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy]\" peer=16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH prefix=initial-sync ``` well lodestar doesnt need to rely on supernodes, but i want to debug its sync and see if all is good since even in last devnet peers were not replying with the data columns they were supposed to so i am just trying to go step by step: 1. sync with super nodes 2. sync with non supernodes but having columns custodied > lodestar 3. sync from nodes having less columns than lodestar custody (but more overall) So it there is a node which is 1, lighthouse or teku or ..., i am happy to use its enr. right now i filter syncing from nodes which are not supernode and then want to check on various filter configurations my guess with lighthouse supernode not serving datacolumns might not have to do with how many columns it is custodying since i didnt get any column at all interesting, will check it do you send `start_slot` like in spec? https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7594/p2p-interface.md#datacolumnsidecarsbyrange-v1 UPDATE: ahh, I'm dumb it's just ssz, we don't care names I've managed to test a few things on the new LH version. Prysm **cannot** range sync with LH, it might be due to request size (see logs below). We recently made a fix on our rpc request size limit, but still getting the same error in Prysm. Will look into it next week ``` time=\"2024-06-28 12:18:06\" level=debug msg=\"Could not request data columns by range from peer\" error=\"read chunked data column sidecar: Rate limited. Request too large: failed to read stream of chunk-encoded blobs\" ``` Lighthouse **is able to** range sync with another Lighthouse supernode *briefly*, although it gets disconnected pretty quickly as we're sending sampling requests too quickly and getting banned by ourselves 😅 . I can make a fix for this next week. However it looks like at least the new version is able to serve columns to others. I'm running out of time for today, will push a fix early next week! syncing from prsym gives this error : ```ts Jun-28 13:16:27.662[network] verbose: Req done method=data_column_sidecars_by_range, version=1, encoding=ssz_snappy, client=Prysm, peer=16...Z93Wdq, requestId=637 Jun-28 13:16:27.662[network] verbose: Req error method=data_column_sidecars_by_range, version=1, encoding=ssz_snappy, client=Prysm, peer=16...Z93Wdq, requestId=608, code=SSZ_SNAPPY_ERROR_SOURCE_ABORTED Jun-28 13:16:27.663[sync] verbose: Batch download error id=Finalized, startEpoch=394, status=Downloading - Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAmELFoWGccAFe4W5fyxTQyZ18Ft9UaczReC5RC3vZ93Wdq for blockSlot=12628 blobKzgCommitmentsLen=6 with numColumns=16 dataColumnSidecars=10 custodyIndexesPresent=false received dataColumnIndexes=3,6,7,27,35,38,39,59,67,70 expected=3,6,7,27,35,38,39,59,67,70,71,91,99,102,103,123 Error: Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAmELFoWGccAFe4W5fyxTQyZ18Ft9UaczReC5RC3vZ93Wdq for blockSlot=12628 blobKzgCommitmentsLen=6 with numColumns=16 dataColumnSidecars=10 custodyIndexesPresent=false received dataColumnIndexes=3,6,7,27,35,38,39,59,67,70 expected=3,6,7,27,35,38,39,59,67,70,71,91,99,102,103,123 ``` Sorry this was due to a LH bug in rpc request size limit and it’s been fixed, but not deployed yet. <@412614104222531604> can we update the image on lighthouse supernodes? Anyone had this for kurtosis web?",
+  "excerpts": [
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "How are other clients currently finding peers for data column rpcs? \n\nENR isn't always available - we never get them if a peer connects to us. Do clients fallback to the `CUSTODY_REQUIREMENT` if enr is not present?\n\nIs it worth adding custody column count to `MetaData` query? (thanks to <@688748669268132001> for suggesting)\nhttps://github.com/ethereum/consensus-specs/blob/dev/specs/phase0/p2p-interface.md#metadata",
+      "createdAt": "2024-06-28T02:11:35.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "savid",
+      "category": "Testing",
+      "parent": "",
+      "content": "just checked out lighthouse das branch specific metrics;\n- Full runtime of data column sidecars gossip verification (counter)\n- Number of data column sidecars verified for gossip (counter)\n- Total count of reconstructed columns (counter)\n- Time taken to reconstruct columns (histogram)\n- Time taken to compute data column sidecar, including cells, proofs and inclusion proof (histogram)\n- Time taken to verify data_column sidecar inclusion proof (histogram)\n- Runtime of batched data column kzg verification (histogram)\n- Runtime of single data column kzg verification (histogram)\n\nCounts on custody could be useful. `column_index` as labels?\n- Total count of columns in custody (counter)\n\nGossipsub domain metrics will be very handy imo. Should contain topic `data_column_sidecar_{subnet_id}` as labels;\n- Number of gossip messages sent to each topic (counter)\n- Number of bytes sent to each topic (counter)\n- Number of gossip messages received from each topic (including duplicates) (counter)\n- Number of bytes received from each topic (including duplicates) (counter)\n- Number of gossip messages received from each topic (deduplicated) (counter)\n- Number of bytes received from each topic (deduplicated) (counter)\n\nReq/Resp domain metrics would be nice to have. Should contain protocol ID `/eth2/beacon_chain/req/data_column_sidecars_by_root/1/` and `/eth2/beacon_chain/req/data_column_sidecars_by_range/1/` as labels;\n- Number of requests sent (counter)\n- Number of requests received (counter)\n- Number of responses sent (counter)\n- Number of responses bytes sent (counter)\n- Number of responses received (counter)\n- Number of responses bytes received (counter)",
+      "createdAt": "2024-06-28T03:10:16.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "any update on this <@466006586477772831> ? I am not able to range sync lodestar to head",
+      "createdAt": "2024-06-28T07:50:13.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "> Do clients fallback to the CUSTODY_REQUIREMENT if enr is not present?\nPrysm does.",
+      "createdAt": "2024-06-28T08:30:24.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hey sorry about the delay, I’ve got a fix for it I think but I’m not comfortable rolling out to all lighthouse nodes yet, as we have issues range syncing ourselves and I’m still investigating. But I can get the change onto a branch and perhaps we can have that deployed onto one supernode? There are also prysm and teku supernodes as well, is lodestar not able to query it from them?",
+      "createdAt": "2024-06-28T10:15:56.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "could locally test on kurtosis if the fix is working",
+      "createdAt": "2024-06-28T10:21:44.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah I’ve been testing locally. There are few fixes made that could potentially fix the rpc server but lighthouse still doesn’t sync. Now I’m adding other clients into the mix to identify whether the sync issue is on the rpc server or rpc client side",
+      "createdAt": "2024-06-28T10:23:56.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "We don't use enr at all, we check subscriptions of the peer, we assume that node custodies all active column subscriptions",
+      "createdAt": "2024-06-28T10:50:51.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "well seems like my my node either didn't connect to them, will check it",
+      "createdAt": "2024-06-28T11:19:26.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "I would also favour adding it to metadata and could just remove from enr, but in absense of the enr info minimum custody would be correct to assume i guess",
+      "createdAt": "2024-06-28T11:20:33.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll see if I can get lodestar to sync with the new lighthouse version\nyep that should be ok on bigger networks, but testnets with small number of nodes would rely a lot more on supernodes to serve columns",
+      "createdAt": "2024-06-28T11:48:19.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "we've considered this as well - although that means you won't catch & penalise peers that are not satifying their custody requirements right?",
+      "createdAt": "2024-06-28T11:52:04.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, no scoring at this moment",
+      "createdAt": "2024-06-28T11:52:37.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Seeing this in pryms logs on my local devnet, look like it's not able to request data columns by range from Teku, is the by range method supported in Teku?\n\nPrysm -> Teku:\n```\ntime=\"2024-06-28 12:17:59\" level=warning msg=\"Remote peer 16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH does not have wanted columns\" prefix=initial-sync\ntime=\"2024-06-28 12:17:59\" level=debug msg=\"Requesting Columns\" capacity=47 count=16 peer=16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH prefix=initial-sync score=\"[0.0%, raw: 0.00,  blocks: 0/640]\" start=5\ntime=\"2024-06-28 12:17:59\" level=debug msg=\"Sending data column by range request\" count=16 prefix=sync startSlot=5 topic=\"/eth2/beacon_chain/req/data_column_sidecars_by_range/1\"\ntime=\"2024-06-28 12:17:59\" level=debug msg=\"Could not request data columns by range from peer\" error=\"failed to negotiate protocol: protocols not supported: [/eth2/beacon_chain/req/data_column_sidecars_by_range/1/ssz_snappy]\" peer=16Uiu2HAkvAYnCEtZRWij1jdCxnDQoqSuZFLqcynsXVLv2JCwYJuH prefix=initial-sync\n```",
+      "createdAt": "2024-06-28T12:26:41.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "well lodestar doesnt need to rely on supernodes, but i want to debug its sync and see if all is good since even in last devnet peers were not replying with the data columns they were supposed to\n\nso i am just trying to go step by step:\n\n1. sync with super nodes\n2. sync with non supernodes but having columns custodied > lodestar\n3. sync from nodes having less columns than lodestar custody (but more overall)\n\nSo it there is a node which is 1, lighthouse or teku or ..., i am happy to use its enr. right now i filter syncing from nodes which are not supernode and then want to check on various filter configurations",
+      "createdAt": "2024-06-28T12:48:40.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "my guess with lighthouse supernode not serving datacolumns might not have to do with how many columns it is custodying since i didnt get any column at all",
+      "createdAt": "2024-06-28T12:50:50.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "interesting, will check it\ndo you send `start_slot` like in spec?\nhttps://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7594/p2p-interface.md#datacolumnsidecarsbyrange-v1\nUPDATE: ahh, I'm dumb it's just ssz, we don't care names",
+      "createdAt": "2024-06-28T14:38:55.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "I've managed to test a few things on the new LH version.\n\nPrysm **cannot** range sync with LH, it might be due to request size (see logs below). We recently made a fix on our rpc request size limit, but still getting the same error in Prysm. Will look into it next week\n```\ntime=\"2024-06-28 12:18:06\" level=debug msg=\"Could not request data columns by range from peer\" error=\"read chunked data column sidecar: Rate limited. Request too large: failed to read stream of chunk-encoded blobs\"\n```\n\nLighthouse **is able to** range sync with another Lighthouse supernode *briefly*, although it gets disconnected pretty quickly as we're sending sampling requests too quickly and getting banned by ourselves 😅 . I can make a fix for this next week. However it looks like at least the new version is able to serve columns to others.\n\nI'm running out of time for today, will push a fix early next week!",
+      "createdAt": "2024-06-28T14:39:59.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "syncing from prsym gives this error :\n```ts\nJun-28 13:16:27.662[network]       verbose: Req  done method=data_column_sidecars_by_range, version=1, encoding=ssz_snappy, client=Prysm, peer=16...Z93Wdq, requestId=637\nJun-28 13:16:27.662[network]       verbose: Req  error method=data_column_sidecars_by_range, version=1, encoding=ssz_snappy, client=Prysm, peer=16...Z93Wdq, requestId=608, code=SSZ_SNAPPY_ERROR_SOURCE_ABORTED\nJun-28 13:16:27.663[sync]          verbose: Batch download error id=Finalized, startEpoch=394, status=Downloading - Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAmELFoWGccAFe4W5fyxTQyZ18Ft9UaczReC5RC3vZ93Wdq for blockSlot=12628 blobKzgCommitmentsLen=6 with numColumns=16 dataColumnSidecars=10 custodyIndexesPresent=false received dataColumnIndexes=3,6,7,27,35,38,39,59,67,70 expected=3,6,7,27,35,38,39,59,67,70,71,91,99,102,103,123\nError: Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAmELFoWGccAFe4W5fyxTQyZ18Ft9UaczReC5RC3vZ93Wdq for blockSlot=12628 blobKzgCommitmentsLen=6 with numColumns=16 dataColumnSidecars=10 custodyIndexesPresent=false received dataColumnIndexes=3,6,7,27,35,38,39,59,67,70 expected=3,6,7,27,35,38,39,59,67,70,71,91,99,102,103,123\n```",
+      "createdAt": "2024-06-28T14:45:17.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sorry this was due to a LH bug in rpc request size limit and it’s been fixed, but not deployed yet.",
+      "createdAt": "2024-06-28T15:20:39.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> can we update the image on lighthouse supernodes?",
+      "createdAt": "2024-06-28T16:03:18.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Anyone had this for kurtosis web?",
+      "createdAt": "2024-06-28T18:00:48.114000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "dad8961691786512f4cdc89ea21de71157a5e75f398ac33e1f0735f508338a09"
+        }
+      ]
+    }
+  ]
+}

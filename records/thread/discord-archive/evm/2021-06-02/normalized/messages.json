@@ -1,0 +1,914 @@
+{
+  "schemaVersion": 1,
+  "channel": "evm",
+  "date": "2021-06-02",
+  "messageCount": 113,
+  "sourceHash": "695225fd4f0b73d762cd1aa00369b5bffd57d1f3a627e17e89ae6f30f12d22e0",
+  "searchText": "sorry, missed it, we have found out more about evmone and are now trying to launch the benchmarks inside SGX No worries, let us know if you need any help. If any API changes are needed, preferably we should discuss to avoid any potential for forks. great, thanks hmm, intuitively that seems like a really suboptimal implementation The way I would implement it would be to just have a call-context-scoped array `chunks` (so stored in the same place as the PC), and then have the outer loop be `if not chunks[i]: ...` So the top-level check is really easy > Yes, but this is \"chunk check once per instruction\" not \"per jump/jumpdest/call\". Right of course I guess for a \"one overhead step per jump/jumpdest/call\" VM what you would realistically need to do is come up with the list of chunks at the same time as you check total gas and stack requirements for the list of opcodes until the next break Of course, underneath the top-level check you would also need to do the other check that is sensitive to what address is being executed and whether or not the chunk was already accessed in a different context that uses the same address, but you do the more expensive check only if the really cheap check triggers Huh, I thought Solidity assigns storage slots sequentially by default? At least I remember <@!273818081439121408> saying that So storage slots 0...255 would be part of the same chunk > https://notes.ethereum.org/@ipsilon/code-chunk-cost-analysis Some great analysis by <@!425343240212971521> and other folks Arrays are sequential, but there is still a hashed element to the key 🙂 <@!273808422753796097> > enabling code chunk access cost degrades performance by 5-22% for 32-byte chunks. > Using 31-byte chunks is up to 11% slower than 32-byte chunks, 5-28% in total. My main reservation is that it goes against \"let's make EVM computation cheaper so we can have better compute vs store tradeoffs\". On pragmatic site, why 31? Cost of hashing 64 bytes is the same... See https://docs.soliditylang.org/en/v0.8.4/internals/layout_in_storage.html (which explains it for static-sized arrays and value types) and https://docs.soliditylang.org/en/v0.8.4/internals/layout_in_storage.html#mappings-and-dynamic-arrays (for mappings and dynamic arrays, which are hash based). I don't think an analysis exists, but my hunch is that mappings and dynamic arrays are more widely used compared to static arrays -- at least they are more popular constructs in tokens/AMMs. Also I did a brief review months ago regarding consecutive slots (my hope at the time was to actually have variable length slots), but the contracts I checked (tokens, uniswap, gnosissafe, gnosismultisig) did not lead to many use cases. Multisigs are a good candidate where calldata is stored in the transaction queue. Right, but the way this works in my proposal is that only the first 31 bytes of the key is hashed, the last byte is taken as is > Also I did a brief review months ago regarding consecutive slots (my hope at the time was to actually have variable length slots), but the contracts I checked (tokens, uniswap, gnosissafe, gnosismultisig) did not lead to many use cases. Multisigs are a good candidate where calldata is stored in the transaction queue. Smart contract wallets are definitely a great example of something that only needs a very small number of storage slots, which can easily be in positions 0, 1, 2...k for some small k One question to <@!425343240212971521> : It looks like in that analysis, the average overhead for blocks is 20%, but the average overhead for transactions seems to be 75% ?!? what explains the difference? Or is the idea that you were just highlighting the types of transactions that are affected the most? The transactions relate to the high gas guzzlers (as per ethgasstation), which are very significant overall in the chain, may not have been dominating in those given blocks. hmm I see We can run the analysis for other contracts if you have good examples to check? This is all actionable feedback btw. Particularly, I think this is a strong case for abandoning the 2-level subtree and going back to 1-level, and then we could reduce the per-chunk gas cost to something like 200 Do you think 200 is a good enough number to rerun the analysis with? sure! Let's see what happens with 200 well I guess you can just multiply everything by 0.6 Yes 🙂 > On pragmatic site, why 31? Cost of hashing 64 bytes is the same... So I can answer this quickly If we go back to a 1-level subtree, then actually there is zero witness overhead beyond the code chunks themselves Oh btw this is based on 32-byte chunks, with 31-byte chunks it would be a few % worse. And so it's actually *reducing* the chunk size that would increase data efficiency Is the FIO (first instruction offset) still part of the chunk? If so you can't go too low before FIO causing an overhead. ah yes it is And you're right So perhaps 31 + 1 FIO byte is as close to optimal as we're likely to get... BTW did your analysis take into account reductions in SLOAD cost for adjacent storage slots? I wasn't getting as far as checking gas, but rather was looking at existing contracts to see which one would compile to using adjacent slots *without* modifying them. Modifying contracts should lead to more opportunities. That is, if just the compiler would be improved to take advantage of it. Were you doing storage key to tree key hashing the way eth1 does it? Or using `hash(key[:31])[:31] + key[31]`? No, I was analysing how many cases the compiler generates \"adjacent\" slots according to its slot allocator (before hashing). aha This data now is also part of the compiler output (storage slots in standard json), so it should be possible to run this analysis on existing contracts if someone acquires the JSON outputs from etherscan verified contracts. \"now\" = about a year or so > Except for dynamically-sized arrays and mappings (see below), data is stored contiguously item after item starting with the first state variable, which is stored in slot 0. So if I understand this correctly, this means that standalone variables and fixed-size arrays would just get sequentially assigned to very low valued slots right? yep So that should mean that at least everything that's not mappings/dynamics should get optimized as-is that is correct, which is mostly basic values like owner, etc. right I think actually `owner` is mostly at slot 0 as people tend to put it as the first variable So one interesting example is a delegatecall forwarder Delegatecall forwarders use a hashed key But they do have an owner address, no? Also hashed, to avoid collisions Aaaah I see, the owner address is in some random position to prevent collisions with the underlying code got it See https://eips.ethereum.org/EIPS/eip-1967 > Storage slot 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc (obtained as bytes32(uint256(keccak256('eip1967.proxy.implementation')) - 1)). > > Storage slot 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103 (obtained as bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1)). The `-1` is there to avoid collision with solidity generated slots. got it If you have a fixed-size struct inside a mapping, does that still get assigned to sequential slots? (starting from a pseudorandom value of course) I frequently get confused about non-value types in mappings (especially structs), but IIRC they are calculated using the dynamic rule. got it hmm but okay I can see how there's opportunity for optimization with adjacent slots So the benefit to devs out of the box might only be a couple percent, but then it would increase over time As code optimizes to claim adjacent slots, and to execute adjacent code One potential issue I see is that it would be preferable to make adjacent-slot-optimisation done by the compiler, it may not be straight forward to enable it without new syntax or settings. While we do not offer strong guarantees, the storage slot allocation algorithm has not seen any changes and people rely on this, especially with proxies. checking Uniswap code now: https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/UniswapV2Pair.sol ``` address public factory; address public token0; address public token1; uint112 private reserve0; // uses single storage slot, accessible via getReserves uint112 private reserve1; // uses single storage slot, accessible via getReserves uint32 private blockTimestampLast; // uses single storage slot, accessible via getReserves uint public price0CumulativeLast; uint public price1CumulativeLast; uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event uint private unlocked = 1; ``` That seems like those storage slots should get mapped to 0...9 even today? There is a proposal to have fixed-size sparse byte/string types, which would be a new addition and hence its storage layout is not defined yet. That could be a good candidate to replace the dynamic bytes/string type for most use cases. By sparse I mean that it would still have a length field, so the trailing zeroes do not need to be stored, but has an upper bound. Yes, smaller types are also compressed into adjacent slots where possible. right ooh https://github.com/Uniswap/uniswap-v3-core/blob/main/contracts/UniswapV3Pool.sol v3 takes advantage of that to the max ``` struct Slot0 { // the current price uint160 sqrtPriceX96; // the current tick int24 tick; // the most-recently updated index of the observations array uint16 observationIndex; // the current maximum number of observations that are being stored uint16 observationCardinality; // the next maximum number of observations to store, triggered in observations.write uint16 observationCardinalityNext; // the current protocol fee as a percentage of the swap fee taken on withdrawal // represented as an integer denominator (1/x)% uint8 feeProtocol; // whether the pool is locked bool unlocked; } /// @inheritdoc IUniswapV3PoolState Slot0 public override slot0; ``` lololol Since there's shift opcodes and storage become really expensive, it is worth it. This was not the case pre-shifts. aha And the `immutable` are constants which are made part of the code during deploy time, so the first slot starts at `Slot0`. I must admit this is nicer than variable length storage slot, as it can apply to more use cases 🙂 At least it can improve existing bytecode. Should we have variable length strorage, one could just change the compiler to pack those sequential variables into a large storage slot, but that wouldn't help existing code. right There was an EIP for variable length storage back in the day I think it was shelved in part because figuring out the gas costs for it was too hard I think this adjacent-storage-slot design that basically lets adjacent storage slots benefit from being together the same as code could be a good approach to getting those benefits Though yeah I can see compilers needing to change to take advantage of it Is there a publicly linkable design/forum post for the verkle tree/witness format? I would like to link to it in the Solidity issue for this new type, which could take benefit of it. https://ethereum-magicians.org/t/proposed-verkle-tree-scheme-for-ethereum-state/5805 is likely still the best This has the least significant 16-bits unhashed, i.e. 65k consecutive slots are possible? Right, so it's not updated to what I said in this thread just now I think realistically we'll have 256 or 1024 consecutive slots be possible Is the limitation coming from the verkle design, the witness design, or some other constraint? Once you add support for more consecutive slots, the witnesses to each of those slots become nonzero-side, and you can't safely do 200 per chunk anymore 200 gas for the chunk? Is that processing cost or calldata cost? Or is that 200 bytes per branch of data read? 200 gas per chunk For a full branch I think it would still be ~2000 gas Because a branch has a witness that in the *worst* ca",
+  "excerpts": [
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sorry, missed it, we have found out more about evmone and are now trying to launch the benchmarks inside SGX",
+      "createdAt": "2021-06-02T15:36:20.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No worries, let us know if you need any help.  If any API changes are needed, preferably we should discuss to avoid any potential for forks.",
+      "createdAt": "2021-06-02T15:59:13.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "great, thanks",
+      "createdAt": "2021-06-02T17:25:19.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmm, intuitively that seems like a really suboptimal implementation",
+      "createdAt": "2021-06-02T19:01:45.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The way I would implement it would be to just have a call-context-scoped array `chunks` (so stored in the same place as the PC), and then have the outer loop be `if not chunks[i]: ...`",
+      "createdAt": "2021-06-02T19:03:02.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So the top-level check is really easy",
+      "createdAt": "2021-06-02T19:03:08.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Yes, but this is \"chunk check once per instruction\" not \"per jump/jumpdest/call\".",
+      "createdAt": "2021-06-02T19:03:19.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right of course",
+      "createdAt": "2021-06-02T19:03:21.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess for a \"one overhead step per jump/jumpdest/call\" VM what you would realistically need to do is come up with the list of chunks at the same time as you check total gas and stack requirements for the list of opcodes until the next break",
+      "createdAt": "2021-06-02T19:05:49.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Of course, underneath the top-level check you would also need to do the other check that is sensitive to what address is being executed and whether or not the chunk was already accessed in a different context that uses the same address, but you do the more expensive check only if the really cheap check triggers",
+      "createdAt": "2021-06-02T19:06:44.778000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Huh, I thought Solidity assigns storage slots sequentially by default?",
+      "createdAt": "2021-06-02T19:38:27.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "At least I remember <@!273818081439121408> saying that",
+      "createdAt": "2021-06-02T19:38:51.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So storage slots 0...255 would be part of the same chunk",
+      "createdAt": "2021-06-02T19:39:24.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> https://notes.ethereum.org/@ipsilon/code-chunk-cost-analysis",
+      "createdAt": "2021-06-02T19:39:28.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Some great analysis by <@!425343240212971521> and other folks",
+      "createdAt": "2021-06-02T19:39:54.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Arrays are sequential, but there is still a hashed element to the key 🙂",
+      "createdAt": "2021-06-02T19:40:06.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!273808422753796097> \n\n> enabling code chunk access cost degrades performance by 5-22% for 32-byte chunks.\n> Using 31-byte chunks is up to 11% slower than 32-byte chunks, 5-28% in total.\n\nMy main reservation is that it goes against \"let's make EVM computation cheaper so we can have better compute vs store tradeoffs\".",
+      "createdAt": "2021-06-02T19:45:59.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "On pragmatic site, why 31? Cost of hashing 64 bytes is the same...",
+      "createdAt": "2021-06-02T19:46:33.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "See https://docs.soliditylang.org/en/v0.8.4/internals/layout_in_storage.html (which explains it for static-sized arrays and value types) and https://docs.soliditylang.org/en/v0.8.4/internals/layout_in_storage.html#mappings-and-dynamic-arrays (for mappings and dynamic arrays, which are hash based).",
+      "createdAt": "2021-06-02T19:50:57.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think an analysis exists, but my hunch is that mappings and dynamic arrays are more widely used compared to static arrays -- at least they are more popular constructs in tokens/AMMs.\n\nAlso I did a brief review months ago regarding consecutive slots (my hope at the time was to actually have variable length slots), but the contracts I checked (tokens, uniswap, gnosissafe, gnosismultisig) did not lead to many use cases. Multisigs are a good candidate where calldata is stored in the transaction queue.",
+      "createdAt": "2021-06-02T19:53:30.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, but the way this works in my proposal is that only the first 31 bytes of the key is hashed, the last byte is taken as is",
+      "createdAt": "2021-06-02T20:09:37.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Also I did a brief review months ago regarding consecutive slots (my hope at the time was to actually have variable length slots), but the contracts I checked (tokens, uniswap, gnosissafe, gnosismultisig) did not lead to many use cases. Multisigs are a good candidate where calldata is stored in the transaction queue.",
+      "createdAt": "2021-06-02T20:09:52.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Smart contract wallets are definitely a great example of something that only needs a very small number of storage slots, which can easily be in positions 0, 1, 2...k",
+      "createdAt": "2021-06-02T20:10:13.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "for some small k",
+      "createdAt": "2021-06-02T20:10:15.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "One question to <@!425343240212971521> :",
+      "createdAt": "2021-06-02T20:11:17.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It looks like in that analysis, the average overhead for blocks is 20%, but the average overhead for transactions seems to be 75% ?!?",
+      "createdAt": "2021-06-02T20:11:38.659000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "what explains the difference?",
+      "createdAt": "2021-06-02T20:11:41.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or is the idea that you were just highlighting the types of transactions that are affected the most?",
+      "createdAt": "2021-06-02T20:11:59.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The transactions relate to the high gas guzzlers (as per ethgasstation), which are very significant overall in the chain, may not have been dominating in those given blocks.",
+      "createdAt": "2021-06-02T20:12:35.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmm I see",
+      "createdAt": "2021-06-02T20:13:05.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We can run the analysis for other contracts if you have good examples to check?",
+      "createdAt": "2021-06-02T20:13:33.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is all actionable feedback btw.",
+      "createdAt": "2021-06-02T20:13:53.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Particularly, I think this is a strong case for abandoning the 2-level subtree and going back to 1-level, and then we could reduce the per-chunk gas cost to something like 200",
+      "createdAt": "2021-06-02T20:13:53.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Do you think 200 is a good enough number to rerun the analysis with?",
+      "createdAt": "2021-06-02T20:16:08.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sure! Let's see what happens with 200",
+      "createdAt": "2021-06-02T20:16:25.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "well I guess you can just multiply everything by 0.6",
+      "createdAt": "2021-06-02T20:16:34.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes 🙂",
+      "createdAt": "2021-06-02T20:17:01.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> On pragmatic site, why 31? Cost of hashing 64 bytes is the same...",
+      "createdAt": "2021-06-02T20:17:04.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So I can answer this quickly",
+      "createdAt": "2021-06-02T20:17:08.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If we go back to a 1-level subtree, then actually there is zero witness overhead beyond the code chunks themselves",
+      "createdAt": "2021-06-02T20:17:28.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh btw this is based on 32-byte chunks, with 31-byte chunks it would be a few % worse.",
+      "createdAt": "2021-06-02T20:17:42.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And so it's actually *reducing* the chunk size that would increase data efficiency",
+      "createdAt": "2021-06-02T20:17:48.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is the FIO (first instruction offset) still part of the chunk? If so you can't go too low before FIO causing an overhead.",
+      "createdAt": "2021-06-02T20:19:21.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ah yes it is",
+      "createdAt": "2021-06-02T20:19:28.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And you're right",
+      "createdAt": "2021-06-02T20:19:30.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So perhaps 31 + 1 FIO byte is as close to optimal as we're likely to get...",
+      "createdAt": "2021-06-02T20:19:46.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "BTW did your analysis take into account reductions in SLOAD cost for adjacent storage slots?",
+      "createdAt": "2021-06-02T20:20:02.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I wasn't getting as far as checking gas, but rather was looking at existing contracts to see which one would compile to using adjacent slots *without* modifying them. Modifying contracts should lead to more opportunities.",
+      "createdAt": "2021-06-02T20:21:32.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is, if just the compiler would be improved to take advantage of it.",
+      "createdAt": "2021-06-02T20:22:13.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Were you doing storage key to tree key hashing the way eth1 does it?",
+      "createdAt": "2021-06-02T20:22:17.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or using `hash(key[:31])[:31] + key[31]`?",
+      "createdAt": "2021-06-02T20:22:29.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No, I was analysing how many cases the compiler generates \"adjacent\" slots according to its slot allocator (before hashing).",
+      "createdAt": "2021-06-02T20:23:12.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "aha",
+      "createdAt": "2021-06-02T20:23:22.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This data now is also part of the compiler output (storage slots in standard json), so it should be possible to run this analysis on existing contracts if someone acquires the JSON outputs from etherscan verified contracts.",
+      "createdAt": "2021-06-02T20:24:40.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"now\" = about a year or so",
+      "createdAt": "2021-06-02T20:25:04.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Except for dynamically-sized arrays and mappings (see below), data is stored contiguously item after item starting with the first state variable, which is stored in slot 0.",
+      "createdAt": "2021-06-02T20:26:11.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So if I understand this correctly, this means that standalone variables and fixed-size arrays would just get sequentially assigned to very low valued slots",
+      "createdAt": "2021-06-02T20:26:45.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right?",
+      "createdAt": "2021-06-02T20:26:46.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yep",
+      "createdAt": "2021-06-02T20:26:51.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So that should mean that at least everything that's not mappings/dynamics should get optimized as-is",
+      "createdAt": "2021-06-02T20:27:00.922000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "that is correct, which is mostly basic values like owner, etc.",
+      "createdAt": "2021-06-02T20:27:25.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-06-02T20:27:29.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think actually `owner` is mostly at slot 0 as people tend to put it as the first variable",
+      "createdAt": "2021-06-02T20:27:38.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So one interesting example is a delegatecall forwarder",
+      "createdAt": "2021-06-02T20:27:43.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Delegatecall forwarders use a hashed key",
+      "createdAt": "2021-06-02T20:28:00.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But they do have an owner address, no?",
+      "createdAt": "2021-06-02T20:28:09.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also hashed, to avoid collisions",
+      "createdAt": "2021-06-02T20:28:20.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Aaaah I see, the owner address is in some random position to prevent collisions with the underlying code",
+      "createdAt": "2021-06-02T20:28:29.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "got it",
+      "createdAt": "2021-06-02T20:28:31.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "See https://eips.ethereum.org/EIPS/eip-1967",
+      "createdAt": "2021-06-02T20:28:39.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Storage slot 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc (obtained as bytes32(uint256(keccak256('eip1967.proxy.implementation')) - 1)).\n> \n> Storage slot 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103 (obtained as bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1)).",
+      "createdAt": "2021-06-02T20:28:58.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The `-1` is there to avoid collision with solidity generated slots.",
+      "createdAt": "2021-06-02T20:29:07.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "got it",
+      "createdAt": "2021-06-02T20:29:15.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you have a fixed-size struct inside a mapping, does that still get assigned to sequential slots?",
+      "createdAt": "2021-06-02T20:30:02.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(starting from a pseudorandom value of course)",
+      "createdAt": "2021-06-02T20:30:12.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I frequently get confused about non-value types in mappings (especially structs), but IIRC they are calculated using the dynamic rule.",
+      "createdAt": "2021-06-02T20:30:44.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "got it",
+      "createdAt": "2021-06-02T20:30:52.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmm but okay I can see how there's opportunity for optimization with adjacent slots",
+      "createdAt": "2021-06-02T20:31:13.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So the benefit to devs out of the box might only be a couple percent, but then it would increase over time",
+      "createdAt": "2021-06-02T20:31:38.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "As code optimizes to claim adjacent slots, and to execute adjacent code",
+      "createdAt": "2021-06-02T20:31:48.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "One potential issue I see is that it would be preferable to make adjacent-slot-optimisation done by the compiler, it may not be straight forward to enable it without new syntax or settings. While we do not offer strong guarantees, the storage slot allocation algorithm has not seen any changes and people rely on this, especially with proxies.",
+      "createdAt": "2021-06-02T20:34:15.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "checking Uniswap code now: https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/UniswapV2Pair.sol\n\n```\n    address public factory;\n    address public token0;\n    address public token1;\n\n    uint112 private reserve0;           // uses single storage slot, accessible via getReserves\n    uint112 private reserve1;           // uses single storage slot, accessible via getReserves\n    uint32  private blockTimestampLast; // uses single storage slot, accessible via getReserves\n\n    uint public price0CumulativeLast;\n    uint public price1CumulativeLast;\n    uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event\n\n    uint private unlocked = 1;\n```\n\nThat seems like those storage slots should get mapped to 0...9 even today?",
+      "createdAt": "2021-06-02T20:35:00.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There is a proposal to have fixed-size sparse byte/string types, which would be a new addition and hence its storage layout is not defined yet. That could be a good candidate to replace the dynamic bytes/string type for most use cases.",
+      "createdAt": "2021-06-02T20:35:17.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By sparse I mean that it would still have a length field, so the trailing zeroes do not need to be stored, but has an upper bound.",
+      "createdAt": "2021-06-02T20:35:42.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, smaller types are also compressed into adjacent slots where possible.",
+      "createdAt": "2021-06-02T20:37:30.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-06-02T20:37:38.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ooh",
+      "createdAt": "2021-06-02T20:37:39.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://github.com/Uniswap/uniswap-v3-core/blob/main/contracts/UniswapV3Pool.sol",
+      "createdAt": "2021-06-02T20:37:40.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "v3 takes advantage of that to the max",
+      "createdAt": "2021-06-02T20:37:46.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```\n    struct Slot0 {\n        // the current price\n        uint160 sqrtPriceX96;\n        // the current tick\n        int24 tick;\n        // the most-recently updated index of the observations array\n        uint16 observationIndex;\n        // the current maximum number of observations that are being stored\n        uint16 observationCardinality;\n        // the next maximum number of observations to store, triggered in observations.write\n        uint16 observationCardinalityNext;\n        // the current protocol fee as a percentage of the swap fee taken on withdrawal\n        // represented as an integer denominator (1/x)%\n        uint8 feeProtocol;\n        // whether the pool is locked\n        bool unlocked;\n    }\n    /// @inheritdoc IUniswapV3PoolState\n    Slot0 public override slot0;\n```",
+      "createdAt": "2021-06-02T20:37:55.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "lololol",
+      "createdAt": "2021-06-02T20:37:56.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Since there's shift opcodes and storage become really expensive, it is worth it. This was not the case pre-shifts.",
+      "createdAt": "2021-06-02T20:38:29.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "aha",
+      "createdAt": "2021-06-02T20:38:46.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And the `immutable` are constants which are made part of the code during deploy time, so the first slot starts at `Slot0`.",
+      "createdAt": "2021-06-02T20:39:49.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I must admit this is nicer than variable length storage slot, as it can apply to more use cases 🙂",
+      "createdAt": "2021-06-02T20:41:50.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "At least it can improve existing bytecode.\n\nShould we have variable length strorage, one could just change the compiler to pack those sequential variables into a large storage slot, but that wouldn't help existing code.",
+      "createdAt": "2021-06-02T20:45:01.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-06-02T20:45:34.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There was an EIP for variable length storage back in the day",
+      "createdAt": "2021-06-02T20:45:44.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think it was shelved in part because figuring out the gas costs for it was too hard",
+      "createdAt": "2021-06-02T20:45:57.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think this adjacent-storage-slot design that basically lets adjacent storage slots benefit from being together the same as code could be a good approach to getting those benefits",
+      "createdAt": "2021-06-02T20:46:41.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Though yeah I can see compilers needing to change to take advantage of it",
+      "createdAt": "2021-06-02T20:46:49.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is there a publicly linkable design/forum post for the verkle tree/witness format? I would like to link to it in the Solidity issue for this new type, which could take benefit of it.",
+      "createdAt": "2021-06-02T20:53:57.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://ethereum-magicians.org/t/proposed-verkle-tree-scheme-for-ethereum-state/5805 is likely still the best",
+      "createdAt": "2021-06-02T20:54:32.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This has the least significant 16-bits unhashed, i.e. 65k consecutive slots are possible?",
+      "createdAt": "2021-06-02T20:56:01.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, so it's not updated to what I said in this thread just now",
+      "createdAt": "2021-06-02T20:56:14.162000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think realistically we'll have 256 or 1024 consecutive slots be possible",
+      "createdAt": "2021-06-02T20:56:26.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is the limitation coming from the verkle design, the witness design, or some other constraint?",
+      "createdAt": "2021-06-02T20:57:07.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Once you add support for more consecutive slots, the witnesses to each of those slots become nonzero-side, and you can't safely do 200 per chunk anymore",
+      "createdAt": "2021-06-02T20:57:42.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "200 gas for the chunk? Is that processing cost or calldata cost?",
+      "createdAt": "2021-06-02T21:02:04.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or is that 200 bytes per branch of data read?",
+      "createdAt": "2021-06-02T21:03:01.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "200 gas per chunk",
+      "createdAt": "2021-06-02T21:11:06.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For a full branch I think it would still be ~2000 gas",
+      "createdAt": "2021-06-02T21:11:19.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because a branch has a witness that in the *worst* case can get pretty long",
+      "createdAt": "2021-06-02T21:11:28.350000+00:00",
+      "attachments": []
+    }
+  ]
+}

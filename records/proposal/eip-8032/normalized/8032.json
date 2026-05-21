@@ -1,0 +1,75 @@
+{
+  "id": 8032,
+  "title": "EIP-8032: Size-Based Storage Gas Pricing",
+  "status": "Draft",
+  "description": "Makes `SSTORE` gas cost scale with a contract's storage size to discourage state bloat.",
+  "laymanDescription": "Adjusts gas costs for SSTORE operations based on how much data a contract holds, incentivizing efficient storage management.",
+  "author": "Guillaume Ballet (@gballet), Carlos Perez (@CPerezz), Matan Prasma (@KanExtension), Wei Han Ng (@weiihann)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-09-29",
+  "discussionLink": "https://ethereum-magicians.org/t/the-case-for-eip-8032-in-glamsterdam-tree-depth-based-storage-gas-pricing/25619",
+  "requires": [],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/228",
+          "date": "2026-01-15"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Guillaume Ballet",
+          "discord": "gballet"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Users experience potentially lower costs as inefficient contracts incur higher fees."
+    },
+    "appDevs": {
+      "description": "Developers are motivated to optimize storage usage, leading to better resource management."
+    },
+    "walletDevs": {
+      "description": "Wallets may see changes in cost calculations for contract interactions; minimal updates required."
+    },
+    "toolingInfra": {
+      "description": "Tools need to adapt to new gas price calculations related to storage; ensures users are informed."
+    },
+    "layer2s": {
+      "description": "L2s adopting this will align with mainnet behavior; expect similar updates and testing."
+    },
+    "stakersNodes": {
+      "description": "Node operators update clients for enhanced gas calculations; no major disruptions expected."
+    },
+    "clClients": {
+      "description": "No new consensus mechanisms; standard fork coordination suffices without serialization changes."
+    },
+    "elClients": {
+      "description": "Implement updated gas calculations for SSTORE, ensuring compatibility with dynamic pricing changes."
+    }
+  },
+  "benefits": [
+    "Encourages efficient contract design and reduces state bloat.",
+    "Aligns storage costs with actual usage, promoting healthier network sustainability.",
+    "Facilitates better resource allocation across the Ethereum ecosystem.",
+    "Simplifies decision-making for contract storage management."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP introduces a mechanism to dynamically price SSTORE operations based on the storage size of a contract. A new optional `storage_count` field is added to the account RLP, which tracks the number of storage slots it owns. The gas cost for SSTORE will be augmented by a factor that grows exponentially with this `storage_count` field, but only after it crosses a predefined activation threshold. This change aims to align the cost of state growth with the long-term burden it places on the network, thereby disincentivizing state bloat. ## Motivation Ethereum's state size is a growing concern, as it directly impacts node synchronization times, hardware requirements, and overall network health. The current gas model for storage operations does not fully account for the long-term cost of maintaining state indefinitely. As a result, it remains economically viable to deploy contracts with large storage footprints (“state bloat”), which can be exploited for low-cost data anchoring or spam. This imposes a negative externality on all network participants, who must store and process this data indefinitely. In practice, the computational and I/O costs of creating and updating storage slots scale with the number of storage slots a contract owns. However, the current gas pricing model does not meaningfully increase with storage size. This discrepancy underprices workloads for contracts with very large state and slows down state root computation. This proposal aims to address the state growth problem by creating a direct economic link between the size of a contract's storage and the cost to expand it further. By progressively increasing the price of SSTORE operations in proportion to how much storage a contract already owns, storage write costs become more aligned with the actual work clients perform. Contracts that contribute disproportionately to state growth will face rising costs for additional writes, while small and medium-sized contracts remain unaffected. This mechanism creates a market-based incentive for developers to use onchain storage efficiently, helping mitigate unsustainable state growth over time. ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174). ### Constants and parameters |Name|Value|Description| |-|:-:|-| |`FORK_TIMESTAMP`| TBD | Fork activation timestamp | |`LIN_FACTOR` | TBD | Linear gas cost factor | | `ACTIVATION_THRESHOLD` | TBD | Activation threshold, chosen to be at ~8GB of data. | | `TRANSITION_REGISTRY_ADDRESS` | TBD | The address of system contract that holds the information of account transition | | `TRANSITION_SLOTS_PER_BLOCK` | TBD | The number of storage slots to iterate per block during the transition process | | `TRANSITION_MAX_ACCOUNTS` | TBD | The number of accounts to iterate per block during the transition process | <-- TODO --> ### New account field Account RLP descriptors receive an optional `storage_count` field, corresponding to the current number of storage slots it contains. ### Account transition At `FORK_TIMESTAMP`, the transition is activated. The transition process involves reading all accounts and count the number of storage slots for accounts with non-empty storage root hashes, which in turn populates the `storage_count` field in the account. The progress of the transition is stored at system contract at `TRANSITION_REGISTRY_ADDRESS`. Storage layout at `TRANSITION_REGISTRY_ADDRESS`: - slot `0x00`: `cursor_account_hash` (32-byte account hash) - slot `0x01`: `cursor_slot_hash` (32-byte slot hash) - slot `0x02`: `cursor_accum` (uint256 count of non-zero slots seen for the current account) At the **end** of each block, the client performs up to `TRANSITION_SLOTS_PER_BLOCK` storage slot iterations, possibly spanning one account or multiple accounts: 1. **Select account** If `cursor_account_hash == 0x00…00`, set it to the smallest account hash that is present in the state trie. Otherwise, continue with `cursor_account_hash`. 2. **Iterate storage slots** If the current account at `cursor_account_hash` has a non-empty `storageRootHash`, visit storage slots of this account in ascending lexicographic order of `slot hash`, starting **strictly after** `cursor_slot_hash` (or from the beginning if `cursor_slot_hash == 0x00…00`). - Increment `cursor_accum` slot for every slot hash seen - Stop when either: - `TRANSITION_SLOTS_PER_BLOCK` slots have been processed, or - there are no more storage slots for the account. 3. **Finalize account (if exhausted)** If all storage slots for `cursor_account_hash` have been visited, set `storage_count(cursor_account)` to `cursor_accum` in the account object. If `TRANSITION_MAX_ACCOUNTS` accounts are iterated, then stop iterating. - Else: - Advance to the next account: `cursor_account_hash` = next account hash that is present in the state trie - Reset per-account cursors: `cursor_slot_hash = 0x00…00`, `cursor_accum = 0` 4. **Persist** If either `TRANSITION_SLOTS_PER_BLOCK` or `TRANSITION_MAX_ACCOUNTS` is reached, write `cursor_account_hash`, `cursor_slot_hash`, and `cursor_accum` to the registry in the post-state of the block. 5. **Completion** The transition is complete when there is no further account present in the trie, with an account hash that is lexicographically greater than the current `cursor_account_hash`. The account hashes and slot hashes are iterated in ascending lexicographical order. Transition reference: [EIP-7612](./eip-7612.md) #### Reorg semantics Chain reorganizations require **no special handling** beyond normal block re-execution. The mechanism is reorg-safe. `storage_count` updates and the transition cursors (`cursor_account_hash`, `cursor_slot_hash`, `cursor_accum`) are ordinary state writes committed in the post-state o"
+}

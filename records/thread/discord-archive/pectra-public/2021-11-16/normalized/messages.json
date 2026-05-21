@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "pectra-public",
+  "date": "2021-11-16",
+  "messageCount": 235,
+  "sourceHash": "7e377aa29371e14a9f72dc37451674aa15e1225db35f379bb75c96bec3e4d734",
+  "searchText": "Hey all. Unsure when it happened that you guys decided that the TTD will be removed from execution clients, but I refuse to remove it from Geth. FYI Execution clients need to know when a hard fork happens, it's configured all over the code. I can't rely on someone from the outside telling me that oh hey, btw, fork happened 5 mintues ago and all your internal state is shit. Sorry, fix it We do not and will not support dynamically reconfiguring forks during runtime This asynchonicity that results in the consensus clients telling us after the fact that the merge happened makes everything insanely brittle within an execution client. All of a sudden every single code path needs to be aware that the rug might be pulled from underneath at any point in time. Miners need notification logic to abort PoW mining and switch to PoS mining in the middle of mining. What happens if they manage to mine a block before the consensus client tells us TTD was passed? Well, we just have an invalid chain that we need to undo, because of async You know what, let's switch roles. Lets keep the merge notion completely hidden from consensus clients and let execution clients notify consensus that hey, we jsut forked, better reorg all your shit. Lets see how you like it hey Peter, TTD is not removed entirely. But yes, the current spec expects that EL will switch over to PoS with the first `forkchoiceUpdated` received from CL -- this is where actual switch happens because this method switches the fork choice rule as per EIP-3675. The recent change to the spec says that EL must follow `forkchoiceUpdated` disregarding whether it happens on the terminal block (wrt TTD) or not. Not sure I understand your concern about asynchronicity. The switch may cause a re-org if miner managed to mine a block on top of a terminal block before the PoS block arrives and the switch happens but this re-org shouldn't be deeper than 1 block and EL should be able to do such re-org. The reason why it was done is because we have TTD override + terminal block hash override options that will be used to accelerated the merge, and there are difficulties in synchronizing this overrides between the layers. Thread with detailed discussion is here: https://github.com/ethereum/consensus-specs/issues/2643. Worth considering that the shift may happen only in one direction (i.e. TTD may only be reset to a lower value than the hardcoded one) and EL still must stop processing blocks that have total difficulty >= TTD -- this requirement is preserved. These overrides will only be used in emergency cases when either network is under attack or significant hashpower disappeared delaying the merge by a month. In a normal case TTD will be the same on both layers. But yes, EL can't entirely rely on this hardcoded value anymore > The recent change to the spec says that EL must follow forkchoiceUpdated disregarding whether it happens on the terminal block (wrt TTD) or not. Geth will not follow this change 🙂 > EL should be able to do such re-org It makes EL code extremely brittle because I need to be able to dynamically, retrospectively apply a fork and I need every single code handling forks to be updated also when a new EL client joins the network, how does it know what the switchover block is? CL says it's in POS mode, awesome. So when do I stop verifying PoW blocks? when do I start rejecting blocks with uncles? I don't see why this entire thing is even discussed just to avoid the user having to specify 1 more flag, which they already need to for the CL client As I said, if you want, I can accept Geth driving the consensus and telling CL that the fork already happened I assume you will face similar backlash from CL clients Even with TTD syncronized across the layers geth should be able to import sisters of a terminal PoW block after the switch has happened it makes everything extremely complicated inside the code to support suprise forks Geth does not support changing consensus rules on the fly. It does not support converting a valid block into an invalid one What happens if I cached a block? Now all of a sudden I need cache invalidation logic all over the place I notify clients of a block, turns out that not only it was reoreg, it was even invalid from the get go Reorging blocks is one thing, that Geth can handle, side chains geth can handle but you are requiring us to add logic to invalidate previously valid blocks that has consequences everything is solveble, it just makes absolutely no sense to introduce this complexity to save the user from specifying 1 flag We actually don't. If a block is not a terminal one wrt TTD and is a valid PoW block then it will stay valid for a time being. And it shouldn't affect the switch to PoS wrt hardcoded TTD* if a block is mined on top of the terminal and you tell us after the fact that the merge happened 1 block before, you are invalidating a block I'm no enumerating problems to solve btw, I'm highlighting the complexity added all over the place dumped on us just to avoid 1 flag E.g. I receive a header from the network, I can't even validate its difficutly field, because I've no idea whether it belongs to the PoW or PoS chain I see what you mean. It's invalid because it's not a PoS block. I am trying to understand now what additional implications a 1-2 blocks re-org in this case comparing to a regular re-org. it's a consensus rule reorg not a block reorg you are changing the rules of the chain geth only support consensus rule changes on startup; then it will discard anything that's above a new ruleset and will start from that point onward but in that case you don't have tens of subsystems needing dynamic rule changes but not retroactively with respect to the chain, it's probably retroactive wrt the tree and on different branches of the tree may be different rules at the same block height. This is what I was assuming like it's not a big problem to handle yes, you are changing retroactivly on the chain you retrospecitvely tell me the TTD was smaller than my last block you invalidate my head potentially you all of a sudden tell me that my mining code needed to have stopped and exited PoW mode. Now my mining code needs to be able to handle sudden rug pulls that's again an extra bit of production code that's needed to be implemeted and tested, just to avoid 1 flag what happens if I switch to PoS mode after starting mining on PoW and someone delivers a valild PoW solution to the mining work taks? I don't know. it needs to be handled whereas previously we would simply never make the next work packet in the firs tplace currently geth accepts solutions to all past works too even on side chains, so it's not a simple reorg I actually need logic to invalidate and remove stuff from the miner hard? no. useless effort? yes EL is at the block `A` which has `N+1` height currently. And then CL may ask EL to switch to `A'` with the same `N+1` height which has common ancestor with `A`. It's not in the way that CL says that `A` suddenly became a PoS block. EL is at block A, starts mining B, finishes mining B when CL says A was the terminal one. Now I have B which became invalid I get it. So, you've been mining B and B appeared to be on a stale fork, B would never happen if you'd know in advance B didn't appear on a stale fork, B is invalid because it never should have been allowed to be created The same would happen if a user forgot to override TTD on EL side, right? Yes, but then the user stops Geth, and on restart I clean out B, before starting up everything Then when all subsystems come online, there's no invalid block in the chain I mean stale = the one that would never be accepted by the network It was accepted by my node, so my internal state is whacked and then it's been re-orged, right? it's ok to have this block because it won't be a part of canonical chain. I am thinking about user forgetting to restart geth with overridden TTD. In this case geth would refuse switching to PoS until it reaches the TTD -- this is dangerous for a node restarting with a new td means I clean out invalid blocks before geth starts up internally, so there's never a \"reorg\" old geth saw one chain state and ruleset, new geth sees a new ruleset and new chain state both are always consistent and valid you are askign us to make a geth that can handle both old and new rulsets within a single database > and then it's been re-orged, right? it's ok to have this block because it won't be a part of canonical chain. I am thinking about user forgetting to restart geth with overridden TTD. In this case geth would refuse switching to PoS until it reaches the TTD -- this is dangerous for a node The solution is simple. Have the TTD EL side and have the EL ping the CL client that the TTD was exceeded Except CL will revolt for the same reason I'm revolting now 🙂 If the user needs to restart one client anyway, it's completely acceptable to have them restart both you can add a check and warning if either side detects an inconsistency it is trivial to ensure the two TTDs are the same on both sides than to hack either side to dynamically swap out TTD on the fly <@!206016661470314496> IIUC, your primary complaint is not knowing the TTD on startup? It doesn't have as much to do with *where* the TTD is coming from, but rather it has to do with *when* you learn about the TTD (at startup vs at runtime)? Polling terminal block data from EL is the complexity on CL side as it's difficult to implement this in a robust way. Checking the consistency of TTD between the layers would add a complexity to the Engine API -- we'd need a kind of status message exchange and a point where we can do this kind of check yup I want it to remain static across the entire lifetime of geth Updating it after it's set means all internal code needs to handle the update I hear you and I understand the complexity now (I hope). THe assumption was that it would be a re-org similar to a regular re-orgs But isn't that what we do right now? The CL is always polling the EL for the current block so they know when they reached ttd I believe in all but the most pathological scenarios, TTD should be known *before* it is reached, not after. Would it be reasonable for Geth to just write TTD to disk and halt if it receives a TTD in the past, and then on next boot it would start with that saved TTD? It doesn't receive a TTD in a clear way. It rather receives a `forkchoiceUpdated` message that triggers the switch Or does it need to know the TTD at startup even if the TTD is in the future? And then the new TTD is released with the new client version Hmm, I see. So the issue is having TTD *change* during a run of Geth, regardless of whether it moved forward or backward. yup how would EL handle the TERMINAL_BLOCK_HASH override? as it skips TTD checks altogether? Geth would know this at startup, so it wouldn't be a problem IIUC what Peter is saying. It won't know it at start up according to current design how can get know TERMINAL_BLOCK_HASH in future? unless restart is required I am quite surprised at the lengths we're going to in order to avoid the user needing to set a flag on both the CL and EL, given that we don't expect the flag to be needed at all anyway. And we'd be pushing out releases hard coding that TTD asap anyway. Personally I'd be in favour of both EL and CL just knowing the TTD (and TERMINAL_BLOCK_HASH if there is one). terminal block hash is not relevant tohugh from this perspective that just selects which chain to go with but all chains are equally valid my fit is with ttd, which can change the rules as per my understanding of CL specs, merge transition in CL occurs at TERMINAL_BLOCK_HASH Yeah, it seems like doing it this way is the least of all evils so all the blocks mined after TERMINAL_BLOCK_HASH are sort of invalid as per the logic you have elaborated Right, but if geth would be restarted with TBH then it could invalidate all other chains on start up well yeah, but terminal block hash will be of ",
+  "excerpts": [
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey all. Unsure when it happened that you guys decided that the TTD will be removed from execution clients, but I refuse to remove it from Geth. FYI",
+      "createdAt": "2021-11-16T08:39:25.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Execution clients need to know when a hard fork happens, it's configured all over the code. I can't rely on someone from the outside telling me that oh hey, btw, fork happened 5 mintues ago and all your internal state is shit. Sorry, fix it",
+      "createdAt": "2021-11-16T08:40:13.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We do not and will not support dynamically reconfiguring forks during runtime",
+      "createdAt": "2021-11-16T08:40:36.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This asynchonicity that results in the consensus clients telling us after the fact that the merge happened makes everything insanely brittle within an execution client. All of a sudden every single code path needs to be aware that the rug might be pulled from underneath at any point in time. Miners need notification logic to abort PoW mining and switch to PoS mining in the middle of mining. What happens if they manage to mine a block before the consensus client tells us TTD was passed? Well, we just have an invalid chain that we need to undo, because of async",
+      "createdAt": "2021-11-16T08:42:59.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You know what, let's switch roles. Lets keep the merge notion completely hidden from consensus clients and let execution clients notify consensus that hey, we jsut forked, better reorg all your shit. Lets see how you like it",
+      "createdAt": "2021-11-16T08:44:28.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hey Peter, TTD is not removed entirely. But yes, the current spec expects that EL will switch over to PoS with the first `forkchoiceUpdated` received from CL -- this is where actual switch happens because this method switches the fork choice rule as per EIP-3675. The recent change to the spec says that EL must follow `forkchoiceUpdated` disregarding whether it happens on the terminal block (wrt TTD) or not. Not sure I understand your concern about asynchronicity. The switch may cause a re-org if miner managed to mine a block on top of a terminal block before the PoS block arrives and the switch happens but this re-org shouldn't be deeper than 1 block and EL should be able to do such re-org.\n\nThe reason why it was done is because we have TTD override + terminal block hash override options that will be used to accelerated the merge, and there are difficulties in synchronizing this overrides between the layers. Thread with detailed discussion is here: https://github.com/ethereum/consensus-specs/issues/2643. Worth considering that the shift may happen only in one direction (i.e. TTD may only be reset to a lower value than the hardcoded one) and EL still must stop processing blocks that have total difficulty >= TTD -- this requirement is preserved.\n\nThese overrides will only be used in emergency cases when either network is under attack or significant hashpower disappeared delaying the merge by a month. In a normal case TTD will be the same on both layers. But yes, EL can't entirely rely on this hardcoded value anymore",
+      "createdAt": "2021-11-16T09:41:20.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": ">  The recent change to the spec says that EL must follow forkchoiceUpdated disregarding whether it happens on the terminal block (wrt TTD) or not.\nGeth will not follow this change 🙂",
+      "createdAt": "2021-11-16T10:02:42.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> EL should be able to do such re-org\nIt makes EL code extremely brittle",
+      "createdAt": "2021-11-16T10:03:27.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "because I need to be able to dynamically, retrospectively apply a fork",
+      "createdAt": "2021-11-16T10:03:43.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and I need every single code handling forks to be updated",
+      "createdAt": "2021-11-16T10:03:53.611000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "also when a new EL client joins the network, how does it know what the switchover block is?",
+      "createdAt": "2021-11-16T10:04:13.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "CL says it's in POS mode, awesome. So when do I stop verifying PoW blocks?",
+      "createdAt": "2021-11-16T10:04:34.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "when do I start rejecting blocks with uncles?",
+      "createdAt": "2021-11-16T10:05:00.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't see why this entire thing is even discussed just to avoid the user having to specify 1 more flag, which they already need to for the CL client",
+      "createdAt": "2021-11-16T10:06:01.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "As I said, if you want, I can accept Geth driving the consensus and telling CL that the fork already happened",
+      "createdAt": "2021-11-16T10:06:31.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I assume you will face similar backlash from CL clients",
+      "createdAt": "2021-11-16T10:06:39.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Even with TTD syncronized across the layers geth should be able to import sisters of a terminal PoW block after the switch has happened",
+      "createdAt": "2021-11-16T10:06:49.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it makes everything extremely complicated inside the code to support suprise forks",
+      "createdAt": "2021-11-16T10:06:53.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Geth does not support changing consensus rules on the fly. It does not support converting a valid block into an invalid one",
+      "createdAt": "2021-11-16T10:08:39.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What happens if I cached a block? Now all of a sudden I need cache invalidation logic all over the place",
+      "createdAt": "2021-11-16T10:09:09.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I notify clients of a block, turns out that not only it was reoreg, it was even invalid from the get go",
+      "createdAt": "2021-11-16T10:09:40.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Reorging blocks is one thing, that Geth can handle, side chains geth can handle",
+      "createdAt": "2021-11-16T10:09:57.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but you are requiring us to add logic to invalidate previously valid blocks",
+      "createdAt": "2021-11-16T10:10:09.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that has consequences",
+      "createdAt": "2021-11-16T10:10:12.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "everything is solveble, it just makes absolutely no sense to introduce this complexity to save the user from specifying 1 flag",
+      "createdAt": "2021-11-16T10:11:02.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We actually don't. If a block is not a terminal one wrt TTD and is a valid PoW block then it will stay valid for a time being. And it shouldn't affect the switch to PoS",
+      "createdAt": "2021-11-16T10:12:17.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "wrt hardcoded TTD*",
+      "createdAt": "2021-11-16T10:12:35.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if a block is mined on top of the terminal and you tell us after the fact that the merge happened 1 block before, you are invalidating a block",
+      "createdAt": "2021-11-16T10:12:50.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm no enumerating problems to solve btw, I'm highlighting the complexity added all over the place dumped on us just to avoid 1 flag",
+      "createdAt": "2021-11-16T10:15:37.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "E.g. I receive a header from the network, I can't even validate its difficutly field, because I've no idea whether it belongs to the PoW or PoS chain",
+      "createdAt": "2021-11-16T10:16:50.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see what you mean. It's invalid because it's not a PoS block. I am trying to understand now what additional implications a 1-2 blocks re-org in this case comparing to a regular re-org.",
+      "createdAt": "2021-11-16T10:17:54.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it's a consensus rule reorg",
+      "createdAt": "2021-11-16T10:18:19.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "not a block reorg",
+      "createdAt": "2021-11-16T10:18:21.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you are changing the rules of the chain",
+      "createdAt": "2021-11-16T10:18:32.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "geth only support consensus rule changes on startup; then it will discard anything that's above a new ruleset and will start from that point onward",
+      "createdAt": "2021-11-16T10:19:12.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but in that case you don't have tens of subsystems needing dynamic rule changes",
+      "createdAt": "2021-11-16T10:19:37.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but not retroactively with respect to the chain, it's  probably retroactive wrt the tree and on different branches of the tree may be different rules at the same block height. This is what I was assuming like it's not a big problem to handle",
+      "createdAt": "2021-11-16T10:19:41.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes, you are changing retroactivly on the chain",
+      "createdAt": "2021-11-16T10:20:12.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you retrospecitvely tell me the TTD was smaller than my last block",
+      "createdAt": "2021-11-16T10:20:23.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you invalidate my head potentially",
+      "createdAt": "2021-11-16T10:20:28.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you all of a sudden tell me that my mining code needed to have stopped and exited PoW mode. Now my mining code needs to be able to handle sudden rug pulls",
+      "createdAt": "2021-11-16T10:21:36.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that's again an extra bit of production code that's needed to be implemeted and tested, just to avoid 1 flag",
+      "createdAt": "2021-11-16T10:22:02.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what happens if I switch to PoS mode after starting mining on PoW and someone delivers a valild PoW solution to the mining work taks?",
+      "createdAt": "2021-11-16T10:22:32.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't know. it needs to be handled",
+      "createdAt": "2021-11-16T10:22:39.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "whereas previously we would simply never make the next work packet in the firs tplace",
+      "createdAt": "2021-11-16T10:22:56.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "currently geth accepts solutions to all past works too even on side chains, so it's not a simple reorg",
+      "createdAt": "2021-11-16T10:23:22.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I actually need logic to invalidate and remove stuff from the miner",
+      "createdAt": "2021-11-16T10:23:33.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hard? no. useless effort? yes",
+      "createdAt": "2021-11-16T10:23:42.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "EL is at the block `A` which has `N+1` height currently. And then CL may ask EL to switch to `A'` with the same `N+1` height which has common ancestor with `A`. It's not in the way that CL says that `A` suddenly became a PoS block.",
+      "createdAt": "2021-11-16T10:24:25.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "EL is at block A, starts mining B, finishes mining B when CL says A was the terminal one. Now I have B which became invalid",
+      "createdAt": "2021-11-16T10:25:11.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I get it. So, you've been mining B and B appeared to be on a stale fork, B would never happen if you'd know in advance",
+      "createdAt": "2021-11-16T10:26:30.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "B didn't appear on a stale fork, B is invalid because it never should have been allowed to be created",
+      "createdAt": "2021-11-16T10:27:09.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The same would happen if a user forgot to override TTD on EL side, right?",
+      "createdAt": "2021-11-16T10:27:11.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, but then the user stops Geth, and on restart I clean out B, before starting up everything",
+      "createdAt": "2021-11-16T10:27:35.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then when all subsystems come online, there's no invalid block in the chain",
+      "createdAt": "2021-11-16T10:27:45.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I mean stale = the one that would never be accepted by the network",
+      "createdAt": "2021-11-16T10:28:04.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It was accepted by my node, so my internal state is whacked",
+      "createdAt": "2021-11-16T10:28:20.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and then it's been re-orged, right? it's ok to have this block because it won't be a part of canonical chain. I am thinking about user forgetting to restart geth with overridden TTD. In this case geth would refuse switching to PoS until it reaches the TTD -- this is dangerous for a node",
+      "createdAt": "2021-11-16T10:30:01.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "restarting with a new td means I clean out invalid blocks before geth starts up internally, so there's never a \"reorg\"",
+      "createdAt": "2021-11-16T10:34:07.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "old geth saw one chain state and ruleset, new geth sees a new ruleset and new chain state",
+      "createdAt": "2021-11-16T10:34:28.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "both are always consistent and valid",
+      "createdAt": "2021-11-16T10:34:36.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you are askign us to make a geth that can handle both old and new rulsets within a single database",
+      "createdAt": "2021-11-16T10:34:50.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> and then it's been re-orged, right? it's ok to have this block because it won't be a part of canonical chain. I am thinking about user forgetting to restart geth with overridden TTD. In this case geth would refuse switching to PoS until it reaches the TTD -- this is dangerous for a node\nThe solution is simple. Have the TTD EL side and have the EL ping the CL client that the TTD was exceeded",
+      "createdAt": "2021-11-16T10:35:53.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Except CL will revolt for the same reason I'm revolting now 🙂",
+      "createdAt": "2021-11-16T10:36:07.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If the user needs to restart one client anyway, it's completely acceptable to have them restart both",
+      "createdAt": "2021-11-16T10:37:00.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you can add a check and warning if either side detects an inconsistency",
+      "createdAt": "2021-11-16T10:37:11.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it is trivial to ensure the two TTDs are the same on both sides than to hack either side to dynamically swap out TTD on the fly",
+      "createdAt": "2021-11-16T10:37:39.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!206016661470314496> IIUC, your primary complaint is not knowing the TTD on startup?",
+      "createdAt": "2021-11-16T10:38:09.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It doesn't have as much to do with *where* the TTD is coming from, but rather it has to do with *when* you learn about the TTD (at startup vs at runtime)?",
+      "createdAt": "2021-11-16T10:38:30.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Polling terminal block data from EL is the complexity on CL side as it's difficult to implement this in a robust way. Checking the consistency of TTD between the layers would add a complexity to the Engine API -- we'd need a kind of status message exchange and a point where we can do this kind of check",
+      "createdAt": "2021-11-16T10:39:45.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2021-11-16T10:40:06.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I want it to remain static across the entire lifetime of geth",
+      "createdAt": "2021-11-16T10:40:24.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Updating it after it's set means all internal code needs to handle the update",
+      "createdAt": "2021-11-16T10:40:40.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I hear you and I understand the complexity now (I hope). THe assumption was that it would be a re-org similar to a regular re-orgs",
+      "createdAt": "2021-11-16T10:40:40.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But isn't that what we do right now? The CL is always polling the EL for the current block so they know when they reached ttd",
+      "createdAt": "2021-11-16T10:40:50.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe in all but the most pathological scenarios, TTD should be known *before* it is reached, not after.  Would it be reasonable for Geth to just write TTD to disk and halt if it receives a TTD in the past, and then on next boot it would start with that saved TTD?",
+      "createdAt": "2021-11-16T10:41:13.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It doesn't receive a TTD in a clear way. It rather receives a `forkchoiceUpdated` message that triggers the switch",
+      "createdAt": "2021-11-16T10:41:58.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or does it need to know the TTD at startup even if the TTD is in the future?",
+      "createdAt": "2021-11-16T10:42:05.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And then the new TTD is released with the new client version",
+      "createdAt": "2021-11-16T10:42:13.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, I see.  So the issue is having TTD *change* during a run of Geth, regardless of whether it moved forward or backward.",
+      "createdAt": "2021-11-16T10:43:11.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2021-11-16T10:43:24.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "how would EL handle the TERMINAL_BLOCK_HASH override? as it skips TTD checks altogether?",
+      "createdAt": "2021-11-16T10:43:35.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Geth would know this at startup, so it wouldn't be a problem IIUC what Peter is saying.",
+      "createdAt": "2021-11-16T10:43:56.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It won't know it at start up according to current design",
+      "createdAt": "2021-11-16T10:44:17.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "how can get know TERMINAL_BLOCK_HASH in future?",
+      "createdAt": "2021-11-16T10:44:27.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "unless restart is required",
+      "createdAt": "2021-11-16T10:44:41.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am quite surprised at the lengths we're going to in order to avoid the user needing to set a flag on both the CL and EL, given that we don't expect the flag to be needed at all anyway.  And we'd be pushing out releases hard coding that TTD asap anyway. Personally I'd be in favour of both EL and CL just knowing the TTD (and TERMINAL_BLOCK_HASH if there is one).",
+      "createdAt": "2021-11-16T10:44:49.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "terminal block hash is not relevant tohugh from this perspective",
+      "createdAt": "2021-11-16T10:44:53.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that just selects which chain to go with",
+      "createdAt": "2021-11-16T10:45:02.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but all chains are equally valid",
+      "createdAt": "2021-11-16T10:45:08.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my fit is with ttd, which can change the rules",
+      "createdAt": "2021-11-16T10:45:19.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "as per my understanding of CL specs, merge transition in CL occurs at TERMINAL_BLOCK_HASH",
+      "createdAt": "2021-11-16T10:45:57.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, it seems like doing it this way is the least of all evils",
+      "createdAt": "2021-11-16T10:45:58.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so all the blocks mined after TERMINAL_BLOCK_HASH are sort of invalid as per the logic you have elaborated",
+      "createdAt": "2021-11-16T10:46:15.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, but if geth would be restarted with TBH then it could invalidate all other chains on start up",
+      "createdAt": "2021-11-16T10:46:46.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "well yeah, but terminal block hash will be of a block that exceeds ttd, so ttd already handles that part",
+      "createdAt": "2021-11-16T10:46:47.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it's not necessary a block that exceeds TTD btw",
+      "createdAt": "2021-11-16T10:47:11.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "not setting ttd and only setting tbh is also bad btw",
+      "createdAt": "2021-11-16T10:47:12.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am actually now confused to the utility of two competing ways to set the terminal pow",
+      "createdAt": "2021-11-16T10:47:28.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "because I again am missing the data and need to derive stuff async until I figure out what the rulesets are",
+      "createdAt": "2021-11-16T10:47:36.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes as per current specs",
+      "createdAt": "2021-11-16T10:47:54.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "terminal_block_hash seems a bad idea really",
+      "createdAt": "2021-11-16T10:48:05.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "retrieving the block itself from the network is not enough either",
+      "createdAt": "2021-11-16T10:48:12.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'd need to sync to even figoure out what the ttd was",
+      "createdAt": "2021-11-16T10:48:21.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I hough that TERMINAL_BLOCK_HASH would at max allow us to lock  into a specific block, but it would not be used as the signal for the merge",
+      "createdAt": "2021-11-16T10:49:31.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We need TBH to be able to pick up the chain in case if attack happens in the network. And this exact block will be the terminal one. All other PoW chains should be invalidated",
+      "createdAt": "2021-11-16T10:49:47.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The rulset update still needs to be driven by a ttd",
+      "createdAt": "2021-11-16T10:50:31.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok, so we assume restarts for EL will happen if TERMINAL_BLOCK_HASH scenario is set",
+      "createdAt": "2021-11-16T10:50:36.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you can set both on the CLi I guess if you want",
+      "createdAt": "2021-11-16T10:50:41.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It would be used actually, because you may have multiple forks created after a block pointed by TBH. Then we also have to adjust the TTD?",
+      "createdAt": "2021-11-16T10:50:49.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that would be my guess yes",
+      "createdAt": "2021-11-16T10:51:09.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "since again, you're just piling complexity on top to make 2 signals for the merge",
+      "createdAt": "2021-11-16T10:51:24.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if ttd is already a signal, use that to tell EL that the fork happened/s and if you want to lock in a specific branch, use the hash to tell it which",
+      "createdAt": "2021-11-16T10:52:08.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah you'd want to stop importing new blocks/mining them even if you haven't yet found the actual TBH block so having TTD set to match TBH would ensure that and provide extra consistency to things.",
+      "createdAt": "2021-11-16T10:52:23.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My 2c is that making everything insanely ocmpliated to have the user only stop 1 client instead of 2 is a bit strange",
+      "createdAt": "2021-11-16T10:53:20.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Especially since this is supposed to be a one off emergency procedure",
+      "createdAt": "2021-11-16T10:53:41.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Seems saner to keep emergency procedures \"simple\" rather that complicated",
+      "createdAt": "2021-11-16T10:53:51.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Setting the same settings on both clients requires synchronization between EL and CL, which adds code to both layers for a scenario we expect not to happen.",
+      "createdAt": "2021-11-16T10:54:35.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unless your thinking is that we *don't* add any synchronization logic and one or both clients just halt at fork block time if they are out of sync?",
+      "createdAt": "2021-11-16T10:55:18.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2021-11-16T10:55:30.145000+00:00",
+      "attachments": []
+    }
+  ]
+}

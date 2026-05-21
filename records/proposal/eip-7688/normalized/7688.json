@@ -1,0 +1,87 @@
+{
+  "id": 7688,
+  "title": "EIP-7688: Forward compatible consensus data structures",
+  "status": "Review",
+  "description": "Transition consensus SSZ data structures to ProgressiveContainer",
+  "laymanDescription": "This EIP stabilizes Merkle tree indices for all consensus data, preventing coincidental verifier breakage when fields are added, removed, or list capacities change during Ethereum upgrades.",
+  "author": "Etan Kissling (@etan-status), Cayman (@wemeetagain)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2024-04-15",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7688-forward-compatible-consensus-data-structures/19673",
+  "requires": [
+    "6110",
+    "7002",
+    "7251",
+    "7495",
+    "7549",
+    "7569",
+    "7916"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Fusaka",
+      "statusHistory": [
+        {
+          "status": "Declined",
+          "call": null,
+          "date": null
+        }
+      ]
+    },
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Considered",
+          "call": "acdc/171",
+          "date": "2025-12-11"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Etan Kissling",
+          "discord": "etan_status"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "No direct impact"
+    },
+    "appDevs": {
+      "description": "Less maintenance for EIP-4788 based projects."
+    },
+    "walletDevs": {
+      "description": "No direct impact."
+    },
+    "toolingInfra": {
+      "description": "Less maintenance for consensus light client components."
+    },
+    "layer2s": {
+      "description": "Less maintenance for light client based bridges."
+    },
+    "stakersNodes": {
+      "description": "Fewer required upgrades of staking pool delegate contracts."
+    },
+    "clClients": {
+      "description": "Greater flexibility for future consensus design changes."
+    },
+    "elClients": {
+      "description": "No direct impact."
+    }
+  },
+  "benefits": [
+    "EIP-4788 projects no longer need upgrades or security council involvement for forks outside their data scope.",
+    "CL developers can modify fields, list capacities, or cost functions without affecting verifiers.",
+    "Bundling with ePBS avoids a second re-indexing in the future."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP defines the changes needed to adopt `ProgressiveContainer` from [EIP-7495](./eip-7495.md) and `ProgressiveList` from [EIP-7916](./eip-7916.md) in consensus data structures. ## Motivation Ethereum's consensus data structures make heavy use of [Simple Serialize (SSZ)](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/ssz/simple-serialize.md) `Container`, which defines how they are serialized and merkleized. The merkleization scheme allows application implementations to verify that individual fields (and partial fields) have not been tampered with. This is useful, for example, in smart contracts of decentralized staking pools that wish to verify that participating validators have not been slashed. While SSZ `Container` defines how data structures are merkleized, the merkleization is prone to change across the different forks. When that happens, e.g., because new features are added or old features get removed, existing verifier implementations need to be updated to be able to continue processing proofs. `ProgressiveContainer`, of [EIP-7495](./eip-7495.md), is a forward compatible alternative that guarantees a forward compatible merkleization scheme. By transitioning consensus data structures to use `ProgressiveContainer`, smart contracts that contain verifier logic no longer have to be maintained in lockstep with Ethereum's fork schedule as long as the underlying features that they verify don't change. For example, as long as the concept of slashing is represented using the boolean `slashed` field, existing verifiers will not break when unrelated features get added or removed. This is also true for off-chain verifiers, e.g., in hardware wallets or in operating systems for mobile devices that are on a different software update cadence than Ethereum. ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in RFC 2119 and RFC 8174. ### `Container` conversion `Container` types that are expected to evolve over forks SHALL be redefined as `ProgressiveContainer(active_fields=[1] * len(type.fields()))`. For example, given a type in the old fork: ```python class Foo(Container): a: uint8 b: uint16 ``` This type can be converted to support stable Merkleization in the new fork: ```python class Foo(ProgressiveContainer(active_fields=[1, 1])): a: uint8 b: uint16 ``` As part of the conversion, a stable [generalized index (gindex)](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/ssz/merkle-proofs.md#generalized-merkle-tree-index) is assigned to each field that remains valid in future forks. - If a fork appends a field, `active_fields` MUST be extended with a trailing `1`. - If a fork removes a field, the corresponding `active_fields` bit MUST be changed to `0`. - Compatibility rules SHOULD be enforced, e.g., by defining a `CompatibleUnion[fork_1.Foo, fork_2.Foo, fork_3.Foo, ...]` type in the unit test framework. ### `List[type, N]` / `Bitlist` conversion `List` types frequently have been defined with excessively large capacities `N` with the intention that `N` is never reached in practice. In other cases, the capacity itself has changed over time. - `List` types with dynamic or unbounded capacity semantics SHALL be redefined as `ProgressiveList[type]`, and the application logic SHALL be updated to check for an appropriate limit at runtime. - `Bitlist` types with dynamic or unbounded capacity semantics SHALL be redefined as `ProgressiveBitlist` As part of the conversion, a stable [generalized index (gindex)](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/ssz/merkle-proofs.md#generalized-merkle-tree-index) is assigned to each list element that remains valid regardless of the number of added elements. ### Converted types The following types SHALL be converted to `ProgressiveContainer`: - [`Attestation`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/electra/beacon-chain.md#attestation) - The `aggregation_bits` field is redefined to use `ProgressiveBitlist` - [`IndexedAttestation`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/electra/beacon-chain.md#indexedattestation) - The `attesting_indices` field is redefined to use `ProgressiveList` - [`ExecutionPayload`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/deneb/beacon-chain.md#executionpayload) - The `transactions` and `withdrawals` fields are redefined to use `ProgressiveList` - The `MAX_TRANSACTIONS_PER_PAYLOAD` (1M) limit is no longer enforced (the limit is unreachable with `MAX_PAYLOAD_SIZE` 10 MB) - [`ExecutionRequests`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/electra/beacon-chain.md#executionrequests) - The `deposits`, `withdrawals` and `consolidations` fields are redefined to use `ProgressiveList` - [`BeaconBlockBody`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/electra/beacon-chain.md#beaconblockbody) - The `proposer_slashings`, `attester_slashings`, `attestations`, `deposits`, `voluntary_exits` and `bls_to_execution_changes` fields are redefined to use `ProgressiveList` - [`BeaconState`](https://github.com/ethereum/consensus-specs/blob/b5c3b619887c7850a8c1d3540b471092be73ad84/specs/electra/beacon-chain.md#beaconstate) - The `validators`, `balances`, `previous_epoch_participation`, `current_epoch_participation`, `inactivity_scores`, `pending_deposits`, `pending_partial_withdrawals` and `pending_consolidations` fields are redefined to use `ProgressiveList` - The `blob_kzg_commitments`, `kzg_proofs` and `column` fields are redefined to use `ProgressiveList` ### Immutable types These types are used as "
+}

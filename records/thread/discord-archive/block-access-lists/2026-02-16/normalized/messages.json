@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "channel": "block-access-lists",
+  "date": "2026-02-16",
+  "messageCount": 8,
+  "sourceHash": "72a83a2736bcaefebc780ac1a6b310d8b9097f796320ff534eba63e8b96a5975",
+  "searchText": "As discussed in the last breakout call, I incorporated <@348512261955911691> 's feedback regarding the max-item cap into the respective PR and will merge it: https://github.com/ethereum/EIPs/pull/11234 Today I did a complementary AI-supported (Opus 4.6) spec analysis after EthereumJS implementation, complementing the first one from above. While the first one was how to ease implementation, this one is **about the spec design itself**, with a focus on **simplification** by detecting common patterns or unnecessary exceptions: https://gist.github.com/holgerd77/8230bd00182ebb33fdf7669c9146ab3a I again think it's worth posting and so have put this into another gist. To not fully leave you alone with thinking about AI stuff I will give some first-round estimates, these might be limited though, not fully sure if I have internalized all parts of the spec well enough (but who knows 😁): **1a. Unified Change Detection Rule **: Can't fully judge. **1b. Merge storage_reads and storage_changes Into a Single Ordered List**: This seems highly beneficial to me regarding unification, not seeing any downsides atm. **1c. Always Record COINBASE balance_change**: Smaller, can't fully judge but likely worth to consider. **2a. Drop All Net-Zero / No-Op Filtering**: Can't fully judge. **2b. Record Only the Final Value Per Storage Slot Per Block**: Also can't fully judge. **2c. Decouple Access Tracking From State Diffs**: Larger structural change, but if \"this holds\", this would be a large win for the spec. //cc <@792404665068158998> <@508125616940515329> I'll give the gist an in-depth look later today, for section 2 the Radical ideas: just want to mention we try to keep the BAL a good balance between effectiveness and size. Dropping certain filtering (like remove no-changes) will increase the BAL size (not sure by how much, but likely can now add items for the cold sload cost of 2100). For 2b. this reduces the size of the BAL, but it removes the possibility to be able to run txs in parallel (one can calculate the pre-state of any tx in the block if you have the access list and access to the storage trie of the block this block refers to), which is one of the main goals/unlocks of the EIP 😄 Yes, I get that, the proposals are not all about filter drops though. 1b is a structural clean-up (with a very small size increase) which I think might be worth to consider. 2c is a more radical suggestion to rethink the overall data structure, if this holds hough (and not throwing out cases I am overlooking right now) it would a) reduce BAL size and b) preserve parallelization capabilities and c) significantly ease implementation. But for sure needs some time to think this through and judge. 🙂 Maybe also worth doing some experiments if first analysis holds. Regarding 1b, it's not yet 100% clear that the state locations that aren't changes will remain in the BAL (or if we kick them out) - this depends on the benchmarks that are in the making. One thing that you could think of is that for example in sync, you only need the state diff and don't care about the state locations. So, instead of doing `header.bal_hash = keccak(bal)` , we could do (1) `state_diff_hash = keccak(rlp(state_diff))` and (2) `header.bal_hash = keccak(state_diff_hash || rlp(reads))` Then, you could request the BAL with `only_diff=True` over devp2p and you'd get the full state diff + the 32 bytes `reads_hash` and can verify both: `keccak(received_diff) == state_diff_hash` and `keccak(state_diff_hash || reads_hash) == header.block_access_list_hash`. My current feeling is that this is not worth the complexity for saving a few KiB over the wire, but def something worth considering. 2a is already done right. Net-zero chanes are included as \"reads\" instead of \"change\". 2b would cost us parallelization as we need the post-transaction state diff for parallelizing transaction that are dependend on a earlier transaction. Re 2c, one nice thing with keeping state locations and state diff in one object is the deduplication we get. Any state location that is also changed must not be in the BAL as a read but only as a change. Thanks for diving in and directly engage 🙏! Some remarks: 1b. This is more about the simplification of the data structure though. So the reads would still have their place (in the form of `[StorageKey, []]`) but the implementation gets significantly easier since this \"is it a read or a write\" duality goes away. 2a. Just to note that this is a more radical proposal then you might have perceived. So this not about classification (\"read or write?\") but to just not *compare at all* (and so to not track pre-tx values) but record all modifications. This would increase BAL size (3-5% due to AI) and in turn eliminate a somewhat larger part of the implementation complexity. 2c. This is structurally deeper than you might have realized (just have a glimpse at the proposed structure from the link above), and also comes with significant size-gains counter balancing the losses. The following are the core arguments on the benefits from the AI: - The access map would be append-only during execution — no checkpoints, no reverts, no migration between lists - The state diff would be computed post-transaction from actual state — no in-flight tracking - The entire checkpoint/revert complexity for BAL disappears - The edge cases around exceptional halts, net-zero, reverted writes all become non-issues **Regarding the max item cap discussed on today's ACDT**: here's the PR simplifying the check by removing the CL constants that we used earlier: https://github.com/ethereum/EIPs/pull/11323 Importantly, this check, `bal_items <= block_gas_limit // 2000` is only needed to make sure that **invalid** blocks with BALs that contain too many items (=impossible given a certain block gas limit) are **invalidated** early on, without having clients waste resources in pre-fetching all addresses and storage keys to only then find out the block is invalid. We could lower it to 1900 to keep some buffer for system contract changes in the BAL but this won't be needed in glamsterdam as EIP-7981 (cfi'd) increases the cost for EIP-2930 ALs such that one pays at least 2100 gas for an item in the BAL (=simple SLOAD). We can adopt that number in case storage pricing changes with glamsterdam but for now this seems like the simplest change that achieves the goal.",
+  "excerpts": [
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As discussed in the last breakout call, I incorporated <@348512261955911691> 's feedback regarding the max-item cap into the respective PR and will merge it:\nhttps://github.com/ethereum/EIPs/pull/11234",
+      "createdAt": "2026-02-16T11:23:20.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Today I did a complementary AI-supported (Opus 4.6) spec analysis after EthereumJS implementation, complementing the first one from above. While the first one was how to ease implementation, this one is **about the spec design itself**, with a focus on **simplification** by detecting common patterns or unnecessary exceptions:\nhttps://gist.github.com/holgerd77/8230bd00182ebb33fdf7669c9146ab3a\n\nI again think it's worth posting and so have put this into another gist.\n\nTo not fully leave you alone with thinking about AI stuff I will give some first-round estimates, these might be limited though, not fully sure if I have internalized all parts of the spec well enough (but who knows 😁):\n\n**1a. Unified Change Detection Rule **: Can't fully judge.\n**1b. Merge storage_reads and storage_changes Into a Single Ordered List**: This seems highly beneficial to me regarding unification, not seeing any downsides atm.\n**1c. Always Record COINBASE balance_change**: Smaller, can't fully judge but likely worth to consider.\n\n**2a. Drop All Net-Zero / No-Op Filtering**: Can't fully judge.\n**2b. Record Only the Final Value Per Storage Slot Per Block**: Also can't fully judge.\n**2c. Decouple Access Tracking From State Diffs**: Larger structural change, but if \"this holds\", this would be a large win for the spec.\n\n//cc <@792404665068158998> <@508125616940515329>",
+      "createdAt": "2026-02-16T11:52:05.606000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "grafik.png",
+          "content": "b8bfea8e4a21beb799553fa8c46e668925000694408e0d978cfcec395786590e"
+        }
+      ]
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'll give the gist an in-depth look later today, for section 2 the Radical ideas: just want to mention we try to keep the BAL a good balance between effectiveness and size. Dropping certain filtering (like remove no-changes) will increase the BAL size (not sure by how much, but likely can now add items for the cold sload cost of 2100). For 2b. this reduces the size of the BAL, but it removes the possibility to be able to run txs in parallel (one can calculate the pre-state of any tx in the block if you have the access list and access to the storage trie of the block this block refers to), which is one of the main goals/unlocks of the EIP 😄",
+      "createdAt": "2026-02-16T12:02:52.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, I get that, the proposals are not all about filter drops though.\n\n1b is a structural clean-up (with a very small size increase) which I think might be worth to consider.\n\n2c is a more radical suggestion to rethink the overall data structure, if this holds hough (and not throwing out cases I am overlooking right now) it would a) reduce BAL size and b) preserve parallelization capabilities and c) significantly ease implementation.\n\nBut for sure needs some time to think this through and judge. 🙂 Maybe also worth doing some experiments if first analysis holds.",
+      "createdAt": "2026-02-16T12:10:49.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Regarding 1b, it's not yet 100% clear that the state locations that aren't changes will remain in the BAL (or if we kick them out) - this depends on the benchmarks that are in the making. One thing that you could think of is that for example in sync, you only need the state diff and don't care about the state locations. \nSo, instead of doing `header.bal_hash = keccak(bal)` , we could do (1) `state_diff_hash = keccak(rlp(state_diff))` and (2) `header.bal_hash = keccak(state_diff_hash || rlp(reads))`\nThen, you could request the BAL with `only_diff=True` over devp2p and you'd get the full state diff + the 32 bytes `reads_hash` and can verify both:\n`keccak(received_diff) == state_diff_hash` and\n`keccak(state_diff_hash || reads_hash) == header.block_access_list_hash`.\nMy current feeling is that this is not worth the complexity for saving a few KiB over the wire, but def something worth considering.\n\n2a is already done right. Net-zero chanes are included as \"reads\" instead of \"change\". 2b would cost us parallelization as we need the post-transaction state diff for parallelizing transaction that are dependend on a earlier transaction.",
+      "createdAt": "2026-02-16T13:05:49.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Re 2c, one nice thing with keeping state locations and state diff in one object is the deduplication we get. Any state location that is also changed must not be in the BAL as a read but only as a change.",
+      "createdAt": "2026-02-16T13:06:57.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks for diving in and directly engage 🙏!\n\nSome remarks:\n1b. This is more about the simplification of the data structure though. So the reads would still have their place (in the form of `[StorageKey, []]`) but the implementation gets significantly easier since this \"is it a read or a write\" duality goes away.\n\n2a. Just to note that this is a more radical proposal then you might have perceived. So this not about classification (\"read or write?\") but to just not *compare at all* (and so to not track pre-tx values) but record all modifications. This would increase BAL size (3-5% due to AI) and in turn eliminate a somewhat larger part of the implementation complexity.\n\n2c. This is structurally deeper than you might have realized (just have a glimpse at the proposed structure from the link above), and also comes with significant size-gains counter balancing the losses.\n\nThe following are the core arguments on the benefits from the AI:\n\n- The access map would be append-only during execution — no checkpoints, no reverts, no migration between lists\n- The state diff would be computed post-transaction from actual state — no in-flight tracking\n- The entire checkpoint/revert complexity for BAL disappears\n- The edge cases around exceptional halts, net-zero, reverted writes all become non-issues",
+      "createdAt": "2026-02-16T14:15:02.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "**Regarding the max item cap discussed on today's ACDT**: here's the PR simplifying the check by removing the CL constants that we used earlier:\nhttps://github.com/ethereum/EIPs/pull/11323\n\nImportantly, this check, `bal_items <= block_gas_limit // 2000` is only needed to make sure that **invalid** blocks with BALs that contain too many items (=impossible given a certain block gas limit) are **invalidated** early on, without having clients waste resources in pre-fetching all addresses and storage keys to only then find out the block is invalid. We could lower it to 1900 to keep some buffer for system contract changes in the BAL but this won't be needed in glamsterdam as EIP-7981 (cfi'd) increases the cost for EIP-2930 ALs such that one pays at least 2100 gas for an item in the BAL (=simple SLOAD). We can adopt that number in case storage pricing changes with glamsterdam but for now this seems like the simplest change that achieves the goal.",
+      "createdAt": "2026-02-16T16:09:42.947000+00:00",
+      "attachments": []
+    }
+  ]
+}

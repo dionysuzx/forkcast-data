@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2025-10-02",
+  "messageCount": 43,
+  "sourceHash": "99127c11741aeee30d0eb6c258cbd34489e9686bbed29123817cf6104f4562dc",
+  "searchText": "I created the SSZ stable gindex pr at https://github.com/ethereum/consensus-specs/pull/4630 it's still convoluted due to build system stuff, I'll split those things off into separate PRs. but the changes in the gloas folder are what's relevant. once we get this reviewed, I'll do the light client next <@1035747431461167125> https://github.com/Consensys/teku/pull/9957 passing all reference tests on Teku on `master` without `fork_choice`, very useful to have the tests Withdrawals are still missing right? Those will be very tough ah with withdrawals actually https://github.com/Consensys/teku/pull/9911 did some refactor recently on that part of the code and wasn't that bad to add Gloas, it's one line to disable if needed for devnets, it passes the refs tests, but I am sure there are more edge cases that could potentially fail But there aren't yet full withdrawals tests though ah yeah well just implemented what's in the specs, will see if it works with full test suite, I may look into terence's PR in the consensus-specs and see if I can help with it in the meantime hi everyone, while implementing `process_execution_payload_bid` I noticed `BuilderPendingPayment` initialization is missing `withdrawable_epoch`. so should I just use the default value or there is a mistake? https://github.com/ethereum/consensus-specs/blob/2a0ac6a71d028122ccb62648ac965ee2b8cfc65f/specs/gloas/beacon-chain.md?plain=1#L1026 the structure of `BuilderPendingWithdrawal`: ``` class BuilderPendingWithdrawal(Container): fee_recipient: ExecutionAddress amount: Gwei builder_index: ValidatorIndex withdrawable_epoch: Epoch ``` Yeah, that implies the ssz default value (0 in this case) hmm! I got it, but should we set explicitly like the `weight` field? in the spec You don't need to. Relying on the SSZ default is fine I like this change! Maybe there's a better name than `off_protocol_value` that makes clearer what it is, but this is a great feature for most validators while still having the enshrined biding mechanism as a fallback. `optimistic_value`, or `untrusted_value` might be more accurate. This should be the default in clients, maintaining the low-latency for mevpayment as we have it today (=instant) + allows to have code at the feeRecipient that is actually called. Feels like it would make sense to put it into the Bid. I will just record here just in case: - I think it's fine to allow arbitrary off-protocol deals on NO. - I think it's fine for clients to offer the functionality of whitelist some builders or even prefer them: an example of my above scheme can be simply achieved by implementing a \"Builder Bid Boost\" for each builder for example, then you can boost the bids from your trusted ones by 10^9 and you agree with them that you'll receive that value off-protocol. - I disagree with adding this extra field on protocol and even more on making it the default behavior to take those values as it enshrines a trusted behavior on protocol and worse it enshrines a particular auction (the default on clients) which is not one of the objectives of ePBS at all. On the contrary, clients should be allowed to set whatever they want as default for bid picking, and give their operators a wide variety of options to be as opinionated as they want in their mechanisms to choose builders. The **only** default that I would advocate and strongly suggest clients to implement is that if they see a transaction being censored by builders, that they blacklist that builder immediately, but even in that case I would suggest clients give an option to bypass this default. > I disagree with adding this extra field on protocol and even more on making it the default behavior to take those values as it enshrines a trusted behavior on protocol and worse it enshrines a particular auction (the default on clients) which is not one of the objectives of ePBS at all. I definitely see why having this in-protocol might be an overkill for what we want to achieve here. As francesco said, it's would be somehow clean for implementer but comes at the cost of putting something in-protocol about an off-mechanism promise. One way or another, proposers will want to act profit maximizing by accepting bids with optimistic payments and clients may want to support that. > on making it the default behavior to take those values as it enshrines a trusted behavior on protocol > It doesn't really enshrine anything because you would only take these trusted bids from entities you configure yourself. The only default is the existence of this infrastructure, instead of having to fork clients or do hacky stuff like the different denomination bids > The only default that I would advocate and strongly suggest clients to implement is that if they see a transaction being censored by builders, that they blacklist that builder immediately, but even in that case I would suggest clients give an option to bypass this default. what's the threshold there? I'm not sure this should be done. A better fallback might be comparing the promised payment with the block value and blacklist the builder that way. Also I wouldn't even care that this is the default, more just that it is an available option now I don't know if you're referring about the censoring or the extra field The threshold should be zero! if you see a tx in your mempool for a few blocks and see builders that could have included and didn't that's enough to blakclist them, there's no other explanation other than censoring. The latter, or generally the ability to not *have to* use the trustless payments if you prefer not to Yes with this I think I clearly agreed, I just disagree with including this field in the protocol, off protocol mechanisms are trivial to arrange I am definitely for optionality when it comes to how to pick bids, including blacklisting builders, falling back to only trustless or only p2p bids... few blocks != zero it's zero from the builder the few blocks means: I have seen the tx in my mempool for a while, no matter who produced blocks during this \"while\". I see a block now from this builder and didn't include it, then I blacklist that builder, no matter if it's the first offense another explanation might be that the builder has good reasons to not include that transaction (there are things that >99.9% of people don't want to support/include/execute etc). Or that a transaction didn't propagate well yet. Blacklisting mechanisms should be standardized over clients and not just hand-waved by clients. no it's really the opposite, blacklisting mechanisms should be completely opinionated and pseudo random, otherwise they are useless cause they are gameable This feels like attack surface for deliberately trying to trigger the blacklist fallback for other builders and in particular, they **should not** be specified that is only applicable precisely if we go the route you suggest: standardizing well, a client with 30% market share is its own standard to be fair well, the example I give for example will not depend on one client but in the combination CL+EL so that minimizes that number it's the EL that sends the message to the CL that there's censoring. and the CL that decides how to act on it both can be completely opinionated and not specified As an attacker I would just find out what clients do and then try to get them blacklisted by spamming the future proposer's mempool to not see any other txs). For the slot where the specific client implementation would want to see a certain tx to be included the proposer can't deliver because it's mempool was spammed and it didn't see anything. I'm all for fall-back mechanisms to fallback to only using in-protocol bids and ignoring the untrusted payment. I don't think blacklisting builders that proposers put on a list with builders they trust, is the right approach. When whitelisting entities, proposers are fine with whatever the builder does. And for solving late-inclusion and censorship there are tools like FOCIL, that are better suited than clients all coming up with their own blacklisting mechanisms. epbs peeps can we close https://github.com/ethpandaops/dora/pull/227 in favor of https://github.com/ethpandaops/dora/pull/484 ? or is anyone else still relying on `eip7732-support` dora? #227 is the old epbs branch, which was used for the ePBS prototype implementation. #484 is the new one in preparation for gloas, based on latest spec. Question is, if we still need the prototype version or can we deprecate it? we can close 227 I believe",
+  "excerpts": [
+    {
+      "author": "etan_status",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I created the SSZ stable gindex pr at https://github.com/ethereum/consensus-specs/pull/4630\nit's still convoluted due to build system stuff, I'll split those things off into separate PRs.\n\nbut the changes in the gloas folder are what's relevant. once we get this reviewed, I'll do the light client next <@1035747431461167125>",
+      "createdAt": "2025-10-02T00:11:49.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/Consensys/teku/pull/9957 passing all reference tests on Teku on `master` without `fork_choice`, very useful to have the tests",
+      "createdAt": "2025-10-02T06:39:36.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Withdrawals are still missing right? Those will be very tough",
+      "createdAt": "2025-10-02T08:45:19.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah with withdrawals actually https://github.com/Consensys/teku/pull/9911 did some refactor recently on that part of the code and wasn't that bad to add Gloas, it's one line to disable if needed for devnets, it passes the refs tests, but I am sure there are more edge cases that could potentially fail",
+      "createdAt": "2025-10-02T09:03:22.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But there aren't yet full withdrawals tests though",
+      "createdAt": "2025-10-02T09:06:20.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah yeah well just implemented what's in the specs, will see if it works with full test suite, I may look into terence's PR in the consensus-specs and see if I can help with it in the meantime",
+      "createdAt": "2025-10-02T09:13:31.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hi everyone, while implementing `process_execution_payload_bid` I noticed `BuilderPendingPayment` initialization is missing `withdrawable_epoch`. so should I just use the default value or there is a mistake? https://github.com/ethereum/consensus-specs/blob/2a0ac6a71d028122ccb62648ac965ee2b8cfc65f/specs/gloas/beacon-chain.md?plain=1#L1026",
+      "createdAt": "2025-10-02T09:20:09.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the structure of `BuilderPendingWithdrawal`:\n```\nclass BuilderPendingWithdrawal(Container):\n    fee_recipient: ExecutionAddress\n    amount: Gwei\n    builder_index: ValidatorIndex\n    withdrawable_epoch: Epoch\n```",
+      "createdAt": "2025-10-02T09:21:16.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, that implies the ssz default value (0 in this case)",
+      "createdAt": "2025-10-02T09:22:18.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hmm! I got it, but should we set explicitly like the `weight` field?",
+      "createdAt": "2025-10-02T09:23:29.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in the spec",
+      "createdAt": "2025-10-02T09:23:43.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You don't need to. Relying on the SSZ default is fine",
+      "createdAt": "2025-10-02T09:26:40.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I like this change! Maybe there's a better name than `off_protocol_value` that makes clearer what it is, but this is a great feature for most validators while still having the enshrined biding mechanism as a fallback. `optimistic_value`, or `untrusted_value` might be more accurate.\nThis should be the default in clients, maintaining the low-latency for mevpayment as we have it today (=instant) + allows to have code at the feeRecipient that is actually called.\nFeels like it would make sense to put it into the Bid.",
+      "createdAt": "2025-10-02T09:51:48.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I will just record here just in case:\n- I think it's fine to allow arbitrary off-protocol deals on NO. \n- I think it's fine for clients to offer the functionality of whitelist some builders or even prefer them: an example of my above scheme can be simply achieved by implementing a \"Builder Bid Boost\" for each builder for example, then you can boost the bids from your trusted ones by 10^9 and you agree with them that you'll receive that value off-protocol. \n- I  disagree with adding this extra field on protocol and even more on making it the default behavior to take those values as it enshrines a trusted behavior on protocol and worse it enshrines a particular auction (the default on clients) which is not one of the objectives of ePBS at all. \n\nOn the contrary, clients should be allowed to set whatever they want as default for bid picking, and give their operators a wide variety of options to be as opinionated as they want in their mechanisms to choose builders. The **only** default that I would advocate and strongly suggest clients to implement is that if they see a transaction being censored by builders, that they blacklist that builder immediately, but even in that case I would suggest clients give an option to bypass this default.",
+      "createdAt": "2025-10-02T11:07:58.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> I  disagree with adding this extra field on protocol and even more on making it the default behavior to take those values as it enshrines a trusted behavior on protocol and worse it enshrines a particular auction (the default on clients) which is not one of the objectives of ePBS at all.\nI definitely see why having this in-protocol might be an overkill for what we want to achieve here. As francesco said, it's would be somehow clean for implementer but comes at the cost of putting something in-protocol about an off-mechanism promise.\nOne way or another, proposers will want to act profit maximizing by accepting bids with optimistic payments and clients may want to support that.",
+      "createdAt": "2025-10-02T11:12:13.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> on making it the default behavior to take those values as it enshrines a trusted behavior on protocol \n> \nIt doesn't really enshrine anything because you would only take these trusted bids from entities you configure yourself. The only default is the existence of this infrastructure, instead of having to fork clients or do hacky stuff like the different denomination bids",
+      "createdAt": "2025-10-02T11:16:44.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> The only default that I would advocate and strongly suggest clients to implement is that if they see a transaction being censored by builders, that they blacklist that builder immediately, but even in that case I would suggest clients give an option to bypass this default. \nwhat's the threshold there? I'm not sure this should be done. A better fallback might be comparing the promised payment with the block value and blacklist the builder that way.",
+      "createdAt": "2025-10-02T11:17:52.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also I wouldn't even care that this is the default, more just that it is an available option",
+      "createdAt": "2025-10-02T11:17:57.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "now I don't know if you're referring about the censoring or the extra field",
+      "createdAt": "2025-10-02T11:18:44.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The threshold should be zero! if you see a tx in your mempool for a few blocks and see builders that could have included and didn't that's enough to blakclist them, there's no other explanation other than censoring.",
+      "createdAt": "2025-10-02T11:19:49.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The latter, or generally the ability to not *have to* use the trustless payments if you prefer not to",
+      "createdAt": "2025-10-02T11:20:09.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes with this I think I clearly agreed, I just disagree with including this field in the protocol, off protocol mechanisms are trivial to arrange",
+      "createdAt": "2025-10-02T11:20:41.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am definitely for optionality when it comes to how to pick bids, including blacklisting builders, falling back to only trustless or only p2p bids...",
+      "createdAt": "2025-10-02T11:21:07.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "few blocks != zero",
+      "createdAt": "2025-10-02T11:33:36.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's zero from the builder",
+      "createdAt": "2025-10-02T11:36:35.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the few blocks means: I have seen the tx in my mempool for a while, no matter who produced blocks during this \"while\". I see a block now from this builder and didn't include it, then I blacklist that builder, no matter if it's the first offense",
+      "createdAt": "2025-10-02T11:37:17.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "another explanation might be that the builder has good reasons to not include that transaction (there are things that >99.9% of people don't want to support/include/execute etc). Or that a transaction didn't propagate well yet.\nBlacklisting mechanisms should be standardized over clients and not just hand-waved by clients.",
+      "createdAt": "2025-10-02T11:37:39.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no it's really the opposite, blacklisting mechanisms should be completely opinionated and pseudo random, otherwise they are useless cause they are gameable",
+      "createdAt": "2025-10-02T11:38:23.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This feels like attack surface for deliberately trying to trigger the blacklist fallback for other builders",
+      "createdAt": "2025-10-02T11:38:48.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and in particular, they **should not** be specified",
+      "createdAt": "2025-10-02T11:38:53.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that is only applicable precisely if we go the route you suggest: standardizing",
+      "createdAt": "2025-10-02T11:39:27.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, a client with 30% market share is its own standard to be fair",
+      "createdAt": "2025-10-02T11:39:49.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, the example I give for example will not depend on one client but in the combination CL+EL",
+      "createdAt": "2025-10-02T11:40:29.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so that minimizes that number",
+      "createdAt": "2025-10-02T11:40:39.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's the EL that sends the message to the CL that there's censoring.",
+      "createdAt": "2025-10-02T11:40:55.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and the CL that decides how to act on it",
+      "createdAt": "2025-10-02T11:41:03.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "both can be completely opinionated and not specified",
+      "createdAt": "2025-10-02T11:41:14.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As an attacker I would just find out what clients do and then try to get them blacklisted by spamming the future proposer's mempool to not see any other txs). For the slot where the specific client implementation would want to see a certain tx to be included the proposer can't deliver because it's mempool was spammed and it didn't see anything.",
+      "createdAt": "2025-10-02T11:42:11.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm all for fall-back mechanisms to fallback to only using in-protocol bids and ignoring the untrusted payment. I don't think blacklisting builders that proposers put on a list with builders they trust, is the right approach. When whitelisting entities, proposers are fine with whatever the builder does. And for solving late-inclusion and censorship there are tools like FOCIL, that are better suited than clients all coming up with their own blacklisting mechanisms.",
+      "createdAt": "2025-10-02T11:44:52.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "epbs peeps can we close https://github.com/ethpandaops/dora/pull/227 in favor of https://github.com/ethpandaops/dora/pull/484 ?",
+      "createdAt": "2025-10-02T12:04:42.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or is anyone else still relying on `eip7732-support` dora?",
+      "createdAt": "2025-10-02T12:05:04.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "#227 is the old epbs branch, which was used for the ePBS prototype implementation.\n#484 is the new one in preparation for gloas, based on latest spec.\nQuestion is, if we still need the prototype version or can we deprecate it?",
+      "createdAt": "2025-10-02T12:09:26.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we can close 227 I believe",
+      "createdAt": "2025-10-02T13:17:38.657000+00:00",
+      "attachments": []
+    }
+  ]
+}

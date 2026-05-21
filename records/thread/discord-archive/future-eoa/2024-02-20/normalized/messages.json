@@ -1,0 +1,744 @@
+{
+  "schemaVersion": 1,
+  "channel": "future-eoa",
+  "date": "2024-02-20",
+  "messageCount": 91,
+  "sourceHash": "b8c086f2a99d0b232456e1799681ffcae2ee71990b5be6284c07e1b8a0742434",
+  "searchText": "Again, I am a complete noob at this stuff compared to you guys. But this section of corner case carveouts for EIP-5806 sets off my tech-debt-creation spidey sense. Hey Tim, any chance we could include EIP-5003 and EIP-7212 in that list? What technical debt do we incur due to not being able to run these opcodes in the EOA? I'm just pointing out that it's not full delegation. It's delegation, \"but not this and not this\". This necessarily means there are additional if/elses required throughout the codebases. Whether that is something to be concerned about is beyond my knowledge. Like I said, just a spidey sense. Full delegation would have been nice but people pointed out some reasons not to allow storage in EOAs. 3074 also doesn't fully delegate the EOA. It changes msg.sender, but an SSTORE would land in the invoker, not in the EOA. And a CREATE would change the invoker's nonce afaik, not the EOA's. 3074 would have to adjust tx.origin, too, for full delegation. As currently written, tx.origin would be the invoker, not the remote-controlled EOA I agree that tx.origin should be included. But in any case neither 5806 nor 3074 do full delegation in the DELEGATECALL sense. As you pointed out above, things like SSTORE won't be delegated. I don't think it's a major issue with either EIPs. Your spidey senses align with mine. I personally think that the SSTORE exception should be removed. Me too, but others think differently Hmm, actually, where do you see the SSTORE exception? here Oh, in 5806, not 3074. Yes, in 3074 this restriction is implicit since it doesn't really delegatecall the EOA. An SSTORE wouldn't happen in the EOA I feel like at one point I lobbied for just allowing EOAs to DELEGATECALL directly (e.g., `data` field would contain CALLDATA but instead of a CALLing the `to` with that `data` it would be DELEGATECALL). I can't remember why it was shot down in favor of the much more complicated (IMO) 3074. I think it would have been good. And 5806 is pretty close to a DELEGATECALL into the EOA, except for SSTORE,CREATE,SELFDESTRUCT. My preference would be to SSTORE and CREATE in the EOA, so that any contract can be delegated. I don't see a big risk there. But it did bother some of the core devs. I guess 3074 solves a different problem, which is that you can give other addresses the ability to make calls from your account (essentially). Right, it doesn't try to be a DELEGATECALL I would like 5806 more if it dropped the constraints you mentioned. me too <@278099318647422977> do you remember who raised these objections that led to blocking the three opcodes? Should be incredibly low complexity in the clients compared to the version with exceptions, and least surprise for developers. By the way <@727296082484265073>, you should move the reasoning for the opcode restrictions into the `Rationale` section. Leave the `Specification` section focused purely on the rules, not the \"why\" of the rules. i think the main debate we run into with 3074 vs delegatecall things is whether or not delegatecall things provides enough additional functionality that it is worth putting in a fork I'm not a co-author if this EIP. <@278099318647422977> wrote it. 3074 allows everything a smart contract wallet allows except key rotation. 5806 and others really only allow single user tx batching And user storage. user storage? You can delegatecall into a contract that does SSTORE, which would write to your account's state trie. (if 5806 didn't have the exception for that) the distinction is kinda irrelevant, in 3074 you can define a state scheme which allows you to prefix the slot with your address for the invoker Not just batching. Anything that you could delegatecall into. What it doesn't allow is replay. But as I suggested above, it would be best to compare actual use cases that users ask for. what are the other use cases 5806 provides beyond batching? The selling point, IMO, of a pure EOA delegate call (without exceptions) far simpler to implement and test (I suspect) than something like 3704. While 3074 may be more broadly useful, it is also far more complex. (again, assuming 5806 removed the opcode restrictions) i can say 3074 allows the following that 5806 doesn't which is many people request: * lost key recovery * multi-user tx bundle (cheaper) * gas payment abstraction 3074 is as simple to implement or simpler - the difference in complexity is not implementation but more in theory of ownership. 5608 is super simple. 3074 is powerful, but also harder to reason about security True. It doesn't matter if the storage is in the EOA or in an invoker or other contract. The only reason to include SSTORE is to be able to delegate to existing contracts that use storage, and not have to redeploy modified versions in fact adding new tx types is pretty laborious because of all the places we have to update to deal with the new tx, update rpc specs, testing infra, etc 2718 didn't alleviate that burden by standardizing the way we do typed transactions? I assumed it would just be \"fill in the extra case in a bunch of switches\". And your compiler would tell you where all of those are. there are _a lot_ of extra switches i'm not saying adding new tx types is \"complex\", it is \"laborious\" Ah, I don't care about core dev labor. 😆 I care a *lot* about client complexity. Anything that benefits from running code in the account. Batching, atomicity, conditional operations, dapp-specific UX improvements, wallet security features such as enforcing a certain post-execution outcome and reverting on rugpulls, etc. But making a list of use cases that both EIPs can support doesn't take us forward. Let's focus on the use cases that *only* 3074 can support, so we can see if they have enough user demand to justify the added risk. I think most people don't make a distinction between lost key recovery and stolen key recovery. Giving a half-solution that doesn't solve stolen keys doesn't seem like it's worth it. We should provide a full solution. Imagine that your Protocol Guild EOA key gets stolen. Your funds are safe in the Splits contract since they're locked. But if you can't rotate the key, you're going to lose them as soon as they vest. point is, i'm pretty sure 3074 is simpler in the client you can see the two PRs https://github.com/ethereum/go-ethereum/pull/28615 https://github.com/ethereum/go-ethereum/pull/28997 obviously neither is complete, but there is a lot more code to be added to deal with 5806 in the rpc that isn't added that won't need to be added for 3074 this is just 5 different ways of saying tx batching The work on 1559 took care of most of that. Adding another type is not as hard as adding the first one. With 3074 you could do a single transaction batch that sends the funds out of protocol guild in the same transaction as it moves the funds out of your EOA w/invoker. Requires cooperation from Protocol Guild of course. For users they are individual use cases, and seem to cover the needs of most EOA users. Have you seen as much demand for recovery of lost-but-definitely-not-stolen keys, as for batching? yeah definitely, losing private key by user error is much more common than keys being stolen The funds are locked until a certain block number. Neither the invoker nor the ECDSA key can get them until that block. And when the block is reached, it's going to be a race between the ECDSA key and the AUTH. You're quite likely to lose the funds when they become vested. not an issue if you lost your key, only an issue if your key is stolen Do you have stats on that? I hear that compromised keys is a common problem. But in any case, why sell users a solution for half of the problem and not help them use something that solves both? For your PG address or validators withdrawal address, would you rather use a Gnosis Safe, or an EOA with 3074? it's just anecdotal. do you have stats on compromised keys? No, it's just anecdotal. But let's try to give users a complete solution for recovery. We all agree AA is better than both proposals. We don't have AA though, and we need a half-solution in the meantime. 3074 is a bigger half than 5806. 😄 We need a half-solution that doesn't introduce new risks. 3074 solves half of the problem while introducing new footguns. As Hippocrates said, \"First do no harm\" 5806 seems to solve the most requested use cases without introducing these risks. Not nearly as good as AA but better than nothing and doesn't increase the risk that much. i think payment abstraction, cheaper txs via batching with many users, and key loss recovery are also highly requested features Where we disagree is on whether managing user risks is something the core protocol should do, or higher layers (like the wallet) should do. I am in the camp that the core protocol should be kept simple and highly capable. Higher level layers like the language (Solidity) and the user interface (wallets) should be the places where risks are managed. All of which could be solved, either in a safer way or more complete way. But I guess we'll agree to disagree on that. how do you mean safer or more complete? 3074 can use the same 4337 mechanism to achieve the first two and as i we agreed, 3074 solves the lost key case The lines start to blur when catastrophic security failures occur. E.g. if many validators lose their funds due to some issue, there will be a strong push to save them via a fork, and we certainly don't want that. we have far bigger issues with respect to this on the consensus layer if validators set their withdrawal cred to an eoa and use a shady invoker that’s clearly on them By complete I mean solve key recovery rather than just lost-but-certainly-not-stolen-key recovery. And the other use cases can be complete using 4337, but doing it with 3074 adds risks that we could avoid. Unless we agree that as <@301186049323958275> said - it's not the role of the protocol to manage user risks. Agreed. It was just an example of a case where user security issues may become a systemic risk. We have plenty of others. I think both <@543900561460822016> and me have made our opinions clear about 3074 and 5806. Would be great to hear from other core devs here. It feels like a private chat 🙂 and this is really the crux of the debate. if we agree the protocol does not need to manage user risk, i don’t see much reason to not do 3074 Yes, different philosophies. I do see protecting users from obvious risks as part of our responsibility. We're not doing it for the beauty of it. Otherwise AUTH would indeed be a neat opcode to add. Coming in on this late. 3074 is a hatchet when what is needed is a scalpel, or at least a paring knife. Yes it enables lots of things, along with new unique risks that no other proposals bring in: eternal authorizations and malicious invokers being the top two. I've asked for a revocation mechanism (as have many others) but such review requests have been rejected. It may be \"the bigger half\" but in it's current form it brings in unwanted baggage that moves it to net-negative. 3074 has revocation now users can decide whether they want to use it or not The nonce has no limit, it can be set to max int. That is insufficient revocation. There are also supply chain attacks, compiler bugs, and buggy invokers that still expose the eternal authorization bug. We haven't heard from any wallet developers. That's a voice that's missing. you should be using a hardware wallet The recent supply chain attack was against a hardware wallet. it wasn't it was for the js lib interacting with the wallet if you actually verify the data the wallet signs, it was correct",
+  "excerpts": [
+    {
+      "author": "fivedogit",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Again, I am a complete noob at this stuff compared to you guys. But this section of corner case carveouts for EIP-5806 sets off my tech-debt-creation spidey sense.",
+      "createdAt": "2024-02-20T12:08:27.757000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_from_2024-02-20_07-06-51.png",
+          "content": "46e6043c49573a77e3a16d5da1d1d5dc7ecb5d0e21812813e6b85bba02d1ccbd"
+        }
+      ]
+    },
+    {
+      "author": "pedrouid",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hey Tim, any chance we could include EIP-5003 and EIP-7212 in that list?",
+      "createdAt": "2024-02-20T13:19:58.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What technical debt do we incur due to not being able to run these opcodes in the EOA?",
+      "createdAt": "2024-02-20T14:59:57.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fivedogit",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm just pointing out that it's not full delegation. It's delegation, \"but not this and not this\". This necessarily means there are additional if/elses required throughout the codebases.",
+      "createdAt": "2024-02-20T15:01:21.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fivedogit",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Whether that is something to be concerned about is beyond my knowledge. Like I said, just a spidey sense.",
+      "createdAt": "2024-02-20T15:01:45.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Full delegation would have been nice but people pointed out some reasons not to allow storage in EOAs. 3074 also doesn't fully delegate the EOA. It changes msg.sender, but an SSTORE would land in the invoker, not in the EOA. And a CREATE would change the invoker's nonce afaik, not the EOA's.",
+      "createdAt": "2024-02-20T15:06:05.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fivedogit",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "3074 would have to adjust tx.origin, too, for full delegation. As currently written, tx.origin would be the invoker, not the remote-controlled EOA",
+      "createdAt": "2024-02-20T15:09:16.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I agree that tx.origin should be included.  But in any case neither 5806 nor 3074 do full delegation in the DELEGATECALL sense.  As you pointed out above, things like SSTORE won't be delegated. I don't think it's a major issue with either EIPs.",
+      "createdAt": "2024-02-20T16:20:31.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Your spidey senses align with mine.",
+      "createdAt": "2024-02-20T16:21:48.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I personally think that the SSTORE exception should be removed.",
+      "createdAt": "2024-02-20T16:22:51.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Me too, but others think differently",
+      "createdAt": "2024-02-20T16:23:08.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hmm, actually, where do you see the SSTORE exception?",
+      "createdAt": "2024-02-20T16:23:13.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "here",
+      "createdAt": "2024-02-20T16:24:05.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh, in 5806, not 3074.",
+      "createdAt": "2024-02-20T16:24:20.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, in 3074 this restriction is implicit since it doesn't really delegatecall the EOA.  An SSTORE wouldn't happen in the EOA",
+      "createdAt": "2024-02-20T16:24:45.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I feel like at one point I lobbied for just allowing EOAs to DELEGATECALL directly (e.g., `data` field would contain CALLDATA but instead of a CALLing the `to` with that `data` it would be DELEGATECALL).  I can't remember why it was shot down in favor of the much more complicated (IMO) 3074.",
+      "createdAt": "2024-02-20T16:27:14.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think it would have been good.  And 5806 is pretty close to a DELEGATECALL into the EOA, except for SSTORE,CREATE,SELFDESTRUCT.  My preference would be to SSTORE and CREATE in the EOA, so that any contract can be delegated.  I don't see a big risk there.  But it did bother some of the core devs.",
+      "createdAt": "2024-02-20T16:28:46.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess 3074 solves a different problem, which is that you can give other addresses the ability to make calls from your account (essentially).",
+      "createdAt": "2024-02-20T16:29:34.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, it doesn't try to be a DELEGATECALL",
+      "createdAt": "2024-02-20T16:29:54.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I would like 5806 more if it dropped the constraints you mentioned.",
+      "createdAt": "2024-02-20T16:30:07.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "me too",
+      "createdAt": "2024-02-20T16:30:15.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@278099318647422977> do you remember who raised these objections that led to blocking the three opcodes?",
+      "createdAt": "2024-02-20T16:30:45.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Should be incredibly low complexity in the clients compared to the version with exceptions, and least surprise for developers.",
+      "createdAt": "2024-02-20T16:30:51.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By the way <@727296082484265073>, you should move the reasoning for the opcode restrictions into the `Rationale` section.  Leave the `Specification` section focused purely on the rules, not the \"why\" of the rules.",
+      "createdAt": "2024-02-20T16:32:17.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i think the main debate we run into with 3074 vs delegatecall things is whether or not delegatecall things provides enough additional functionality that it is worth putting in a fork",
+      "createdAt": "2024-02-20T16:32:30.776000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not a co-author if this EIP.  <@278099318647422977> wrote it.",
+      "createdAt": "2024-02-20T16:32:46.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "3074 allows everything a smart contract wallet allows except key rotation. 5806 and others really only allow single user tx batching",
+      "createdAt": "2024-02-20T16:33:12.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And user storage.",
+      "createdAt": "2024-02-20T16:33:37.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "user storage?",
+      "createdAt": "2024-02-20T16:33:52.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You can delegatecall into a contract that does SSTORE, which would write to your account's state trie.",
+      "createdAt": "2024-02-20T16:34:07.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(if 5806 didn't have the exception for that)",
+      "createdAt": "2024-02-20T16:34:29.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the distinction is kinda irrelevant, in 3074 you can define a state scheme which allows you to prefix the slot with your address for the invoker",
+      "createdAt": "2024-02-20T16:34:48.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not just batching.  Anything that you could delegatecall into.  What it doesn't allow is replay.\nBut as I suggested above, it would be best to compare actual use cases that users ask for.",
+      "createdAt": "2024-02-20T16:34:59.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "what are the other use cases 5806 provides beyond batching?",
+      "createdAt": "2024-02-20T16:35:26.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The selling point, IMO, of a pure EOA delegate call (without exceptions) far simpler to implement and test (I suspect) than something like 3704.  While 3074 may be more broadly useful, it is also far more complex.",
+      "createdAt": "2024-02-20T16:35:38.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(again, assuming 5806 removed the opcode restrictions)",
+      "createdAt": "2024-02-20T16:35:47.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i can say 3074 allows the following that 5806 doesn't which is many people request:\n* lost key recovery\n* multi-user tx bundle (cheaper)\n* gas payment abstraction",
+      "createdAt": "2024-02-20T16:36:10.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "3074 is as simple to implement or simpler - the difference in complexity is not implementation but more in theory of ownership. 5608 is super simple. 3074 is powerful, but also harder to reason about security",
+      "createdAt": "2024-02-20T16:36:31.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "True.  It doesn't matter if the storage is in the EOA or in an invoker or other contract.  The only reason to include SSTORE is to be able to delegate to existing contracts that use storage, and not have to redeploy modified versions",
+      "createdAt": "2024-02-20T16:37:02.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "in fact adding new tx types is pretty laborious because of all the places we have to update to deal with the new tx, update rpc specs, testing infra, etc",
+      "createdAt": "2024-02-20T16:37:44.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2718 didn't alleviate that burden by standardizing the way we do typed transactions?",
+      "createdAt": "2024-02-20T16:39:34.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I assumed it would just be \"fill in the extra case in a bunch of switches\".",
+      "createdAt": "2024-02-20T16:39:43.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And your compiler would tell you where all of those are.",
+      "createdAt": "2024-02-20T16:39:51.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "there are _a lot_ of extra switches",
+      "createdAt": "2024-02-20T16:39:55.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i'm not saying adding new tx types is \"complex\", it is \"laborious\"",
+      "createdAt": "2024-02-20T16:40:12.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah, I don't care about core dev labor.  😆",
+      "createdAt": "2024-02-20T16:40:35.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I care a *lot* about client complexity.",
+      "createdAt": "2024-02-20T16:40:40.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Anything that benefits from running code in the account.  Batching, atomicity, conditional operations, dapp-specific UX improvements, wallet security features such as enforcing a certain post-execution outcome and reverting on rugpulls, etc.\nBut making a list of use cases that both EIPs can support doesn't take us forward.  Let's focus on the use cases that *only* 3074 can support, so we can see if they have enough user demand to justify the added risk.",
+      "createdAt": "2024-02-20T16:40:47.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think most people don't make a distinction between lost key recovery and stolen key recovery.  Giving a half-solution that doesn't solve stolen keys doesn't seem like it's worth it.  We should provide a full solution.  Imagine that your Protocol Guild EOA key gets stolen.  Your funds are safe in the Splits contract since they're locked.  But if you can't rotate the key, you're going to lose them as soon as they vest.",
+      "createdAt": "2024-02-20T16:42:53.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "point is, i'm pretty sure 3074 is simpler in the client\n\nyou can see the two PRs\n\nhttps://github.com/ethereum/go-ethereum/pull/28615\nhttps://github.com/ethereum/go-ethereum/pull/28997\n\nobviously neither is complete, but there is a lot more code to be added to deal with 5806 in the rpc that isn't added that won't need to be added for 3074",
+      "createdAt": "2024-02-20T16:42:55.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this is just 5 different ways of saying tx batching",
+      "createdAt": "2024-02-20T16:43:49.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The work on 1559 took care of most of that.  Adding another type is not as hard as adding the first one.",
+      "createdAt": "2024-02-20T16:44:04.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "With 3074 you could do a single transaction batch that sends the funds out of protocol guild in the same transaction as it moves the funds out of your EOA w/invoker.",
+      "createdAt": "2024-02-20T16:44:14.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Requires cooperation from Protocol Guild of course.",
+      "createdAt": "2024-02-20T16:44:25.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For users they are individual use cases, and seem to cover the needs of most EOA users.  Have you seen as much demand for recovery of lost-but-definitely-not-stolen keys, as for batching?",
+      "createdAt": "2024-02-20T16:46:23.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah definitely, losing private key by user error is much more common than keys being stolen",
+      "createdAt": "2024-02-20T16:47:19.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The funds are locked until a certain block number.  Neither the invoker nor the ECDSA key can get them until that block.  And when the block is reached, it's going to be a race between the ECDSA key and the AUTH.  You're quite likely to lose the funds when they become vested.",
+      "createdAt": "2024-02-20T16:48:06.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "not an issue if you lost your key, only an issue if your key is stolen",
+      "createdAt": "2024-02-20T16:48:43.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Do you have stats on that?  I hear that compromised keys is a common problem.  But in any case, why sell users a solution for half of the problem and not help them use something that solves both?",
+      "createdAt": "2024-02-20T16:50:33.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For your PG address or validators withdrawal address, would you rather use a Gnosis Safe, or an EOA with 3074?",
+      "createdAt": "2024-02-20T16:51:30.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's just anecdotal. do you have stats on compromised keys?",
+      "createdAt": "2024-02-20T16:54:28.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No, it's just anecdotal.  But let's try to give users a complete solution for recovery.",
+      "createdAt": "2024-02-20T16:55:53.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We all agree AA is better than both proposals.",
+      "createdAt": "2024-02-20T16:56:06.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We don't have AA though, and we need a half-solution in the meantime.",
+      "createdAt": "2024-02-20T16:56:23.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "3074 is a bigger half than 5806.  😄",
+      "createdAt": "2024-02-20T16:56:36.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We need a half-solution that doesn't introduce new risks.  3074 solves half of the problem while introducing new footguns.  As Hippocrates said, \"First do no harm\"",
+      "createdAt": "2024-02-20T16:57:50.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "5806 seems to solve the most requested use cases without introducing these risks.  Not nearly as good as AA but better than nothing and doesn't increase the risk that much.",
+      "createdAt": "2024-02-20T16:58:40.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i think payment abstraction, cheaper txs via batching with many users, and key loss recovery are also highly requested features",
+      "createdAt": "2024-02-20T16:59:56.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Where we disagree is on whether managing user risks is something the core protocol should do, or higher layers (like the wallet) should do.",
+      "createdAt": "2024-02-20T16:59:59.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I am in the camp that the core protocol should be kept simple and highly capable.  Higher level layers like the language (Solidity) and the user interface (wallets) should be the places where risks are managed.",
+      "createdAt": "2024-02-20T17:00:49.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "All of which could be solved, either in a safer way or more complete way.  But I guess we'll agree to disagree on that.",
+      "createdAt": "2024-02-20T17:04:08.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "how do you mean safer or more complete? 3074 can use the same 4337 mechanism to achieve the first two and as i we agreed, 3074 solves the lost key case",
+      "createdAt": "2024-02-20T17:05:21.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The lines start to blur when catastrophic security failures occur.  E.g. if many validators lose their funds due to some issue, there will be a strong push to save them via a fork, and we certainly don't want that.",
+      "createdAt": "2024-02-20T17:05:39.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we have far bigger issues with respect to this on the consensus layer",
+      "createdAt": "2024-02-20T17:06:57.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if validators set their withdrawal cred to an eoa and use a shady invoker that’s clearly on them",
+      "createdAt": "2024-02-20T17:06:58.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By complete I mean solve key recovery rather than just lost-but-certainly-not-stolen-key recovery.  And the other use cases can be complete using 4337, but doing it with 3074 adds risks that we could avoid.  Unless we agree that as <@301186049323958275> said - it's not the role of the protocol to manage user risks.",
+      "createdAt": "2024-02-20T17:07:46.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Agreed. It was just an example of a case where user security issues may become a systemic risk. We have plenty of others.",
+      "createdAt": "2024-02-20T17:08:36.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think both <@543900561460822016> and me have made our opinions clear about 3074 and 5806.  Would be great to hear from other core devs here.",
+      "createdAt": "2024-02-20T17:12:28.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It feels like a private chat 🙂",
+      "createdAt": "2024-02-20T17:12:40.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and this is really the crux of the debate. if we agree the protocol does not need to manage user risk, i don’t see much reason to not do 3074",
+      "createdAt": "2024-02-20T17:13:39.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yoavw",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, different philosophies.  I do see protecting users from obvious risks as part of our responsibility.  We're not doing it for the beauty of it.  Otherwise AUTH would indeed be a neat opcode to add.",
+      "createdAt": "2024-02-20T17:16:37.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Coming in on this late.  3074 is a hatchet when what is needed is a scalpel, or at least a paring knife.  Yes it enables lots of things, along with new unique risks that no other proposals bring in: eternal authorizations and malicious invokers being the top two.  I've asked for a revocation mechanism (as have many others) but such review requests have been rejected.  It may be \"the bigger half\" but in it's current form it brings in unwanted baggage that moves it to net-negative.",
+      "createdAt": "2024-02-20T17:42:23.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "3074 has revocation now",
+      "createdAt": "2024-02-20T17:50:48.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "users can decide whether they want to use it or not",
+      "createdAt": "2024-02-20T17:51:08.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The nonce has no limit, it can be set to max int.  That is insufficient revocation.",
+      "createdAt": "2024-02-20T17:59:31.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There are also supply chain attacks, compiler bugs, and buggy invokers that still expose the eternal authorization bug.",
+      "createdAt": "2024-02-20T18:00:04.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We haven't heard from any wallet developers.  That's a voice that's missing.",
+      "createdAt": "2024-02-20T18:00:25.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you should be using a hardware wallet",
+      "createdAt": "2024-02-20T18:01:10.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The recent supply chain attack was against a hardware wallet.",
+      "createdAt": "2024-02-20T18:01:28.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it wasn't it was for the js lib interacting with the wallet",
+      "createdAt": "2024-02-20T18:01:41.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if you actually verify the data the wallet signs, it was correct",
+      "createdAt": "2024-02-20T18:01:55.471000+00:00",
+      "attachments": []
+    }
+  ]
+}

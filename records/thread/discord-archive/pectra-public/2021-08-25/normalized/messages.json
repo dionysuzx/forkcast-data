@@ -1,0 +1,610 @@
+{
+  "schemaVersion": 1,
+  "channel": "pectra-public",
+  "date": "2021-08-25",
+  "messageCount": 75,
+  "sourceHash": "1b4fd46a433869c49fbc305d9460f5648bd82c7511779d63a90c4e30ef8aa91e",
+  "searchText": "Maybe we should not call it \"safe head\" as the level of security would depend on the threshold and \"safe\" might be too strong word here. Or explicitly mention that security level depends on what's at stake - in this case it might be better to use a threshold value instead of any vague identifiers like \"safehead\". \"suspected head\"? \"good chance head\" \"confirmed head\" <dankrad> my suggestion is to just call it \"head\" and call the other one \"unsafeHead\" It is called `latest` right now and there would be a huge amount of work to change that (all dapps use that frequently). <dankrad> ok then use that :) The questions to answer are: 1. What does `latest` point to after The Merge? 2. What are the new options added after The Merge? I think this is a pretty simple suggestion ^^ `latest` would point at the best known canonical chain I assume? <dankrad> latest -> safeHead Add unsafeHead, finalizedHead How far behind (normally) do we think `safeHead` will be? When things are healthy. > In that sense, perhaps saying latest point to the latest safe head, finalized points to the latest finalized head, and unsafehead points to the unsafe head may be a good direction to consider. <dankrad> about 4 seconds when a new block appears (re @merge_chat_bot: <Micah> How far behind (normally) do we think `safeHead` will be? When things are healthy.) `unsafe`: The absolute newest block seen, what the client expects will probably become the canonical chain under normal circumstances. `latest`: The latest block with 50%+ signatures, where it is quite unlikely to reorg outside an attack. `finalized`: The finalized block, clients won't reorg past this without human intervention. Does that sound right? I'm a little uncertain what \"safe head\" means exactly. There's an effort to rename things so as to make them accurate and avoid possible confusion. Calling `latest` whatever was being called `safehead` above could really lead to someone believing this is what is currently thought as `chainhead` among consensus clients. <dankrad> how is that a danger though? I don't see anything dangerous in this. Just against the philosophy of having clear non-misleading nomenclature <dankrad> The point is to have safe behaviour of apps that aren't upgraded in time. If you look at EIP1559, you can see how long it takes to update everything. Not great if in the meantime the default behaviour is unsafe <dankrad> what alternative are you suggesting, that is not clear to me (re @merge_chat_bot: <potuz> I don't see anything dangerous in this. Just against the philosophy of having clear non-misleading nomenclature) Latest head certainly sounds to me like what my current beacon node thinks is the chainhead. It could be called `credible head` `feasible head` or some variation in tone. Even `safe head` was fine too, if the API call has a parameter to adjust the security level that should indicate that it's not 100% safe <dankrad> I'm simply asking where the \"latest\" that current dapps use should point `unsafe`, `safe` (alias for `latest` for backward compatibility), `finalized` is my current thinking. Ah I see what you mean. Yeah I have no saying on that. It looks to me that safe head is a good option <dankrad> yeah the discussion was only about that :) I believe that most apps will behave correctly if `latest` is aliased to `safe` rather than `unsafe` because in the common case `safe` will be *close enough* to head that everything will \"just work\". This is especially true given PoW blocks are irregular and ~13 seconds apart while PoS blocks are regular and 12 seconds apart plus maybe 4 more seconds for signature collection. Aliasing `latest` to `finalized` will likely result in things breaking because it is too far behind what apps are designed around, and aliasing to `unsafe` puts users at unnecessary risk for incredibly marginal gain in functionality. How does the 4 seconds figure appears? A new block arrives essentially right at the beginning of the slot (about 0.2 seconds normally) at 4 seconds max attestations are sent. But only at 8 seconds they are rebroadcasted by aggregators. So I always assumed that safe head would be the previous slot In normal circumstances <dankrad> hmm, yes I forgot about aggregation Except at 8 seconds you can switch I think 8 seconds is still acceptably close to pre-merge definition of `latest`. Good to know it is actually 8 seconds though. `latest` in the PoW network points to the recent head and this head is valid with respect to the consensus rules. If we apply this semantics to the PoS network then `latest` should point to a block with _some_ level of confirmations received, i.e. what we're referring to as a `safe` here. OTOH, some apps _may_ expect `latest` to return the most recent head, even unconfirmed. This should be considered too. We may change these names entirely to enforce apps to update and start following the new semantics, though, this is additional update step required from apps while we try to reduce these steps where possible and reasonable. Also, we should think about `pending` which currently refers to a pending block on top of the `latest` one. Will `pending` in PoS point to a pending block on top of `safe` or `unsafe` head? <dankrad> Doesn't any app need to be able to deal with latency anyway? <dankrad> Like I simply can't see how a confirmation delay can lead to an app breaking. if that app isn't pretty fundamentally broken already Correct. I think making `latest == finalized` would be a long enough delay to cause problem problems though. I don't think there are apps that will be broken but we should be explicit about this change and let app devs decide what to do `latest` confirmed by `2/3` attestations in PoS gives much strong guarantees to apps than the `latest` in PoW does. As in the PoS case this block is very likely to be in the canonical chain eventually. The question of whether `pending` builds on top of `unsafe` or `safe` or `finalized` is interesting. My gut says it should build on top of `unsafe`. I think the most common case of `pending` is for bots that are trying to predict what a future block will look like so they can plan around it. yeah, following the same logic it should be built on top of `safe` I also don't care much about breaking bots (they are much more agile than dapps and can change easily). `pending` is meant to be 0-conf explicitly. That is, the `pending` block should be built exclusively with transactions from the pending pool, not from transactions that have already been included in any mined block. Currently, `pending` is an ephemeral block on top of `latest` _valid_ block, if we follow this then `pending` should be based on top of `safe` one in PoS. I agree that the semantics of `pending` block in PoS network should be defined with the majority of use cases in mind. I don't think anyone who actually uses `pending` is using it based on that definition. 🙂 Everyone I have seen who uses `pending` is trying to get details about the state of the world *after* the next block is built. It wouldn't serve that purpose at all if it returned a block built on top of safe head (which is almost certain to look nearly identical to the unsafe block). This is used by people who are doing fancy stuff with pending pools like frontrunning, backrunning, etc. where you are trying to squeeze your transaction into a specific spot (relative to other transactions). Then the following seems reasonable to me: - `earliest` -> genesis (isn't changed) - `finalized` -> the most recent finalized block - `safe`/`latest` -> the most recent _confirmed_ block in the canonical chain - `unsafe` -> the head of the canonical chain disregarding the number of confirmations - `pending` -> pending block built on top of the `unsafe` block I like those ^ but I will note that pow `latest` doesn't take into account it's re-org probability. and a pow block at 0.1 seconds received might actually have a higher chance of re-org *under normal operation* than a pos block at 0.1 seconds and no attestations ^ but just food for thought! I think the digest from mikhail is good I think having `latest` alias to `safe` is generally the healthier choice for most apps as well, so people who \"do nothing\" will become safer with PoS, which is a good thing. fair <dankrad> but a PoW block costs 1000s of US$ to produce which a single PoS block (without any attestations) do not <dannyryan> right, that’s what I said “normal operation” <dannyryan> in normal operation, there are no competing blocks because of single slot assignment <dankrad> I think the paradoxical situation is that immediately after production, a PoS block is less safe than a PoW block, but with attestations coming in it is very quickly 100s of times safer <dannyryan> and in normal pow operation there are often uncles <dannyryan> it does depend! (re @dankrad: I think the paradoxical situation is that immediately after production, a PoS block is less safe than a PoW block, but with attestations coming in it is very quickly 100s of times safer) <dannyryan> if it is built on a well attested head at the slot in question <dannyryan> then it is much more likely to be hte head than some rogue head forked from a while ago <dankrad> I see, interesting <dannyryan> but I suppose that wouldn’t go down to the execution layer as “head” anyway <dankrad> yes, potentially the algorithm could conclude that a block built on a safe head is actually safe even without attestations <dannyryan> worth attempting to quantify and parametrize <dankrad> because this is actually probably true under synchronous conditions <dannyryan> right, especially if you see the head very much on time <dankrad> yeah <dankrad> good point! so maybe \"best case\" latency can be even lower **The Merge: Consensus API design space Call is in about 22 hours** Agenda: https://github.com/ethereum/pm/issues/378",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe we should not call it \"safe head\" as the level of security would depend on the threshold and \"safe\" might be too strong word here. Or explicitly mention that security level depends on what's at stake - in this case it might be better to use a threshold value instead of any vague identifiers like \"safehead\".",
+      "createdAt": "2021-08-25T06:48:17.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"suspected head\"?",
+      "createdAt": "2021-08-25T07:06:31.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"good chance head\"",
+      "createdAt": "2021-08-25T07:06:51.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"confirmed head\"",
+      "createdAt": "2021-08-25T09:18:52.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> my suggestion is to just call it \"head\" and call the other one \"unsafeHead\"",
+      "createdAt": "2021-08-25T09:28:29.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is called `latest` right now and there would be a huge amount of work to change that (all dapps use that frequently).",
+      "createdAt": "2021-08-25T09:33:59.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> ok then use that :)",
+      "createdAt": "2021-08-25T09:34:18.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The questions to answer are:\n1. What does `latest` point to after The Merge?\n2. What are the new options added after The Merge?",
+      "createdAt": "2021-08-25T09:34:24.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think this is a pretty simple suggestion ^^",
+      "createdAt": "2021-08-25T09:34:44.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`latest` would point at the best known canonical chain I assume?",
+      "createdAt": "2021-08-25T09:34:47.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> latest -> safeHead\nAdd unsafeHead, finalizedHead",
+      "createdAt": "2021-08-25T09:34:58.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How far behind (normally) do we think `safeHead` will be?  When things are healthy.",
+      "createdAt": "2021-08-25T09:35:15.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> In that sense, perhaps saying latest point to the latest safe head, finalized points to the latest finalized head, and unsafehead points to the unsafe head may be a good direction to consider.",
+      "createdAt": "2021-08-25T09:35:16.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> about 4 seconds when a new block appears (re @merge_chat_bot: <Micah> How far behind (normally) do we think `safeHead` will be?  When things are healthy.)",
+      "createdAt": "2021-08-25T09:35:32.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`unsafe`: The absolute newest block seen, what the client expects will probably become the canonical chain under normal circumstances.\n`latest`: The latest block with 50%+ signatures, where it is quite unlikely to reorg outside an attack.\n`finalized`: The finalized block, clients won't reorg past this without human intervention.",
+      "createdAt": "2021-08-25T09:37:14.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Does that sound right?  I'm a little uncertain what \"safe head\" means exactly.",
+      "createdAt": "2021-08-25T09:37:26.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There's an effort to rename things so as to make them accurate and avoid possible confusion. Calling `latest` whatever was being called `safehead` above could really lead to someone believing this is what is currently thought as `chainhead` among consensus clients.",
+      "createdAt": "2021-08-25T10:18:58.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> how is that a danger though?",
+      "createdAt": "2021-08-25T10:20:07.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't see anything dangerous in this. Just against the philosophy of having clear non-misleading nomenclature",
+      "createdAt": "2021-08-25T10:20:57.162000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> The point is to have safe behaviour of apps that aren't upgraded in time. If you look at EIP1559, you can see how long it takes to update everything. Not great if in the meantime the default behaviour is unsafe",
+      "createdAt": "2021-08-25T10:21:20.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> what alternative are you suggesting, that is not clear to me (re @merge_chat_bot: <potuz> I don't see anything dangerous in this. Just against the philosophy of having clear non-misleading nomenclature)",
+      "createdAt": "2021-08-25T10:21:32.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Latest head certainly sounds to me like what my current beacon node thinks is the chainhead. It could be called `credible head` `feasible head` or some variation in tone. Even `safe head` was fine too, if the API call has a parameter to adjust the security level that should indicate that it's not 100% safe",
+      "createdAt": "2021-08-25T10:24:16.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> I'm simply asking where the \"latest\" that current dapps use should point",
+      "createdAt": "2021-08-25T10:24:49.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`unsafe`, `safe` (alias for `latest` for backward compatibility), `finalized` is my current thinking.",
+      "createdAt": "2021-08-25T10:25:41.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah I see what you mean. Yeah I have no saying on that. It looks to me that safe head is a good option",
+      "createdAt": "2021-08-25T10:25:49.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> yeah the discussion was only about that :)",
+      "createdAt": "2021-08-25T10:26:07.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe that most apps will behave correctly if `latest` is aliased to `safe` rather than `unsafe` because in the common case `safe` will be *close enough* to head that everything will \"just work\".  This is especially true given PoW blocks are irregular and ~13 seconds apart while PoS blocks are regular and 12 seconds apart plus maybe 4 more seconds for signature collection.",
+      "createdAt": "2021-08-25T10:26:56.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Aliasing `latest` to `finalized` will likely result in things breaking because it is too far behind what apps are designed around, and aliasing to `unsafe` puts users at unnecessary risk for incredibly marginal gain in functionality.",
+      "createdAt": "2021-08-25T10:27:36.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How does the 4 seconds figure appears? A new block arrives essentially right at the beginning of the slot (about 0.2 seconds normally) at 4 seconds max attestations are sent. But only at 8 seconds they are rebroadcasted by aggregators.",
+      "createdAt": "2021-08-25T10:33:34.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So I always assumed that safe head would be the previous slot",
+      "createdAt": "2021-08-25T10:34:05.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In normal circumstances",
+      "createdAt": "2021-08-25T10:34:12.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> hmm, yes I forgot about aggregation",
+      "createdAt": "2021-08-25T10:34:23.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Except at 8 seconds you can switch",
+      "createdAt": "2021-08-25T10:34:39.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think 8 seconds is still acceptably close to pre-merge definition of `latest`.",
+      "createdAt": "2021-08-25T10:36:04.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Good to know it is actually 8 seconds though.",
+      "createdAt": "2021-08-25T10:36:11.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`latest` in the PoW network points to the recent head and this head is valid with respect to the consensus rules. If we apply this semantics to the PoS network then `latest` should point to a block with _some_ level of confirmations received, i.e. what we're referring to as a `safe` here.\n\nOTOH, some apps _may_ expect `latest` to return the most recent head, even unconfirmed. This should be considered too. We may change these names entirely to enforce apps to update and start following the new semantics, though, this is additional update step required from apps while we try to reduce these steps where possible and reasonable.\n\nAlso, we should think about `pending` which currently refers to a pending block on top of the `latest` one. Will `pending` in PoS point to a pending block on top of `safe` or `unsafe` head?",
+      "createdAt": "2021-08-25T10:38:38.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> Doesn't any app need to be able to deal with latency anyway?",
+      "createdAt": "2021-08-25T10:39:36.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> Like I simply can't see how a confirmation delay can lead to an app breaking. if that app isn't pretty fundamentally broken already",
+      "createdAt": "2021-08-25T10:40:06.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Correct.  I think making `latest == finalized` would be a long enough delay to cause problem problems though.",
+      "createdAt": "2021-08-25T10:40:35.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't think there are apps that will be broken but we should be explicit about this change and let app devs decide what to do",
+      "createdAt": "2021-08-25T10:41:24.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`latest` confirmed by `2/3` attestations in PoS gives much strong guarantees to apps than the `latest` in PoW does. As in the PoS case this block is very likely to be in the canonical chain eventually.",
+      "createdAt": "2021-08-25T10:44:48.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The question of whether `pending` builds on top of `unsafe` or `safe` or `finalized` is interesting.",
+      "createdAt": "2021-08-25T10:45:40.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My gut says it should build on top of `unsafe`.  I think the most common case of `pending` is for bots that are trying to predict what a future block will look like so they can plan around it.",
+      "createdAt": "2021-08-25T10:46:12.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, following the same logic it should be built on top of `safe`",
+      "createdAt": "2021-08-25T10:46:17.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I also don't care much about breaking bots (they are much more agile than dapps and can change easily).",
+      "createdAt": "2021-08-25T10:46:29.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`pending` is meant to be 0-conf explicitly.",
+      "createdAt": "2021-08-25T10:46:44.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is, the `pending` block should be built exclusively with transactions from the pending pool, not from transactions that have already been included in any mined block.",
+      "createdAt": "2021-08-25T10:47:13.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, `pending` is an ephemeral block on top of `latest` _valid_ block, if we follow this then `pending` should be based on top of `safe` one in PoS. I agree that the semantics of `pending` block in PoS network should be defined with the majority of use cases in mind.",
+      "createdAt": "2021-08-25T10:49:57.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't think anyone who actually uses `pending` is using it based on that definition.  🙂",
+      "createdAt": "2021-08-25T10:50:44.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Everyone I have seen who uses `pending` is trying to get details about the state of the world *after* the next block is built.",
+      "createdAt": "2021-08-25T10:51:10.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It wouldn't serve that purpose at all if it returned a block built on top of safe head (which is almost certain to look nearly identical to the unsafe block).",
+      "createdAt": "2021-08-25T10:51:51.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is used by people who are doing fancy stuff with pending pools like frontrunning, backrunning, etc. where you are trying to squeeze your transaction into a specific spot (relative to other transactions).",
+      "createdAt": "2021-08-25T10:52:45.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then the following seems reasonable to me:\n- `earliest` -> genesis (isn't changed)\n- `finalized` -> the most recent finalized block\n- `safe`/`latest` -> the most recent _confirmed_ block in the canonical chain\n- `unsafe` -> the head of the canonical chain disregarding the number of confirmations\n- `pending` -> pending block built on top of the `unsafe` block",
+      "createdAt": "2021-08-25T10:56:15.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I like those ^",
+      "createdAt": "2021-08-25T13:42:53.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but I will note that pow `latest` doesn't take into account it's re-org probability. and a pow block at 0.1 seconds received might actually have a higher chance of re-org *under normal operation* than a pos block at 0.1 seconds and no attestations",
+      "createdAt": "2021-08-25T13:44:09.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "^ but just food for thought! I think the digest from mikhail is good",
+      "createdAt": "2021-08-25T13:44:34.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think having `latest` alias to `safe` is generally the healthier choice for most apps as well, so people who \"do nothing\" will become safer with PoS, which is a good thing.",
+      "createdAt": "2021-08-25T13:46:43.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "fair",
+      "createdAt": "2021-08-25T13:48:11.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> but a PoW block costs 1000s of US$ to produce which a single PoS block (without any attestations) do not",
+      "createdAt": "2021-08-25T13:53:35.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> right, that’s what I said “normal operation”",
+      "createdAt": "2021-08-25T13:53:53.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> in normal operation, there are no competing blocks because of single slot assignment",
+      "createdAt": "2021-08-25T13:54:12.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> I think the paradoxical situation is that immediately after production, a PoS block is less safe than a PoW block, but with attestations coming in it is very quickly 100s of times safer",
+      "createdAt": "2021-08-25T13:54:13.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> and in normal pow operation there are often uncles",
+      "createdAt": "2021-08-25T13:54:17.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> it does depend! (re @dankrad: I think the paradoxical situation is that immediately after production, a PoS block is less safe than a PoW block, but with attestations coming in it is very quickly 100s of times safer)",
+      "createdAt": "2021-08-25T13:54:29.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> if it is built on a well attested head at the slot in question",
+      "createdAt": "2021-08-25T13:54:38.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> then it is much more likely to be hte head than some rogue head forked from a while ago",
+      "createdAt": "2021-08-25T13:54:49.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> I see, interesting",
+      "createdAt": "2021-08-25T13:54:56.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> but I suppose that wouldn’t go down to the execution layer as “head” anyway",
+      "createdAt": "2021-08-25T13:55:04.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> yes, potentially the algorithm could conclude that a block built on a safe head is actually safe even without attestations",
+      "createdAt": "2021-08-25T13:55:18.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> worth attempting to quantify and parametrize",
+      "createdAt": "2021-08-25T13:55:36.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> because this is actually probably true under synchronous conditions",
+      "createdAt": "2021-08-25T13:55:46.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> right, especially if you see the head very much on time",
+      "createdAt": "2021-08-25T13:56:00.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> yeah",
+      "createdAt": "2021-08-25T13:56:06.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> good point! so maybe \"best case\" latency can be even lower",
+      "createdAt": "2021-08-25T13:56:27.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "**The Merge: Consensus API design space Call is in about 22 hours**\nAgenda: https://github.com/ethereum/pm/issues/378",
+      "createdAt": "2021-08-25T14:46:45.880000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -16,7 +16,12 @@ The latest snapshot ID is in `dist/latest/manifest.json`.
 ## Real Backfill
 
 ```bash
-npm run backfill -- --source live --limit 12
+npm run backfill -- --source canonical --limit 0 \
+  --pm-root /Users/lucy/fun/pm \
+  --pm-lean-out /Users/lucy/fun/pm-lean/out \
+  --forkcast-root /Users/lucy/fun/forkcast \
+  --eips-root /Users/lucy/fun/acd-process/EIPs \
+  --eth-rnd-archive-root /Users/lucy/fun/ro-repos/eth-rnd-archive
 npm run derive
 npm run validate
 npm run build-snapshot
@@ -27,15 +32,15 @@ npm run build-site
 
 ## Live GitHub Actions Loop
 
-1. `pm-lean` publishes `out/` to branch `pm-lean-feed`.
-2. `pm-lean` dispatches `forkcast-data` workflow `data-pipeline.yml` with `source=pm-lean`.
-3. `forkcast-data` also runs every 30 minutes with `source=live`.
-4. The pipeline checks out `pm-lean-feed`, ingests the feed and Ethereum PM issue agendas, validates, builds immutable snapshots, builds search, runs evals, deploys Netlify, and dispatches `forkcast-astro`.
+1. `forkcast-data` runs `data-pipeline.yml` every 10 minutes with `source=canonical`.
+2. The pipeline checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and optional `pm-lean-feed`.
+3. The pipeline ingests all sources into one shared record layout, validates, builds immutable snapshots, builds search, runs fixture evals, deploys Netlify, and dispatches `forkcast-astro`.
+4. `pm-lean` may also dispatch `forkcast-data` with `source=pm-lean`, but pm-lean is an optional upstream source, not the canonical data plane.
 
 Manual dispatch:
 
 ```bash
-gh workflow run data-pipeline.yml -R dionysuzx/forkcast-data -f source=live -f force_rebuild=true
+gh workflow run data-pipeline.yml -R dionysuzx/forkcast-data -f source=canonical -f source_limit=0 -f force_rebuild=true
 ```
 
 Required automation secrets:
@@ -47,7 +52,8 @@ Required automation secrets:
 Required variables:
 
 - `PM_LEAN_FEED_REF=pm-lean-feed`
-- optional `FORKCAST_DATA_PIPELINE_SOURCE=live`
+- optional `FORKCAST_DATA_PIPELINE_SOURCE=canonical`
+- optional `FORKCAST_DATA_SOURCE_LIMIT=0` for full-source scheduled ingestion
 
 ## MCP Smoke
 

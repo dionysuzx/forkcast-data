@@ -1,0 +1,330 @@
+{
+  "schemaVersion": 1,
+  "channel": "witnesses",
+  "date": "2020-04-08",
+  "messageCount": 40,
+  "sourceHash": "0db260985fc21caee2adec86726a2ad2393de107e91442f03cd1e2427b4e43e5",
+  "searchText": "<@!682078300234973185> Regarding parameterisation of <Tree> Suppose we have: <Block_Witness> := v : <Version> t1:<Tree> t2:<Tree>, <Tree> := 0xbb c1: <Custom> n1:<Tree_Node(0)> <Tree> := 0xbb c2: <Custom> n2:<Tree_Node(0)> <Tree_Node(0)> := 0x03 h1:<Bytes32> // First Tree <Tree_Node(0)> := 0x03 h2:<Bytes32> // Second Tree with the plan to encode two separate trees, then this would give two choices to expand <Tree> for t1 and t2, which makes it not correct. Hence I think parameterisation of <Tree> is necessary. This would also mean that the production for <Tree> should be in the form <Tree(d)> := 0xbb c:<Custom> n:<Tree_Node(d)> ... note the updated parameter of Tree_Node. May be I am wrong. Let me know. <@!682078300234973185> On the similar lines, I see that <Tree_Node> on the same level of the parse tree has the same parameter number. Should it not be different? In that case we need an encoding scheme for these parameters. <@!689635476826619924> I would encode the Block_Witness you describe as `0x01 0xbb 0x00 0x03 h1:<Bytes32> 0xbb 0x00 0x03 h2:<Bytes32>`, which is two trees with root nodes as hash nodes h1 and h2, respectively. I don't understand how you define non-terminals `<Tree>` and `<Tree_Node(0)>` multiple times. t1 and t2 are bound to two invocations of the same `<Tree>` rule, not separate rules. I agree that it may be confusing because `<Tree>^*` notation is another parameterization, so maybe there should be a syntax rule `<Block_Witness(n)>` for each `n>=0` corresponding to how many times we repeat `<Tree>`, and a separate rule to parse `n` and call the specific `<Block_Witness(n)>`. But then there would be billions of syntax rules. <@!682078300234973185> For the binary example: 0x01 bb 00 03 h1 bb 00 03 h2, from your witness spec, we will have the instructions: BW := <Version> <Tree> <Tree> <Version> := 0x01 <Tree> := <Custom> <TreeNode(0)> <Custom> := 0x00 <TreeNode(0)> := 0x03 <Bytes32> <Bytes32> := <Byte>^32 <Byte> := h1 | h2 Right? I believe for a similar but different example: 0x01 bb 00 03 h2 bb 00 03 h1, we will have the same set of instructions. It does not look like a problem for this small example where a trie is just a single node. But when tries contain different nodes, it is possible for a node belonging to a second trie, to be put in the first trie, while reconstructing from the witness instructions. Am I missing anything? > But then there would be billions of syntax rules. <@!682078300234973185> But can be templated with parameters One solution for determining the parameters is to append the branch-label (nibble value in Hexary trie, and bit value in a binary trie) to the parameter. I think we need to update only the rule for <Branch_Node(d)>: <Branch_Node(d)> := …. c[i]<Tree_Node(di)> … Where di is just plain concatenation of d and i. An example parse tree for binary tries: TreeNode(1) | BranchNode(1) / \\ TreeNode(10) TreeNode(11) | BranchNode(10) / \\ TreeNode(100) TreeNode(101) Looks correct except I'm not sure what `<Byte> := h1 | h2` means. I think that `h1` and `h2` are variables bound to whatever is parsed by different invocations of `<Bytes>^32`. There is no syntactic restriction on data (leaves, hashes, etc) is put in each tree. The syntax just restricts the structure. But finally we would need to bind it to one specific value. I read h1 and h2 to be concrete root hashes of tries I don't think that `<Tree_Node(d)>` needs any more parameters. It is a recursive definition. <Tree_Node(5)> represents all possible tree nodes at nibble-depth 5. Supporting multiple trees is for breaking a witness into chunks. But that is not specified yet, the syntax will change to accommodate it. Okay. I didn't realize that. Then why does the rule for BlockWitness contain a list of trees? Each witness chunk will be a `Tree` in the list. Maybe `Tree` is not a good name for a witness chunk. I don't quite get it. You say witness chunks are not supported, but they are in the rule for Block_Witness. For this concrete example, can you describe what your encoding looks like? Root1 Root2 / \\ / \\ h1 h2 h3 h4 If you think I am wasting this channel's thought space, I am happy for a zoom call. Let me know The encoding for your concrete example is: `0x01 0xbb 0x00 0x00 bitmask1:0x0003 0x03 h1:<Bytes32> 0x03 h2:<Bytes32> 0xbb 0x00 0x00 bitmask2:0x0003 0x03 h3:<Bytes32> 0x03 h4:<Bytes32>` where I chose the bitmasks to say that the last two children are present. The set of instructions? Each witness chunk will be a `<Tree>`. Also, `<Tree>` may correspond to things for syncing and other p2p stuff. Maybe the name `Tree` is not a good one. I agree. My bad. I'm not sure what instructions are. I will annotate the encoding the best I can. `version:0x01 tree1:0xbb custom1:0x00 branchnode1:0x00 bitmask1:0x0003 hashnode1:0x03 h1:<Bytes32> hashnode2:0x03 h2:<Bytes32> tree2:0xbb custom2:0x00 branchnode2:0x00 bitmask2:0x0003 hashnode3:0x03 h3:<Bytes32> hashnode4:0x03 h4:<Bytes32>`. Sorry, i understood. We convert the tries to instructions and parse it back to tries. I got confused between parse trees and the tries. Anyways, how exactly would you extend for accomodating witness chunks? We have not yet defined what \"witness chunk\" means. Maybe each witness chunk will be a subtree, so we would specify a prefix path with each subtree. This subtree prefix path may go in the <Custom> data section, or we may change the syntax. But <@!520564582196969472> and <@456226577798135808> have no obligation to use my spec, and they are evaluating options now. Now, I don't get the rationale for parameters in non-terminals at all. What is the problem in using Tree_Node(d) in place of Tree_Node(d+1)? Can you give me an example? In our vision it has to be a subtree Because then you get root hash checks for free If you build the trie from the chunks from top to bottom The first chunk will be matched against the block root hash The next sub tries will be attached to hash nodes in this trie So you know their root hashes Etc It’s not that it is impossible to validate in some other way, but we already have this mechanism Parameter `d` represents nibble-depth. `<Branch_Node(5)>` has children `<Tree_Node(6)>`. The reason for parameterizing depth is to limit tree depth in the syntax. For example, we can't have `<Tree_Node(100)>` because this would exceed the maximum nibble-depth. <@!520564582196969472> I agree that your way of chunking is a good way to do it. <@!520564582196969472> Subtree chunking sounds good One side effect of that is that then the same witness can be used for semi stateless sync that I did. When you need to just update the existing trie paths often multiples times per block (semi-stateless is when you are keeping the trie between block executions instead of rebuilding from scratch) <@!682078300234973185> Proving your grammar is LL(1) is very easy. From the rules, it is clear that the parsing table will have at most 1 rule. Hence it is unambiguous as well. Thank you <@!689635476826619924>. It was designed to be unambiguous. I still think that it needs a written proof of unambiguity, especially if we add optimizations.",
+  "excerpts": [
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!682078300234973185>  Regarding parameterisation of <Tree>\nSuppose we have:\n<Block_Witness> := v : <Version> t1:<Tree> t2:<Tree>,\n<Tree> := 0xbb c1: <Custom> n1:<Tree_Node(0)>\n<Tree> := 0xbb c2: <Custom> n2:<Tree_Node(0)>\n<Tree_Node(0)> := 0x03 h1:<Bytes32> // First Tree\n<Tree_Node(0)> := 0x03 h2:<Bytes32> // Second Tree\nwith the plan to encode two separate trees, then this would give two choices to expand <Tree> for t1 and t2, which makes it not correct. Hence I think parameterisation of <Tree> is necessary. This would also mean that the production for <Tree> should be in the form <Tree(d)> := 0xbb c:<Custom> n:<Tree_Node(d)> ... note the updated parameter of Tree_Node.\n\nMay be I am wrong. Let me know.",
+      "createdAt": "2020-04-08T01:20:33.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!682078300234973185> On the similar lines, I see that <Tree_Node> on the same level of the parse tree has the same parameter number. Should it not be different? In that case we need an encoding scheme for these parameters.",
+      "createdAt": "2020-04-08T01:34:28.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!689635476826619924> I would encode the Block_Witness you describe as `0x01 0xbb 0x00 0x03 h1:<Bytes32> 0xbb 0x00 0x03 h2:<Bytes32>`, which is two trees with root nodes as hash nodes h1 and h2, respectively. I don't understand how you define non-terminals `<Tree>` and `<Tree_Node(0)>` multiple times. t1 and t2 are bound to two invocations of the same `<Tree>` rule, not separate rules. I agree that it may be confusing because `<Tree>^*` notation is another parameterization, so maybe there should be a syntax rule `<Block_Witness(n)>` for each `n>=0` corresponding to how many times we repeat `<Tree>`, and a separate rule to parse `n` and call the specific `<Block_Witness(n)>`.",
+      "createdAt": "2020-04-08T02:07:54.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But then there would be billions of syntax rules.",
+      "createdAt": "2020-04-08T02:09:17.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!682078300234973185> For the binary example: 0x01 bb 00 03 h1 bb 00 03 h2, from your witness spec, we will have the instructions:\nBW := <Version> <Tree> <Tree>\n<Version> := 0x01\n<Tree> := <Custom> <TreeNode(0)>\n<Custom> := 0x00\n<TreeNode(0)> := 0x03 <Bytes32>\n<Bytes32> := <Byte>^32\n<Byte> := h1 | h2\nRight? \n\nI believe for a similar but different example: 0x01 bb 00 03 h2 bb 00 03 h1, we will have the same set of instructions. \n\nIt does not look like a problem for this small example where a trie is just a single node. But when tries contain different nodes, it is possible for a node belonging to a second trie, to be put in the first trie, while reconstructing from the witness instructions. \n\nAm I missing anything?",
+      "createdAt": "2020-04-08T03:05:52.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> But then there would be billions of syntax rules.\n<@!682078300234973185> But can be templated with parameters",
+      "createdAt": "2020-04-08T03:10:28.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "One solution for determining the parameters is to append the branch-label (nibble value in Hexary trie, and bit value in a binary trie) to the parameter. I think we  need to update only the rule for <Branch_Node(d)>:\n\n<Branch_Node(d)> := …. c[i]<Tree_Node(di)> … \n\nWhere di is just plain concatenation of d and i. An example parse tree for binary tries:\nTreeNode(1)\n       |\nBranchNode(1)\n   /                     \\ \nTreeNode(10)   TreeNode(11)\n |\nBranchNode(10)\n  /                        \\\nTreeNode(100)   TreeNode(101)",
+      "createdAt": "2020-04-08T04:48:34.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Looks correct except I'm not sure what `<Byte> := h1 | h2` means. I think that `h1` and `h2` are variables bound to whatever is parsed by different invocations of `<Bytes>^32`.",
+      "createdAt": "2020-04-08T04:51:22.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There is no syntactic restriction on data (leaves, hashes, etc) is put in each tree. The syntax just restricts the structure.",
+      "createdAt": "2020-04-08T04:52:15.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But finally we would need to bind it to one specific value. I read h1 and h2 to be concrete root hashes of tries",
+      "createdAt": "2020-04-08T04:52:44.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think that `<Tree_Node(d)>` needs any more parameters. It is a recursive definition. <Tree_Node(5)> represents all possible tree nodes at nibble-depth 5.",
+      "createdAt": "2020-04-08T04:54:05.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Supporting multiple trees is for breaking a witness into chunks. But that is not specified yet, the syntax will change to accommodate it.",
+      "createdAt": "2020-04-08T04:56:44.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Okay. I didn't realize that. Then why does the rule for BlockWitness contain a list of trees?",
+      "createdAt": "2020-04-08T04:58:00.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Each witness chunk will be a `Tree` in the list. Maybe `Tree` is not a good name for a witness chunk.",
+      "createdAt": "2020-04-08T05:03:02.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't quite get it. You say witness chunks are not supported, but they are in the rule for Block_Witness. For this concrete example, can you describe what your encoding looks like?\nRoot1          Root2\n  /    \\              /       \\\nh1    h2         h3     h4\nIf you think I am wasting this channel's thought space, I am happy for a zoom call. Let me know",
+      "createdAt": "2020-04-08T05:07:22.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The encoding for your concrete example is: `0x01 0xbb 0x00 0x00 bitmask1:0x0003 0x03 h1:<Bytes32> 0x03 h2:<Bytes32> 0xbb 0x00 0x00 bitmask2:0x0003 0x03 h3:<Bytes32> 0x03 h4:<Bytes32>` where I chose the bitmasks to say that the last two children are present.",
+      "createdAt": "2020-04-08T05:16:16.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The set of instructions?",
+      "createdAt": "2020-04-08T05:16:40.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Each witness chunk will be a `<Tree>`. Also, `<Tree>` may correspond to things for syncing and other p2p stuff. Maybe the name `Tree` is not a good one.",
+      "createdAt": "2020-04-08T05:19:10.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I agree. My bad.",
+      "createdAt": "2020-04-08T05:21:33.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not sure what instructions are. I will annotate the encoding the best I can. `version:0x01 tree1:0xbb custom1:0x00 branchnode1:0x00 bitmask1:0x0003 hashnode1:0x03 h1:<Bytes32> hashnode2:0x03 h2:<Bytes32> tree2:0xbb custom2:0x00 branchnode2:0x00 bitmask2:0x0003 hashnode3:0x03 h3:<Bytes32> hashnode4:0x03 h4:<Bytes32>`.",
+      "createdAt": "2020-04-08T05:23:31.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sorry, i understood. We convert the tries to instructions and parse it back to tries. I got confused between parse trees and the tries.",
+      "createdAt": "2020-04-08T05:25:34.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Anyways, how exactly would you extend for accomodating witness chunks?",
+      "createdAt": "2020-04-08T05:26:28.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We have not yet defined what \"witness chunk\" means. Maybe each witness chunk will be a subtree, so we would specify a prefix path with each subtree. This subtree prefix path may go in the <Custom> data section, or we may change the syntax.",
+      "createdAt": "2020-04-08T05:32:15.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But <@!520564582196969472> and <@456226577798135808> have no obligation to use my spec, and they are evaluating options now.",
+      "createdAt": "2020-04-08T05:34:40.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Now, I don't get the rationale for parameters in non-terminals at all. What is the problem in using Tree_Node(d) in place of Tree_Node(d+1)? Can you give me an example?",
+      "createdAt": "2020-04-08T05:35:25.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In our vision it has to be a subtree",
+      "createdAt": "2020-04-08T05:40:05.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because then you get root hash checks for free",
+      "createdAt": "2020-04-08T05:40:18.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you build the trie from the chunks from top to bottom",
+      "createdAt": "2020-04-08T05:40:40.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The first chunk will be matched against the block root hash",
+      "createdAt": "2020-04-08T05:41:04.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The next sub tries will be attached to hash nodes in this trie",
+      "createdAt": "2020-04-08T05:41:20.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So you know their root hashes",
+      "createdAt": "2020-04-08T05:41:26.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Etc",
+      "createdAt": "2020-04-08T05:41:28.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It’s not that it is impossible to validate in some other way, but we already have this mechanism",
+      "createdAt": "2020-04-08T05:42:06.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Parameter `d` represents nibble-depth. `<Branch_Node(5)>` has children `<Tree_Node(6)>`. The reason for parameterizing depth is to limit tree depth in the syntax. For example, we can't have `<Tree_Node(100)>`   because this would exceed the maximum nibble-depth.",
+      "createdAt": "2020-04-08T05:43:02.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!520564582196969472> I agree that your way of chunking is a good way to do it.",
+      "createdAt": "2020-04-08T05:44:08.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!520564582196969472> Subtree chunking sounds good",
+      "createdAt": "2020-04-08T05:44:58.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "One side effect of that is that then the same witness can be used for semi stateless sync that I did. When you need to just update the existing trie paths often multiples times per block",
+      "createdAt": "2020-04-08T05:47:11.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mandrigin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(semi-stateless is when you are keeping the trie between block executions instead of rebuilding from scratch)",
+      "createdAt": "2020-04-08T05:47:50.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "80raghavendra",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!682078300234973185> Proving your grammar is LL(1) is very easy. From the rules, it is clear that the parsing table will have at most 1 rule. Hence it is unambiguous as well.",
+      "createdAt": "2020-04-08T05:51:53.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pauld.9606",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Thank you <@!689635476826619924>. It was designed to be unambiguous. I still think that it needs a written proof of unambiguity, especially if we add optimizations.",
+      "createdAt": "2020-04-08T05:58:35.537000+00:00",
+      "attachments": []
+    }
+  ]
+}

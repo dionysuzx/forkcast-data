@@ -1,0 +1,67 @@
+{
+  "id": 7547,
+  "title": "EIP-7547: Inclusion lists",
+  "status": "Stagnant",
+  "description": "Add an inclusion list mechanism to allow forced transaction inclusion.",
+  "laymanDescription": "Introduces inclusion lists so proposers can require that specific transactions be included promptly, improving censorship resistance.",
+  "author": "mike (@michaelneuder), Vitalik (@vbuterin), Francesco (@fradamt), Terence (@terencechain), potuz (@potuz), Manav (@manav2401)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2023-10-24",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7547-inclusion-lists/17474",
+  "requires": [],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Pectra",
+      "statusHistory": [
+        {
+          "status": "Considered",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": null,
+          "date": null
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Greater assurance that their transactions will not be censored and will be included quickly."
+    },
+    "appDevs": {
+      "description": "Can build applications with stronger guarantees around transaction inclusion, e.g. privacy perserving protocols."
+    },
+    "walletDevs": {
+      "description": "No direct changes in regular user wallets."
+    },
+    "toolingInfra": {
+      "description": "Analytic tools for censored transactions can follow changes introduced by ILs"
+    },
+    "layer2s": {
+      "description": "L2s relying on timely L1 inclusion benefit from improved censorship resistance and liveness."
+    },
+    "stakersNodes": {
+      "description": "Validators will have to comply with commitment to supplied inclusion lists when creating blocks."
+    },
+    "clClients": {
+      "description": "Consensus and validator clients must support inclusion list rules and validation."
+    },
+    "elClients": {
+      "description": "Execution clients may need to validate inclusion list commitments."
+    }
+  },
+  "benefits": [
+    "Improves censorship resistance by enabling forced transaction inclusion",
+    "Strengthens neutrality, makes it easier to use potentially censored protocols"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract Censorship resistance is a core value proposition of blockchains. Inclusion lists aim to provide a mechanism to improve the censorship resistance of Ethereum by allowing proposers to specify a set of transactions that must be promptly included for subsequent blocks to be considered valid. ## Motivation Since the merge, validators have started outsourcing almost all block production to a specialized set of builders who compete to extract the most MEV (this is commonly referred to as Proposer-Builder Separation). As of October 2023, nearly 95% of blocks are built by builders rather than the proposer. While it is great that all proposers have access to competitive blocks through the `mev-boost` ecosystem, a major downside of externally built blocks is the fact that the builders ultimately decide what transactions to include or exclude. Without any forced transaction inclusion mechanism, the proposer is faced with a difficult choice: they either have no say on the transactions that get included, or they build the block locally (thus have the final say on transactions) and sacrifice some MEV rewards. Inclusion lists aim to allow proposers to retain some authority by providing a mechanism by which transactions can be forcibly included. The simplest design is for the `slot N` proposer to specify a list of transactions that must be included in the block that is produced for their slot. However, this is not incentive-compatible because builders may choose to abstain from building blocks if the proposer sets some constraints on their behavior. This leads to the idea of \"forward\" inclusion lists, where the transactions specified by the `slot N` proposer are enforced in the `slot N+1` block. The naïve implementation of the forward inclusion lists presents a different issue of potentially exposing free data availability, which could be exploited to bloat the size of the chain without paying the requisite gas costs. The free data availability problem is solved with observations about nonce reuse and allowing multiple inclusion lists to be specified for each slot. With the incentive compatibility and free data availability problems addressed, we can more safely proceed with the implementation of inclusion lists. ## Specification ### Constants | Name | Value | | - | - | | `MAX_TRANSACTIONS_PER_INCLUSION_LIST` | `2**4 = 16` | | `MAX_GAS_PER_INCLUSION_LIST` | `2**21` | | `MIN_SLOTS_FOR_INCLUSION_LIST_REQUEST` | `1` | #### Reference Objects ``` class InclusionListSummaryEntry(Container): address: ExecutionAddress gas_limit: uint64 ``` ``` class InclusionListSummary(Container) slot: Slot proposer_index: ValidatorIndex summary: List[InclusionListSummaryEntry, MAX_TRANSACTIONS_PER_INCLUSION_LIST] ``` ``` class SignedInclusionListSummary(Container): message: InclusionListSummary signature: BLSSignature ``` ``` class InclusionList(Container) summary: SignedInclusionListSummary transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST] ``` ``` class ExecutionPayload(Container): ... inclusion_list_summary: List[InclusionListSummaryEntry, MAX_TRANSACTIONS_PER_INCLUSION_LIST] inclusion_list_exclusions: List[uint64, MAX_TRANSACTIONS_PER_INCLUSION_LIST] ``` ``` class ExecutionPayloadHeader(Container): ... inclusion_list_summary_root: Root inclusion_list_exclusions_root: Root ``` ``` class BeaconBlockBody(Container): ... inclusion_list_summary: SignedInclusionListSummary ``` ### Consensus layer #### High-level overview **`slot N` proposal:** - Proposer broadcasts a signed block and an inclusion list (summary and transactions objects) for `slot N+1`. - Transactions will be included in `slot N` or `slot N+1`. - Summaries include the originating address of the transactions and their respective gas limits. - Summaries are signed, but transactions are not. **`slot N` validation:** - Validators only consider the block for validation and fork-choice if they have seen at least one inclusion list for that slot. - They consider the block invalid if the inclusion list transactions are not executable at the start of `slot N` or if the transactions' `maxFeePerGas` are not at least 12.5% higher than the current slot (to ensure the transactions will be valid in `slot N+1`). **`slot N+1` validation:** - The proposer for `slot N+1` builds their block along with a signed summary from the `slot N` proposer. - The payload includes a list of transaction indices from the `slot N` payload that satisfy some entry in the signed inclusion list summary. - The payload is considered valid if: (a) the execution conditions are met, including satisfying the inclusion list summary and being executable from the execution layer perspective, and (b) the consensus conditions are met with a proposer signature of the previous block. #### Specific Changes **Beacon chain state transition spec:** - ***New** `inclusion_list` object:* Introduce a new `inclusion_list` for the proposer to submit and nodes to process. - ***Modified** `ExecutionPayload` and `ExecutionPayloadHeader` objects:* Update these objects to meet the inclusion list requirements. - ***Modified** `BeaconBlockBody`:* Modified to cache the inclusion list summary. - ***Modified** `process_execution_payload` function:* Update this process to include checks for the inclusion list summary satisfaction. **Beacon chain fork-choice spec:** - ***New** `is_inclusion_list_available` check:* Introduce a new check to determine if the inclusion list is available within the visibility window. - ***New** notification action:* Implement a new call to notify the Execution Layer (EL) client about a new inclusion list. The corresponding block is considered invalid if the EL client deems the inclusion list invalid. **Beacon chain P2P spec:** - ***New** gossipnet and validation rules for inclusion list:* Define new rules for handling the inclusion list in the gossip network and validation. - ***New** RPC request and response network for inclusion list:* Establish a new network for sending and r"
+}

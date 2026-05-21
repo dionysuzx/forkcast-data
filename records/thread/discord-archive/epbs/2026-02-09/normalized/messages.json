@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-02-09",
+  "messageCount": 32,
+  "sourceHash": "1c0a07abf3afca23ed3c64ba3e31346146f2cc9e9c124d07fd1538b9e362ae63",
+  "searchText": "<@520034910149410861> what is Anders' concern on the variable PTC PR? also, can you take a look at the current status of the DA bit? If that is fine I will open a separate one for the validator guide that may be contentious about the proposer honest behavior being that it needs to reorg such payloads. Yes this would be fine, except for this \"Implemnetations MAY return `True` if the node have recovered all the blob data\", which still shouldn't be the case for attesters (I commented on the PR as to why) The proposer behavior is imo to be specified separately, and for example could look like: - do not extend the payload if < 25% votes for either data availability or payload timeliness, or if not locally available and valid - extend otherwise This way, you only extend blocks that were timely and which are actually available, even if you yourself cannot fully verify the availability. And you could leave implementations the choice to have the full custody proposer behavior be instead: - do not extend the payload if < 25% votes for payload timeliness, or if not locally available and valid - extend otherwise In other words, a full custody proposer would not care if the data is late, as long as it gets all of it locally. It would only listen to the PTC for the payload timeliness part (to ensure that it doesn't come very late and leaves no time to build a block). Basically, the proposer behavior would follow the note above, \"return `True` if the node have recovered all the blob data\", but attesters wouldn't <@917367578966523934> maybe you can comment on the other thing I agree about the DA timeliness needing to be there but specifying it in an executable way is incredibly tricky. I do not know how to do that. If you have a suggestion or if just changing the wording in this function I am fine with it, but I don't think we can (or should if we could) make it executable. As for the proposer: I think if the proposer is not a super node it should not extend the payload if less than 50% of the PTC (or probably higher) voted for not available. But let's get to that one later in a separate PR, I want to merge this one. So if I change the wording on this PR, in that docstring to mention that clients should return true from that call if they had received all the data before the PTC deadline and then leave the proposer's behavior to the `validator.md` file in a different PR, would that be OK? I don't know how to do this otherwise So I think simply changing that docstring to ``` Implemnetations MAY return `True` if the node has recovered all the blob data *before* the deadline returned from `get_payload_attestation_due_ms`. ``` Should be fine, for both proposer and attester, while still leaving the option to the proposer to reorg if he wanted *and* leaving the wording to force the proposer to reorg to the `validator.md` file would that be OK? Github is down, but added [this commit](https://github.com/ethereum/consensus-specs/pull/4884/commits/ab570b0b9e19b0efb64d71b9b1d6e83a507a0041) This still doesn't work. A non-full-custody proposer must be able to use the PTC to decide whether the data is available, for example by not extending any payload that has < 25% data available. If full custody attesters are not paying attention to the PTC, and instead will return `True` just based on their local view at the deadline, you can have this situation: - proposer sees < 25% of PTC saying that data is available, does not extend - many honest attesters (for example 24% of them, but could be more since PTC =/= attesters) have seen the data on time, they do not attest to the proposal because to them it's not extending a payload that should be extended Sure, they're a minority, but we want rules that ensure (given the assumptions) that honest attesters attest to honest proposals. This is why I keep saying that the rule should be that the proposer uses 25% as a threshold and the attesters 50%. Any such proposer would be vulnerable to ex-ante reorgs, the threshold the proposer uses to decide what to extend has to be significantly lower than what attesters use to decide what is *required* to be extended I really don't think there are better options than using 25/50, which do not involve weird things like multiple deadlines. Still, a full custody proposer does not need to care about this 25% threshold, it can be fine with local availability of the data (though it would still want to require 25% for the payload, to be able to reorg late payloads) I think we're talking past each other or missunderstanding what the other says. This PR explicitly says that the non-full-custody proposer will have to use PTC to decide this, for that proposer this function will return `false` if the PTC has voted that it wasn't available. By *all the blob data* I really mean **all** at any rate, having different thresholds for proposers and attesters can only be specified by having different tiebreakers for get_proposer_head or similar but I wouldn't touch this function for this, as currently specified they would both use 50% to decide head The problem is that the PR says full custody *attesters* will return `True` without caring about the PTC says. What I am saying above is that this doesn't work I don't know how it should be specified, but attesters and proposers can also not have the same threshold, the current mechanism is meant for attesters, not proposers ah ok at least I now understand what you are saying and I am actually saying something different here. Hmm, not sure what to tell you, it does sound to me that the right behavior is to go with your local view instead of PTC if you did receive all the data on time It's not safe for the proposer if attesters do that the current mechanism would work for both, unless we make the honest reorg mandatory and we also change `get_proposer_head` accordingly, which we should do anyway. in that case we can put an explicit threshold in this function and then another one in `get_proposer_head`'s tiebreaker At any rate, my reading from you here, is that you'd be fine merging the PR without this clause letting nodes to override PTC by putting their own view if they have the full data. We can remove that text and then open an issue about it to deal with it later Removed the wording and opened [this issue](https://github.com/ethereum/consensus-specs/issues/4907) to discuss this I suppose you refer to \"execution-merge\" <@520034910149410861>. Execution merge was an idea that came up in Berlin as we were discussing the issues that the variable PTC deadline is intended to address, before we knew about that idea. Attesters freeze their view of whether they could execute the block around the slot boundary. They still try to execute the block until the attestation deadline as normal. An attester that finishes executing the block before the freeze deadline enforces that the proposer must extend the current block, an attester that finished execution in the window between the freeze deadline and attestation deadline allows the proposer to decide, and an attester that does not have the time to execute the block always vote against extending on top of it. An argument in favor of execution-merge is that future changes to the protocol may make a variable deadline difficult to get right. For example, under payload chunking, it may be rather tricky to design an enforceable variable deadline while upholding scaling instead of just checking by the end of the slot whether the chunks arrived in such a way that the full payload could be executed. However, the initial idea is not viable. A powerful validator may always have time to execute the payload, while the majority can't. It would still like to vote against a block extending on that payload. What matters is the amount of gas used for execution, not how long it took to execute for the individual node. Execution-merge would thus be better if attesters rely on payload arrival time(s) and execution gas distrbution in the chunks, according to some standard (potentially compensating for its connectivity). Another downside is that the proposer has less information to go on without the vote, and may make honest mistakes. Therefore, in conclusion, execution-merge seems unviable, but we might consider making the PTC vote a bit more nuanced by accounting for execution gas in the block. Or do we do that already? we want to make PTC voting more nuanced by accounting for size in the payload, I think we can trivially also make it a function of the gas used and the gas limit in the block these changes are trivial at least for Prysm and it allows us to set the right linear interpolation using both execution gas and data size of the block, but as long as the gas limit is such that we are still safe on Gloas, I do not see any problem with the original approach of only setting the deadline linearly on size Conceptually, we could base the deadline only on execution gas. So a payload with a small and a large data size would have the same deadline if they consume an equal amount of execution gas. In a payload chunking scenario, it will seemingly become more important to do \"execution gas accounting\" on the chunks, while including data on their timing as well. So we could pivot to this form of measurement already now. Another thing: under distributed payload propagation, the pre-propagated transactions would likely count as having close-to-zero calldata as far as the PTC deadline is concerned. But the deadline is about the broadcast time, not the execution time. Isn't it implicitly about execution time right now? And by making it explicit we increase the accuracy of our measurement? I don't think I follow, the plan is to make it explicitly about broadcast time, the smallest the payload the smallest the deadline, this requires only payload size and not gas usage. We could use gas_used if we also want to leverage execution time. My point would be that at the end of the day, we use the PTC vote to ensure that the payload was propagated in such a way that it can be executed before the slot boundary. In this case, we do not actually need to concern ourselves with the size of the payload, only with arrival time and the execution gas it is set to consume (and if the builder specified incorrectly, it is of course invalid). The PTC would however still require the payload to have arrived by the time it votes. That becomes the latest arrival point regardless. I think size is more important and bound that the broadcast time was sufficient and not much more, otherwise the effects of allowing the builder to withhold for longer, even though the time alloted for execution was more than fine, are worse (free option problems, centralization problems for preconfirmations, etc) Yeah it is more \"fair\" to go by size. Not sure what is best. We can have it as an option to account for execution gas in the future if we go for chunking or if it turns out that some builders buy filler calldata to delay the deadline anyway (which would motivate measuring by execution gas)",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@520034910149410861> what is Anders' concern on the variable PTC PR? also, can you take a look at the current status of the DA bit? If that is fine I will open a separate one for the validator guide that may be contentious about the proposer honest behavior being that it needs to reorg such payloads.",
+      "createdAt": "2026-02-09T14:37:18.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes this would be fine, except for this \"Implemnetations MAY return `True` if the node have recovered all the blob data\", which still shouldn't be the case for attesters (I commented on the PR as to why)\n\nThe proposer behavior is imo to be specified separately, and for example could look like:\n- do not extend the payload if < 25% votes for either data availability or payload timeliness, or if not locally available and valid\n- extend otherwise\n\nThis way, you only extend blocks that were timely and which are actually available, even if you yourself cannot fully verify the availability. And you could leave implementations the choice to have the full custody proposer behavior be instead:\n- do not extend the payload if < 25% votes for payload timeliness, or if not locally available and valid\n- extend otherwise\n\nIn other words, a full custody proposer would not care if the data is late, as long as it gets all of it locally. It would only listen to the PTC for the payload timeliness part (to ensure that it doesn't come very late and leaves no time to build a block). Basically, the proposer behavior would follow the note above, \"return `True` if the node have recovered all the blob data\", but attesters wouldn't",
+      "createdAt": "2026-02-09T15:37:49.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@917367578966523934> maybe you can comment on the other thing",
+      "createdAt": "2026-02-09T15:40:48.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree about the DA timeliness needing to be there but specifying it in an executable way is incredibly tricky. I do not know how to do that. If you have a suggestion or if just changing the wording in this function I am fine with it, but I don't think we can (or should if we could) make it executable. \n\nAs for the proposer: I think if the proposer is not a super node it should not extend the payload if less than 50% of the PTC (or probably higher) voted for not available. But let's get to that one later in a separate PR, I want to merge this one. So if I change the wording on this PR, in that docstring to mention that clients should return true from that call if they had received all the data before the PTC deadline and then leave the proposer's behavior to the `validator.md` file in a different PR, would that be OK? I don't know how to do this otherwise",
+      "createdAt": "2026-02-09T15:45:39.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So I think simply changing that docstring to \n```\n    Implemnetations MAY return `True` if the node has recovered all the blob data\n    *before* the deadline returned from `get_payload_attestation_due_ms`.\n ```\nShould be fine, for both proposer and attester, while still leaving the option to the proposer to reorg if he wanted *and* leaving the wording to force the proposer to reorg to the  `validator.md` file",
+      "createdAt": "2026-02-09T15:52:29.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would that be OK?",
+      "createdAt": "2026-02-09T15:52:34.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Github is down, but added [this commit](https://github.com/ethereum/consensus-specs/pull/4884/commits/ab570b0b9e19b0efb64d71b9b1d6e83a507a0041)",
+      "createdAt": "2026-02-09T16:24:35.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This still doesn't work. A non-full-custody proposer must be able to use the PTC to decide whether the data is available, for example by not extending any payload that has < 25% data available. If full custody attesters are not paying attention to the PTC, and instead will return `True` just based on their local view at the deadline, you can have this situation:\n- proposer sees < 25% of PTC saying that data is available, does not extend\n- many honest attesters (for example 24% of them, but could be more since PTC =/= attesters) have seen the data on time, they do not attest to the proposal because to them it's not extending a payload that should be extended\n\nSure, they're a minority, but we want rules that ensure (given the assumptions) that honest attesters attest to honest proposals. This is why I keep saying that the rule should be that the proposer uses 25% as a threshold and the attesters 50%.",
+      "createdAt": "2026-02-09T16:38:57.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Any such proposer would be vulnerable to ex-ante reorgs, the threshold the proposer uses to decide what to extend has to be significantly lower than what attesters use to decide what is *required* to be extended",
+      "createdAt": "2026-02-09T16:40:55.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I really don't think there are better options than using 25/50, which do not involve weird things like multiple deadlines. Still, a full custody proposer does not need to care about this 25% threshold, it can be fine with local availability of the data (though it would still want to require 25% for the payload, to be able to reorg late payloads)",
+      "createdAt": "2026-02-09T16:45:22.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we're talking past each other or  missunderstanding what the other says. This PR explicitly says that the non-full-custody proposer will have to use PTC to decide this, for that proposer this function will return `false` if the PTC has voted that it wasn't available. By *all the blob data* I really mean **all**",
+      "createdAt": "2026-02-09T16:52:40.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "at any rate, having different thresholds for proposers and attesters can only be specified by having different tiebreakers for get_proposer_head or similar but I wouldn't touch this function for this, as currently specified they would both use 50% to decide head",
+      "createdAt": "2026-02-09T16:56:25.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem is that the PR says full custody *attesters* will return `True` without caring about the PTC says. What I am saying above is that this doesn't work",
+      "createdAt": "2026-02-09T17:00:27.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't know how it should be specified, but attesters and proposers can also not have the same threshold, the current mechanism is meant for attesters, not proposers",
+      "createdAt": "2026-02-09T17:01:45.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah ok at least I now understand what you are saying and I am actually saying something different here. Hmm, not sure what to tell you, it does sound to me that the right behavior is to go with your local view instead of PTC if you did receive all the data on time",
+      "createdAt": "2026-02-09T17:07:21.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's not safe for the proposer if attesters do that",
+      "createdAt": "2026-02-09T17:07:46.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the current mechanism would work for both, unless we make the honest reorg mandatory and we also change `get_proposer_head` accordingly, which we should do anyway.",
+      "createdAt": "2026-02-09T17:08:07.983000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in that case we can put an explicit threshold in this function and then another one in `get_proposer_head`'s tiebreaker",
+      "createdAt": "2026-02-09T17:09:10.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "At any rate, my reading from you here, is that you'd be fine merging the PR without this clause letting nodes to override PTC by putting their own view if they have the full data. We can remove that text and then open an issue about it to deal with it later",
+      "createdAt": "2026-02-09T17:11:33.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Removed the wording and opened [this issue](https://github.com/ethereum/consensus-specs/issues/4907) to discuss this",
+      "createdAt": "2026-02-09T17:43:06.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I suppose you refer to \"execution-merge\" <@520034910149410861>. Execution merge was an idea that came up in Berlin as we were discussing the issues that the variable PTC deadline is intended to address, before we knew about that idea. Attesters freeze their view of whether they could execute the block around the slot boundary. They still try to execute the block until the attestation deadline as normal. An attester that finishes executing the block before the freeze deadline enforces that the proposer must extend the current block, an attester that finished execution in the window between the freeze deadline and attestation deadline allows the proposer to decide, and an attester that does not have the time to execute the block always vote against extending on top of it.\n\nAn argument in favor of execution-merge is that future changes to the protocol may make a variable deadline difficult to get right. For example, under payload chunking, it may be rather tricky to design an enforceable variable deadline while upholding scaling instead of just checking by the end of the slot whether the chunks arrived in such a way that the full payload could be executed. \n\nHowever, the initial idea is not viable. A powerful validator may always have time to execute the payload, while the majority can't. It would still like to vote against a block extending on that payload. What matters is the amount of gas used for execution, not how long it took to execute for the individual node. Execution-merge would thus be better if attesters rely on payload arrival time(s) and execution gas distrbution in the chunks, according to some standard (potentially compensating for its connectivity). \n\nAnother downside is that the proposer has less information to go on without the vote, and may make honest mistakes. Therefore, in conclusion, execution-merge seems unviable, but we might consider making the PTC vote a bit more nuanced by accounting for execution gas in the block. Or do we do that already?",
+      "createdAt": "2026-02-09T19:10:23.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we want to make PTC voting more nuanced by accounting for size in the payload, I think we can trivially also make it a function of the gas used and the gas limit in the block",
+      "createdAt": "2026-02-09T20:34:52.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "these changes are trivial at least for Prysm",
+      "createdAt": "2026-02-09T20:35:12.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and it allows us to set the right linear interpolation using both execution gas and data size of the block, but as long as the gas limit is such that we are still safe on Gloas, I do not see any problem with the original approach of only setting the deadline linearly on size",
+      "createdAt": "2026-02-09T20:36:07.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Conceptually, we could base the deadline only on execution gas. So a payload with a small and a large data size would have the same deadline if they consume an equal amount of execution gas. \n\nIn a payload chunking scenario, it will seemingly become more important to do \"execution gas accounting\" on the chunks, while including data on their timing as well. So we could pivot to this form of measurement already now. Another thing: under distributed payload propagation, the pre-propagated transactions would likely count as having close-to-zero calldata as far as the PTC deadline is concerned.",
+      "createdAt": "2026-02-09T20:56:46.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But the deadline is about the broadcast time, not the execution time.",
+      "createdAt": "2026-02-09T20:58:04.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Isn't it implicitly about execution time right now? And by making it explicit we increase the accuracy of our measurement?",
+      "createdAt": "2026-02-09T20:59:48.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think I follow, the plan is to make it explicitly about broadcast time, the smallest the payload the smallest the deadline, this requires only payload size and not gas usage. We could use gas_used if we also want to leverage execution time.",
+      "createdAt": "2026-02-09T21:03:58.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My point would be that at the end of the day, we use the PTC vote to ensure that the payload was propagated in such a way that it can be executed before the slot boundary. In this case, we do not actually need to concern ourselves with the size of the payload, only with arrival time and the execution gas it is set to consume (and if the builder specified incorrectly, it is of course invalid).",
+      "createdAt": "2026-02-09T21:07:17.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The PTC would however still require the payload to have arrived by the time it votes. That becomes the latest arrival point regardless.",
+      "createdAt": "2026-02-09T21:22:06.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think size is more important and bound that the broadcast time was sufficient and not much more, otherwise the effects of allowing the builder to withhold for longer, even though the time alloted for execution was more than fine, are worse (free option problems, centralization problems for preconfirmations, etc)",
+      "createdAt": "2026-02-09T21:22:13.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "anderselowsson",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah it is more \"fair\" to go by size. Not sure what is best. We can have it as an option to account for execution gas in the future if we go for chunking or if it turns out that some builders buy filler calldata to delay the deadline anyway (which would motivate measuring by execution gas)",
+      "createdAt": "2026-02-09T21:27:00.107000+00:00",
+      "attachments": []
+    }
+  ]
+}

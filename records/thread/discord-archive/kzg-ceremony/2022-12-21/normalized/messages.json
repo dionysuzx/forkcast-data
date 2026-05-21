@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "channel": "kzg-ceremony",
+  "date": "2022-12-21",
+  "messageCount": 37,
+  "sourceHash": "3c104c0a932fd6e819c789af788a07487bcb63a81e1b1f8d187ce0ccc972bd14",
+  "searchText": "I believe the existing testnet already allows repeated contributions 🙂 Oh I thought this was changed back, my apologies. So only removing the login check… though it’s probably good to see if the sequencer can be indirectly stopped by ddosing the oauth endpoints On the devops side I think it'd make sense to have cloudflare (or one of their competitors) in front of the sequencer I'd be more worried about generic ddos attacks than ones targeted at the sequencer's software This has been planned, I’m not sure how far along this is with the EF server Hey I wouldn't mind to help on the Zeroize stuff. But looks really stale in `rand` the inclusion of `rand-chacha`. It might be easier to implement drop-in-place directly for the structs that require it. Or make a wrapper and impl zeroize for it directly. WDYT? Hey 👋, I’d say whichever one leads to better readability, a wrapper is usually needed if a struct is used multiple times and you need to zeroize in multiple locations; having it automatically called when the struct is dropped will ensure you don’t forget. Note Zeroize is not guaranteed to work since the compiler doesn’t need to listen to whatever you say (as long as the program is correct), and could copy your secret in memory before you clean it up, so it’s more of a best effort Makes complete sense Kev! Will try to take a look to it and contribute if I get some free time from the zkevm circuits!! In regards the wrapper, this could make it: https://docs.rs/zeroize/latest/zeroize/#zeroizingz-wrapper-for-zeroizing-arbitrary-values-on-drop Edit: > Note Zeroize is not guaranteed to work since the compiler doesn’t need to listen to whatever you say (as long as the program is correct), and could copy your secret in memory before you clean it up, so it’s more of a best effort I think the point of the explicit call to `core::ptr::write_volatile and core::sync::atomic` was that indeed the compiler is forced to zeroize the data without being able to optimize the op. Maybe I miss something! Yep that makes sense 🙂 I meant for example, since a move in rust is essentially a memcpy, the compiler could zeroize the data after it had been copied and you’d then have secrets not zeroized on the stack/heap Thanks for the link, I didn’t know that they can now ensure subsequent memory reads are also zeroed out, very cool! > I meant for example, since a move in rust is essentially a memcpy, the compiler could zeroize the data after it had been copied and you’d then have secrets not zeroized on the stack/heap Ahhhh! I see! Will try to dissasemble then JIC. And confirm that it get's zeroed out on time! Thanks a lot Kev!!! I think it will always be a best effort as the chacha algorithm may do copies internally or even passing the secret as a function argument may impose a copy😅 Let me know when you make a PR as anything here is better than nothing! Gracias 🙏 <CarlBeek> > <CarlBeek> yeah so we have generic dos protection infront of the server. (re @kzg_ceremony_bot: <PlasmaPower> On the devops side I think it'd make sense to have cloudflare (or one of their competitors) in front of the sequencer) <CarlBeek> > <CarlBeek> this sounds like fun and important experiments to run. how easy would it be to modify your CLI to perform these attacks? (re @kevaundray: Now that we are getting closer to the start of the ceremony, we should probably do a few stress tests to ensure that in the worse case, the sequencer does not cough. I could do it locally, but its best to do it in an environment as close to the live environment as possible. (We cannot get parity because we will need to disable the OAuth checks) We should be able to use the same machine for the sequencer which would consequently allow us to double check the logging infrastructure, and things like how do we diagnose if something goes terribly wrong. If there are no objections, there are a few action steps: - Modify the sequencer to remove the spam checks and allow a user to repeatedly contribute - Launch sequencer with modified rust code - Spam the sequencer (using a CLI) in an attempt to take it down with different combinations of attacks (continuously request the transcript while continuously getting the contribution spot and not contributing for example) Marcin any thoughts on this or are there vectors that you are interested in exploring?) <Marcin> Hey @kevaundray @CarlBeek , Regarding load-testing, I won't have time to do that directly. However, please take a look at our integration tests. I have written a mock authentication server, so you can test with it: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/common/mock_auth_service.rs – with very little work (just write the main function) you can run it in a separate process. Moreover, I have a rather rich library of \"bots\" to interact with a running instance, here https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/common/participants.rs. In general, I believe you should be able to turn the integration testing framework I have created into a load testing framework with minimal effort code-wise. The tricky bit will be getting a predictable run env for these. <Marcin> Here's an example of such a test: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/integration_test.rs#L639 – spawns the app, runs 10 bots against it, restarts the app, runs another 10 bots, verifies that the state is consistent. It's only shortcoming is that all servers (app, mock auth) and the bots are in the same process. If you split it into separate processes (should be easy, I was careful to _only_ use the public app options in tests, so there's no wonky overrides, it's all stuff you can do to a separate instance) and bump the numbers to reflect real ceremony sizes and 100x the number of participants, you have a load test ready. <Marcin> > <Marcin> Regarding Zeroize, I think it is clear that it is not a 100% solution, just minimizing attack surface. Also, I have spoken privately with Kaz, who is the original author of `rand_chacha` and he suggests an implementation would probably be accepted into `rand`, but it should not introduce new dependencies (i.e. probably not a `Zeroize` impl upstream, but a method that does the same thing). They are really cautious about dependency count. (re @kzg_ceremony_bot: <CPerezz.eth> [reply]: Hey I wouldn't mind to help on the Zeroize stuff. But looks really stale in `rand` the inclusion of `rand-chacha`. It might be easier to implement drop-in-place directly for the structs that require it. Or make a wrapper and impl zeroize for it directly. WDYT?) <kevaundray> @CarlBeek there doesn’t seem to be a definition of “full implementation” for people looking to implement their own client as a grant <kevaundray> I was just asked about it and it’s at least not clear, if the double signing stuff is considered needed for the full implementation since it’s optional for GitHub <CarlBeek> That's a good point. I'd really like to have SIWE and double signing be the default option here, but if that is a blocker for people implementing then happy to ignore it. <kevaundray> > <kevaundray> Thanks for this, if you only use public methods then it should be easy to simulate attacks. I was additionally thinking to run it in a closer to production environment where the sequencer is up and you are spawning bots on a separate network, ie the environment is not necessarily predictable. Just causing havoc essentially (re @Marcin: Here's an example of such a test: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/integration_test.rs#L639 – spawns the app, runs 10 bots against it, restarts the app, runs another 10 bots, verifies that the state is consistent. It's only shortcoming is that all servers (app, mock auth) and the bots are in the same process. If you split it into separate processes (should be easy, I was careful to _only_ use the public app options in tests, so there's no wonky overrides, it's all stuff you can do to a separate instance) and bump the numbers to reflect real ceremony sizes and 100x the number of participants, you have a load test ready.) <kevaundray> > <kevaundray> Alright will pass it along to them (re @CarlBeek: That's a good point. I'd really like to have SIWE and double signing be the default option here, but if that is a blocker for people implementing then happy to ignore it.) For client I'm writing, I'm implementing crypto from ground-up. Found out that irreducible polynomials for finite fields are not unique and there is no canonical way of choosing one. May anyone point me into direction of spec / implementation where I can find out what was chosen? (if what I say makes no sense - I'm just learning, sorry) <CarlBeek> Awesome that you are writing a crypto implementation from scratch! You should be able to find all of the parameters you need here: https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-pairing-friendly-curves-11#section-4.2.1 > GF(p^2) = GF(p)[u] / (u^2 + 1) This is what I've been looking for. THX! if you're interested, there is an open grants round for projects like this, would be great to have you apply! Will definitely apply if I succeed in producing working product <CarlBeek> great! don’t hesitate to reach out if you have further questions on specs etc. <Marcin> > <Marcin> Right so what I'm saying is this setup actually spawns the server and talks to it over http. So some DevOps magic and you'll have a dream setup (re @kevaundray: Thanks for this, if you only use public methods then it should be easy to simulate attacks. I was additionally thinking to run it in a closer to production environment where the sequencer is up and you are spawning bots on a separate network, ie the environment is not necessarily predictable. Just causing havoc essentially) <Marcin> By \"public api\" I mean I spawn the server using only CLI options what are the hardware requirements for participating in the ceremony? In particular, is it realistic to use a raspberry pi, and what's the size of the data exchanged between sequencer and participant? very minimal, light enough to be browser based for those that want to use a hosted interface. ~7MB of data cool, just the 7MB could be problematic for us. The spec says \"Due to the simplicity of this PoT setup, the full contribution is sent as a json file between the sequencer & participants\". Does this mean we could in theory reduce this significantly? <CarlBeek> unfortunately there is not too much that can be done to reduce the 7mB file. the file is json so you could zip it and save 2x is you set up a proxy infront of your pi. but for what device is 7mB too big? I see, thank you. Don't want to reveal too much yet, still working on our grant application 🙃 <CarlBeek> sounds fun! dms are open if you need extra info/guidance 💰 KZG Grants Round **LIVE NOW** https://blog.ethereum.org/2022/12/15/kzg-ceremony-grants-round 🖼️ Hosted Test Interface https://ceremony.ethereum.org/ 📚 Resources https://github.com/ethereum/kzg-ceremony ⌛ Timeline https://notes.ethereum.org/@CarlBeek/kzg_ceremony_timelines ❔ FAQ https://github.com/ethereum/kzg-ceremony/blob/main/FAQ.md",
+  "excerpts": [
+    {
+      "author": "plasmapower",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe the existing testnet already allows repeated contributions 🙂",
+      "createdAt": "2022-12-21T01:04:04.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh I thought this was changed back, my apologies. So only removing the login check… though it’s probably good to see if the sequencer can be indirectly stopped by ddosing the oauth endpoints",
+      "createdAt": "2022-12-21T01:08:25.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "plasmapower",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "On the devops side I think it'd make sense to have cloudflare (or one of their competitors) in front of the sequencer",
+      "createdAt": "2022-12-21T01:09:05.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "plasmapower",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'd be more worried about generic ddos attacks than ones targeted at the sequencer's software",
+      "createdAt": "2022-12-21T01:09:37.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This has been planned, I’m not sure how far along this is with the EF server",
+      "createdAt": "2022-12-21T01:12:42.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cperezz.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey I wouldn't mind to help on the Zeroize stuff. But looks really stale in `rand` the inclusion of `rand-chacha`.\n\nIt might be easier to implement drop-in-place directly for the structs that require it. Or make a wrapper and impl zeroize for it directly.\nWDYT?",
+      "createdAt": "2022-12-21T09:21:47.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey 👋, I’d say whichever one leads to better readability, a wrapper is usually needed if a struct is used multiple times and you need to zeroize in multiple locations; having it automatically called when the struct is dropped will ensure you don’t forget.\n\nNote Zeroize is not guaranteed to work since the compiler doesn’t need to listen to whatever you say (as long as the program is correct), and could copy your secret in memory before you clean it up, so it’s more of a best effort",
+      "createdAt": "2022-12-21T09:37:48.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cperezz.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Makes complete sense Kev! Will try to take a look to it and contribute if I get some free time from the zkevm circuits!!\n\nIn regards the wrapper, this could make it: https://docs.rs/zeroize/latest/zeroize/#zeroizingz-wrapper-for-zeroizing-arbitrary-values-on-drop\n\nEdit: \n> Note Zeroize is not guaranteed to work since the compiler doesn’t need to listen to whatever you say (as long as the program is correct), and could copy your secret in memory before you clean it up, so it’s more of a best effort\nI think the point of the explicit call to `core::ptr::write_volatile and core::sync::atomic` was that indeed the compiler is forced to zeroize the data without being able to optimize the op.\nMaybe I miss something!",
+      "createdAt": "2022-12-21T10:23:32.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep that makes sense 🙂\n\nI meant for example, since a move in rust is essentially a memcpy, the compiler could zeroize the data after it had been copied and you’d then have secrets not zeroized on the stack/heap\n\nThanks for the link, I didn’t know that they can now ensure subsequent memory reads are also zeroed out, very cool!",
+      "createdAt": "2022-12-21T10:36:17.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cperezz.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> I meant for example, since a move in rust is essentially a memcpy, the compiler could zeroize the data after it had been copied and you’d then have secrets not zeroized on the stack/heap\nAhhhh! I see! Will try to dissasemble then JIC. And confirm that it get's zeroed out on time!\n\nThanks a lot Kev!!!",
+      "createdAt": "2022-12-21T10:37:58.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think it will always be a best effort as the chacha algorithm may do copies internally or even passing the secret as a function argument may impose a copy😅\n\nLet me know when you make a PR as anything here is better than nothing! Gracias 🙏",
+      "createdAt": "2022-12-21T10:42:27.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> > <CarlBeek>  yeah so we have generic dos protection infront of the server. (re @kzg_ceremony_bot: <PlasmaPower> On the devops side I think it'd make sense to have cloudflare (or one of their competitors) in front of the sequencer)",
+      "createdAt": "2022-12-21T12:01:03.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> > <CarlBeek>  this sounds like fun and important experiments to run. how easy would it be to modify your CLI to perform these attacks? (re @kevaundray: Now that we are getting closer to the start of the ceremony, we should probably do a few stress tests to ensure that in the worse case, the sequencer does not cough.\n\nI could do it locally, but its best to do it in an environment as close to the live environment as possible. (We cannot get parity because we will need to disable the OAuth checks)\n\nWe should be able to use the same machine for the sequencer which would consequently allow us to double check the logging infrastructure, and things like how do we diagnose if something goes terribly wrong.\n\nIf there are no objections, there are a few action steps:\n\n- Modify the sequencer to remove the spam checks and allow a user to repeatedly contribute\n- Launch sequencer with modified rust code\n- Spam the sequencer (using a CLI) in an attempt to take it down with different combinations of attacks (continuously request the transcript while continuously getting the contribution spot and not contributing for example)\n\nMarcin any thoughts on this or are there vectors that you are interested in exploring?)",
+      "createdAt": "2022-12-21T12:05:17.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<Marcin> Hey @kevaundray @CarlBeek  ,\nRegarding load-testing, I won't have time to do that directly. However, please take a look at our integration tests. I have written a mock authentication server, so you can test with it: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/common/mock_auth_service.rs – with very little work (just write the main function) you can run it in a separate process. Moreover, I have a rather rich library of \"bots\" to interact with a running instance, here https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/common/participants.rs. In general, I believe you should be able to turn the integration testing framework I have created into a load testing framework with minimal effort code-wise. The tricky bit will be getting a predictable run env for these.",
+      "createdAt": "2022-12-21T13:15:45.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<Marcin> Here's an example of such a test: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/integration_test.rs#L639 – spawns the app, runs 10 bots against it, restarts the app, runs another 10 bots, verifies that the state is consistent. It's only shortcoming is that all servers (app, mock auth) and the bots are in the same process. If you split it into separate processes (should be easy, I was careful to _only_ use the public app options in tests, so there's no wonky overrides, it's all stuff you can do to a separate instance) and bump the numbers to reflect real ceremony sizes and 100x the number of participants, you have a load test ready.",
+      "createdAt": "2022-12-21T13:20:46.582000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<Marcin> > <Marcin>  Regarding Zeroize, I think it is clear that it is not a 100% solution, just minimizing attack surface. Also, I have spoken privately with Kaz, who is the original author of `rand_chacha` and he suggests an implementation would probably be accepted into `rand`, but it should not introduce new dependencies (i.e. probably not a `Zeroize` impl upstream, but a method that does the same thing). They are really cautious about dependency count. (re @kzg_ceremony_bot: <CPerezz.eth> [reply]: Hey I wouldn't mind to help on the Zeroize stuff. But looks really stale in `rand` the inclusion of `rand-chacha`.\n\nIt might be easier to implement drop-in-place directly for the structs that require it. Or make a wrapper and impl zeroize for it directly.\nWDYT?)",
+      "createdAt": "2022-12-21T13:24:15.776000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<kevaundray> @CarlBeek there doesn’t seem to be a definition of “full implementation” for people looking to implement their own client as a grant",
+      "createdAt": "2022-12-21T14:10:37.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<kevaundray> I was just asked about it and it’s at least not clear, if the double signing stuff is considered needed for the full implementation since it’s optional for GitHub",
+      "createdAt": "2022-12-21T14:11:16.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> That's a good point. I'd really like to have SIWE and double signing be the default option here, but if that is a blocker for people implementing then happy to ignore it.",
+      "createdAt": "2022-12-21T14:15:34.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<kevaundray> > <kevaundray>  Thanks for this, if you only use public methods then it should be easy to simulate attacks. \n\nI was additionally thinking to run it in a closer to production environment where the sequencer is up and you are spawning bots on a separate network, ie the environment is not necessarily predictable. Just causing havoc essentially (re @Marcin: Here's an example of such a test: https://github.com/ethereum/kzg-ceremony-sequencer/blob/master/tests/integration_test.rs#L639 – spawns the app, runs 10 bots against it, restarts the app, runs another 10 bots, verifies that the state is consistent. It's only shortcoming is that all servers (app, mock auth) and the bots are in the same process. If you split it into separate processes (should be easy, I was careful to _only_ use the public app options in tests, so there's no wonky overrides, it's all stuff you can do to a separate instance) and bump the numbers to reflect real ceremony sizes and 100x the number of participants, you have a load test ready.)",
+      "createdAt": "2022-12-21T14:16:32.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<kevaundray> > <kevaundray>  Alright will pass it along to them (re @CarlBeek: That's a good point. I'd really like to have SIWE and double signing be the default option here, but if that is a blocker for people implementing then happy to ignore it.)",
+      "createdAt": "2022-12-21T14:18:14.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pepesza.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For client I'm writing, I'm implementing crypto from ground-up. Found out that irreducible polynomials for finite fields are not unique and there is no canonical way of choosing one. May anyone point me into direction of spec / implementation where I can find out what was chosen? (if what I say makes no sense - I'm just learning, sorry)",
+      "createdAt": "2022-12-21T14:40:01.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> Awesome that you are writing a crypto implementation from scratch! You should be able to find all of the parameters you need here: https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-pairing-friendly-curves-11#section-4.2.1",
+      "createdAt": "2022-12-21T14:44:08.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pepesza.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> GF(p^2) = GF(p)[u] / (u^2 + 1)\n\nThis is what I've been looking for. THX!",
+      "createdAt": "2022-12-21T14:44:59.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if you're interested, there is an open grants round for projects like this, would be great to have you apply!",
+      "createdAt": "2022-12-21T14:46:15.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pepesza.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Will definitely apply if I succeed in producing working product",
+      "createdAt": "2022-12-21T14:47:36.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> great! don’t hesitate to reach out if you have further questions on specs etc.",
+      "createdAt": "2022-12-21T14:57:41.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<Marcin> > <Marcin>  Right so what I'm saying is this setup actually spawns the server and talks to it over http. So some DevOps magic and you'll have a dream setup (re @kevaundray: Thanks for this, if you only use public methods then it should be easy to simulate attacks. \n\nI was additionally thinking to run it in a closer to production environment where the sequencer is up and you are spawning bots on a separate network, ie the environment is not necessarily predictable. Just causing havoc essentially)",
+      "createdAt": "2022-12-21T15:50:45.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<Marcin> By \"public api\" I mean I spawn the server using only CLI options",
+      "createdAt": "2022-12-21T15:51:17.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jannik031153",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what are the hardware requirements for participating in the ceremony? In particular, is it realistic to use a raspberry pi, and what's the size of the data exchanged between sequencer and participant?",
+      "createdAt": "2022-12-21T20:36:51.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "very minimal, light enough to be browser based for those that want to use a hosted interface. \n\n~7MB of data",
+      "createdAt": "2022-12-21T20:37:46.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jannik031153",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "cool, just the 7MB could be problematic for us. The spec says \"Due to the simplicity of this PoT setup, the full contribution is sent as a json file between the sequencer & participants\". Does this mean we could in theory reduce this significantly?",
+      "createdAt": "2022-12-21T20:42:27.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> unfortunately there is not too much that can be done to reduce the 7mB file. the file is json so you could zip it and save 2x is you set up a proxy infront of your pi. but for what device is 7mB too big?",
+      "createdAt": "2022-12-21T20:44:20.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jannik031153",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see, thank you. Don't want to reveal too much yet, still working on our grant application 🙃",
+      "createdAt": "2022-12-21T20:46:50.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<CarlBeek> sounds fun! dms are open if you need extra info/guidance",
+      "createdAt": "2022-12-21T20:47:40.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "💰 KZG Grants Round **LIVE NOW** https://blog.ethereum.org/2022/12/15/kzg-ceremony-grants-round\n🖼️ Hosted Test Interface https://ceremony.ethereum.org/\n📚 Resources https://github.com/ethereum/kzg-ceremony\n⌛ Timeline https://notes.ethereum.org/@CarlBeek/kzg_ceremony_timelines\n❔ FAQ https://github.com/ethereum/kzg-ceremony/blob/main/FAQ.md",
+      "createdAt": "2022-12-21T22:06:07.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-12-21T22:06:48.820000+00:00",
+      "attachments": []
+    }
+  ]
+}

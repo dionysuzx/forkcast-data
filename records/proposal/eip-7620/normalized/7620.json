@@ -1,0 +1,39 @@
+{
+  "id": 7620,
+  "title": "EIP-7620: EOF Contract Creation",
+  "status": "Stagnant",
+  "description": "Introduce `EOFCREATE` and `RETURNCODE` instructions",
+  "laymanDescription": "This introduces new contract creation instructions for EOF contracts: EOFCREATE and RETURNCODE, which replace the legacy CREATE/CREATE2 instructions. Since EOF removes code observability (the ability to inspect and manipulate code), the old creation methods don't work. EOFCREATE creates contracts using pre-validated subcontainers within the factory contract, maintaining security while enabling factory patterns. RETURNCODE allows the initialization code to specify which subcontainer becomes the deployed contract and append additional data. This preserves the factory contract use case while maintaining EOF's code non-observability guarantees.",
+  "author": "Alex Beregszaszi (@axic), Paweł Bylica (@chfast), Andrei Maiboroda (@gumb0), Piotr Dobaczewski (@pdobacz)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2024-02-12",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7620-eof-contract-creation-instructions/18625",
+  "requires": [
+    "170",
+    "684",
+    "2929",
+    "3540",
+    "3541",
+    "3670"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Fusaka",
+      "statusHistory": [
+        {
+          "status": "Declined",
+          "call": null,
+          "date": null
+        }
+      ]
+    }
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract EVM Object Format (EOF) removes the possibility to create contracts using `CREATE` or `CREATE2` instructions. We introduce a new/replacement method in form of pair of instructions : `EOFCREATE` and `RETURNCODE` to provide a way to create contracts using EOF containers. ## Motivation This EIP uses terminology from the [EIP-3540](./eip-3540.md) which introduces the EOF format. EOF aims to remove code observability, which is a prerequisite to legacy EVM contract creation logic using legacy-style create transactions, `CREATE` or `CREATE2`, because both the initcode and code are available to the EVM and can be manipulated. On the same premise, EOF removes opcodes like `CODECOPY` and `EXTCODECOPY`, introducing EOF subcontainers as a replacement to cater for factory contracts creating other contracts. The new instructions introduced in this EIP operate on EOF containers enabling factory contract use case that legacy EVM has. ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in RFC 2119 and RFC 8174. Wherever not explicitly listed, the rules of EOF contract creation, as well as the `EOFCREATE` instruction, should be identical or analogous to those of `CREATE2` instruction. This includes but is not limited to: - behavior on `accessed_addresses` and address collision ([EIP-684](./eip-684.md) and [EIP-2929](./eip-2929.md)) - EVM execution frame created for the `EOFCREATE` initcode - memory, account context etc. - nonce bumping of the account of newly created contract [EIP-161](./eip-161.md) - balance checking and transfer for the creation endowment (`value` argument) ### Parameters | Constant | Value | | - | - | | `TX_CREATE_COST` | Defined as `32000` in the [Ethereum Execution Layer Specs](https://github.com/ethereum/execution-specs/blob/0f9e4345b60d36c23fffaa69f70cf9cdb975f4ba/src/ethereum/shanghai/fork_types.py#L42) | | `STACK_DEPTH_LIMIT` | Defined as `1024` in the [Ethereum Execution Layer Specs](https://github.com/ethereum/execution-specs/blob/0f9e4345b60d36c23fffaa69f70cf9cdb975f4ba/src/ethereum/shanghai/vm/interpreter.py#L60) | | `GAS_CODE_DEPOSIT` | Defined as `200` in the [Ethereum Execution Layer Specs](https://github.com/ethereum/execution-specs/blob/0f9e4345b60d36c23fffaa69f70cf9cdb975f4ba/src/ethereum/shanghai/vm/gas.py#L44) | | `MAX_CODE_SIZE` | Defined as `24576` in [EIP-170](./eip-170.md) | We introduce two new instructions on the same block number [EIP-3540](./eip-3540.md) is activated on: 1. `EOFCREATE` (`0xec`) 2. `RETURNCODE` (`0xee`) If the code is legacy bytecode, any of these instructions result in an *exceptional halt*. (*Note: This means no change to behaviour.*) ### Execution Semantics - The instructions `CREATE`, `CREATE2` are made obsolete and rejected by validation in EOF contracts. They are only available in legacy contracts. - If instructions `CREATE` and `CREATE2` have EOF code as initcode (starting with `EF00` magic) - deployment fails (returns 0 on the stack) - caller's nonce is not updated and gas for initcode execution is not consumed In the context of legacy bytecode execution any of these instructions (`EOFCREATE`, `RETURNCODE`) result in an *exceptional halt*. (*Note: This means no change to behaviour.*) #### Overview of the new contract creation flow In EOF EVM, new bytecode is introduced to the state by means of `InitcodeTransaction` delivering an EOF container (`initcontainer`). Such a container may include arbitrarily deeply nesting subcontainers. The `initcontainer` and its subcontainers are recursively validated according to all the validation rules applicable for the EOF version in question. Next, the 0th code section of the `initcontainer` is executed and may eventually call a `RETURNCODE` instruction, which will refer to a subcontainer to be finally deployed to an address. `InitcodeTransactions` are defined in detail in [EIP-7873](./eip-7873.md). `EOFCREATE` instruction is in turn a replacement of the `CREATE` and `CREATE2` legacy instructions allowing factory contracts to create other contracts. The main difference to the `InitcodeTransaction` is that the `initcontainer` is selected to be one of the subcontainers of the EOF container calling `EOFCREATE` (and not one of `transaction.initcodes`). It is worth noting that no validation is performed at this point, as it has already been done when the factory contract containing `EOFCREATE` was deployed. Details on each instruction follow in the next sections. #### `EOFCREATE` - deduct `TX_CREATE_COST` gas - halt with exceptional failure if the current frame is in `static-mode`. - read immediate operand `initcontainer_index`, encoded as 8-bit unsigned value - pop `salt`, `input_offset`, `input_size`, `value` from the operand stack - perform (and charge for) memory expansion using `[input_offset, input_size]` - load initcode EOF subcontainer at `initcontainer_index` in the container from which `EOFCREATE` is executed - let `initcontainer` be that EOF container - check that current call depth is below `STACK_DEPTH_LIMIT` and that caller balance is enough to transfer `value` - in case of failure return 0 on the stack, caller's nonce is not updated and gas for initcode execution is not consumed. - caller's memory slice `[input_offset:input_size]` is used as calldata - execute the container and deduct gas for execution. The 63/64th rule from [EIP-150](./eip-150.md) applies. - increment `sender` account's nonce - calculate `new_address` as `keccak256(0xff || sender32 || salt)[12:]`, where `sender32` is the sender address left-padded to 32 bytes with zeros - an unsuccessful execution of initcode results in pushing `0` onto the stack - can populate returndata if execution `REVERT`ed - a successful execution ends with initcode executing `RETURNCODE{deploy_container_index}(aux_data_offset, aux_data_size)` instruction (see below). After tha"
+}

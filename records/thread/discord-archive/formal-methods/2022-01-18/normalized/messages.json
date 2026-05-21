@@ -1,0 +1,480 @@
+{
+  "schemaVersion": 1,
+  "channel": "formal-methods",
+  "date": "2022-01-18",
+  "messageCount": 58,
+  "sourceHash": "a733a951741c947abb81d6ece98b4a49bbd59d97a27612e9163a129758301684",
+  "searchText": "I just went through the above steps to use solc with Eldarica and it works! I only had to change the version of solc in package.json to a more recent one awesome! I wonder why, I usually don't have to do that ah you mean so it downloads a newer soljson? It was complaining about the options `divModNoSlacks` and `invariants` being unknown. Once I updated from 0.8.4 to 0.8.11 it worked ah right, yes Can the Solidity compiler output information about loop-heads? EVM bytecode doesn't have structured loops and detecting them at the bytecode level I'm pretty sure is impossible in general. So I think I need some hints from the compiler about \"this JUMPI instruction is corresponding to a loop head or not\". Basically, every way I've come up with for detecting loop-heads at the bytecode level, I've been able to come up with counterexamples (where the detection reports that it's a loop head, even if it's not). I'm working with limited knowledge, since I don't have the entire execution trace in-hand, I only have the branch points (which is when there is a JUMPI instruction). So it's possible that by storing more information during execution I can make the detection possible, I haven't considered that yet. I guess looking at bytecode level only you'll always have false positives because of implicit things that become loops, like allocating a new array, ABI decoding/encoding, deleting an array, etc Yeah exactly, I have some examples of dynamic inputs, etc... that trigger it falsely sometimes. For example, if you have a function signature `twoAddress(address a1, address a2)`, the compiler will factor out the code that computes `x == (x & ((2 ^ 256) - 1))`, and `JUMP` to it for each argument. This looks a lot like a loop, in fact when you jump to it the _only_ differences each time you jump are some elements on teh wordstack (and the gas consumed), which looks _a lot_ like a loop. The other heuristic I've looked at is \"make sure that any elements which are on the wordstack and _are_ valid jump destinations don't change between supposed loop iterations\" But this is easy to write solidity code that tricks this heuristic (though the code itself is pathological) I guess it shouldn't be hard to add info about loop heads. Is there an issue about that already? I don't see one. Want me to make one? yea that'd be cool but here there's no jump back, right? even if those annotations exist, another problem is keeping them across optimizations Hmmmm, let me see if the direction we're jumping can be used as a heuristic. But my guess is no that it can't be. Because in the example above (the twoAddress function), the compiler can choose to put the code for checking the arguments before or after the main code path that we're in. but does it become a loop in the cfg? Yes, with naive loop detection it odes. And I'm not sure there is a more clever way to do it. Because it basically jumps to the same code twice, and the only difference is that we're looking at a different offset in the `<callData>` But otherwise the states are structurally identical, so it looks like a loop. But like I said, I'm only storing the branch points, so it may bethat if I store more information from betwene branch points, I can infer that this isn't a loop. Actually, thinking about this more, I think I'll go with a different more user-oriented approach anyway.Basically we can provide hints about what we _think_ are loops, and in cases we're 100% sure about loop-identification then we can do the loop folding, but otherwise we leave it to the user to identify loops for us. Would be a lot easier if there was a distinction between branches and loops in EVM bytecode. ah I see <@!822908652116639806> if I compile this contract with `--asm`: ``` contract L { function f(uint x) public pure { uint y; for (y = 0; y < x; ++y) { } assert(x == y); } } ``` I see ``` /* \"loop.sol\":59:88 for (y = 0; y < x; ++y) {... */ tag_9: ... /* \"loop.sol\":59:88 for (y = 0; y < x; ++y) {... */ jump(tag_9) ``` I haven't looked into the srcmap, but now I'm wondering if it's not there Also, in ``` contract L { function f(uint[20] memory a) public pure { uint s; for (uint i = 0; i < 20; ++i) { s += a[i]; } } } ``` if you compile with `--ir` you will see two loops, but with in `--asm` you can see that one is annotated with the `for` loop, and the other is annotated with `utility.yul`, denoting that it's from a compiler routine (here it's abi decoding) Huh, TIL, that will likely help a lot. So it looks like compiler already puts in the information. Thank you! I am going to have a heuristic that will only attempt to fold a loop if no items on the wordstack are valid jump destinations which change between loop iterations, basically. This should be _safe_ in the sense that we won't detect loops which aren't actually loops (loop abstraction results in loss of control flow precision, so we want to do it as little as possible), but also give the user or external tool the option to explicitely specify where the loops are. So that we can work on _most_ bytecode anyway, but if you provide hints (like the above, we'll be able to work on your code too). I'm also realizing it's important to make it possible to manually identify loops externally because we want this tool to work with any semantics. But I think the heuristic of \"wordstack contains no items which change between loop iteration 1 and loop iteration 2 where both the pre and post are valid jump destinations\" should work most of the time, unless the code does something really silly like store the jump-back destination in the local memory.... maybe it's better to instead calculate the state delta, and make sure that _nowhere_ in the state do you have a change from one integer to another where both integers are valid jump destinations. Then you know for sure that your jump structure must be the same. Still would rule out automatic detection of loops where every iteration of the loop changes something in the state from one valid jump destination to another, but is not using that part of the state for actual control flow. Kinda a hacky heuristic. yea I think that makes sense why no changes? When the compiler factors out a piece of code to be reused (but it's not a loop, it's just re-used in a bunch of places, eg. internal functions or argument processing routines), it stores the location to jump back to on the wordstack. So in the twoAddress example above (which actually comes from a transferFrom example), the CFG builder sees \"hey, I've seen this state before\", because everything is identical except for (i) the argument it's processing (so the offset into th ecalldata that shows up on the wordstack), and (ii) the argument on the wordstack representing the location to jump back to. Specifically, here is what the state delta looks like: If you look closely, you'll see the only change in pre and post state are on the `<gas>` cell, and the `<wordStack>` cell. The `<gas>` cell change is expected. Here we're trying to decide \"is this a loop or not?\" My old heuristic was \"<k>, <pc>, and <callData>\" cells are the same, so it returned \"true, this is a loop\", even though its not, it's just two jumps to the same piece of code which process the `address` arguments. So I'm trying to come up with a better heuristic. And the only telling thing that this _isn't_ a loop is that the 6th argument on the `<wordStack>` goes from `306 => 323`, and that is the argument that is used as the \"jump-back\" destination after the argument processing. For a loop, that \"jump-back\" argument, if it's present (depending on how the loop is structured), should always be the same, so there shouldn't be a state delta. I'd rather error on the side of assuming things _aren't_ loops. So in this case, I basically decided that if the state-delta contains a rewrite anywhere from one valid jump destination (`306`) to another different one (`323`) (and we already have the valid jump destinations computed in the `<jumpDests>` cell), then do not consider the two states in looping relation. So you can trick the tool into thinking things aren't loops by writing pathalogical code (think something that every iteration of a loop wrote a different valid jump destination to storage slot 0 and did nothing with it), but in that case you just lose out on automatic loop detection. Not sure if the above makes sense, but this new heuristic: ``` def kevmShouldSubsume(constrainedTerm1, constrainedTerm2): if all([getCell(constrainedTerm1, cn) == getCell(constrainedTerm2, cn) for cn in ['PC_CELL', 'K_CELL', 'CALLDATA_CELL', 'PROGRAM_CELL', 'JUMPDESTS_CELL']]): jumpDests = [ i['args'][0] for i in flattenLabel('_Set_', getCell(constrainedTerm1, 'JUMPDESTS_CELL')) ] (state1, _) = splitConfigAndConstraints(constrainedTerm1) (state2, _) = splitConfigAndConstraints(constrainedTerm2) stateDelta = pushDownRewrites(KRewrite(state1, state2)) rewrites = [] def _collectRewrites(_k): if isKRewrite(_k) and isKToken(_k['lhs']) and isKToken(_k['rhs']): rewrites.append((_k['lhs'], _k['rhs'])) return _k traverseBottomUp(stateDelta, _collectRewrites) return not any([(i != j) and (i in jumpDests) and (j in jumpDests) for (i, j) in rewrites]) return False ``` checks that: - All of the `<pc>`, `<k>`, `<callData>`, `<program>`, and `<jumpDests>` cells are identical (could probably also add `<callDepth>` to this one) - There are no deltas in the state between two integers that are valid jump destinations. This correctly identifies the loop in this code: ``` function sum(uint n) external pure returns (uint s) { s = 0; uint i = n; while (0 < i) { s = s + i; i = i - 1; } return s; } ``` while correctly not identifying a loop in this code: ``` function twoAddress(address a1, address a2) public pure returns (uint256) { if (a1 == a2) { return 0; } return 1; } ```",
+  "excerpts": [
+    {
+      "author": "_dawit",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I just went through the above steps to use solc with Eldarica and it works!",
+      "createdAt": "2022-01-18T11:52:58.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_dawit",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I only had to change the version of solc in package.json to a more recent one",
+      "createdAt": "2022-01-18T11:53:05.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "awesome!",
+      "createdAt": "2022-01-18T11:54:10.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I wonder why, I usually don't have to do that",
+      "createdAt": "2022-01-18T11:54:17.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ah you mean so it downloads a newer soljson?",
+      "createdAt": "2022-01-18T11:54:54.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_dawit",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It was complaining about the options `divModNoSlacks` and `invariants` being unknown. Once I updated from 0.8.4 to 0.8.11 it worked",
+      "createdAt": "2022-01-18T11:56:24.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ah right, yes",
+      "createdAt": "2022-01-18T11:56:52.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Can the Solidity compiler output information about loop-heads? EVM bytecode doesn't have structured loops and detecting them at the bytecode level I'm pretty sure is impossible in general. So I think I need some hints from the compiler about \"this JUMPI instruction is corresponding to a loop head or not\".",
+      "createdAt": "2022-01-18T15:51:40.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Basically, every way I've come up with for detecting loop-heads at the bytecode level, I've been able to come up with counterexamples (where the detection reports that it's a loop head, even if it's not).",
+      "createdAt": "2022-01-18T15:54:15.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'm working with limited knowledge, since I don't have the entire execution trace in-hand, I only have the branch points (which is when there is a JUMPI instruction). So it's possible that by storing more information during execution I can make the detection possible, I haven't considered that yet.",
+      "createdAt": "2022-01-18T15:55:12.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I guess looking at bytecode level only you'll always have false positives because of implicit things that become loops, like allocating a new array, ABI decoding/encoding, deleting an array, etc",
+      "createdAt": "2022-01-18T15:55:26.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yeah exactly, I have some examples of dynamic inputs, etc... that trigger it falsely sometimes.",
+      "createdAt": "2022-01-18T15:55:49.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "For example, if you have a function signature `twoAddress(address a1, address a2)`, the compiler will factor out the code that computes `x == (x & ((2 ^ 256) - 1))`, and `JUMP` to it for each argument. This looks a lot like a loop, in fact when you jump to it the _only_ differences each time you jump are some elements on teh wordstack (and the gas consumed), which looks _a lot_ like a loop.",
+      "createdAt": "2022-01-18T15:57:07.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The other heuristic I've looked at is \"make sure that any elements which are on the wordstack and _are_ valid jump destinations don't change between supposed loop iterations\"",
+      "createdAt": "2022-01-18T15:57:35.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But this is easy to write solidity code that tricks this heuristic (though the code itself is pathological)",
+      "createdAt": "2022-01-18T15:57:49.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I guess it shouldn't be hard to add info about loop heads. Is there an issue about that already?",
+      "createdAt": "2022-01-18T15:58:26.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I don't see one.",
+      "createdAt": "2022-01-18T15:59:03.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Want me to make one?",
+      "createdAt": "2022-01-18T15:59:37.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yea that'd be cool",
+      "createdAt": "2022-01-18T16:00:33.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but here there's no jump back, right?",
+      "createdAt": "2022-01-18T16:04:48.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "even if those annotations exist, another problem is keeping them across optimizations",
+      "createdAt": "2022-01-18T16:09:02.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Hmmmm, let me see if the direction we're jumping can be used as a heuristic.",
+      "createdAt": "2022-01-18T16:42:02.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But my guess is no that it can't be.",
+      "createdAt": "2022-01-18T16:42:06.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Because in the example above (the twoAddress function), the compiler can choose to put the code for checking the arguments before or after the main code path that we're in.",
+      "createdAt": "2022-01-18T16:43:07.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but does it become a loop in the cfg?",
+      "createdAt": "2022-01-18T16:53:45.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yes, with naive loop detection it odes.",
+      "createdAt": "2022-01-18T17:20:58.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "And I'm not sure there is a more clever way to do it.",
+      "createdAt": "2022-01-18T17:21:18.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Because it basically jumps to the same code twice, and the only difference is that we're looking at a different offset in the `<callData>`",
+      "createdAt": "2022-01-18T17:21:36.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But otherwise the states are structurally identical, so it looks like a loop.",
+      "createdAt": "2022-01-18T17:21:49.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But like I said, I'm only storing the branch points, so it may bethat if I store more information from betwene branch points, I can infer that this isn't a loop.",
+      "createdAt": "2022-01-18T17:22:15.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Actually, thinking about this more, I think I'll go with a different more user-oriented approach anyway.Basically we can provide hints about what we _think_ are loops, and in cases we're 100% sure about loop-identification then we can do the loop folding, but otherwise we leave it to the user to identify loops for us.",
+      "createdAt": "2022-01-18T18:37:47.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Would be a lot easier if there was a distinction between branches and loops in EVM bytecode.",
+      "createdAt": "2022-01-18T18:38:56.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ah I see",
+      "createdAt": "2022-01-18T20:02:04.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@!822908652116639806> if I compile this contract with `--asm`:\n```\ncontract L {\n    function f(uint x) public pure {\n        uint y;\n        for (y = 0; y < x; ++y) {\n        }\n        assert(x == y);\n    }\n}\n```\nI see\n```\n/* \"loop.sol\":59:88  for (y = 0; y < x; ++y) {... */\n    tag_9:\n...\n/* \"loop.sol\":59:88  for (y = 0; y < x; ++y) {... */\n      jump(tag_9)\n```",
+      "createdAt": "2022-01-18T20:07:45.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I haven't looked into the srcmap, but now I'm wondering if it's not there",
+      "createdAt": "2022-01-18T20:08:23.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Also, in\n```\ncontract L {\n    function f(uint[20] memory a) public pure {\n        uint s;\n        for (uint i = 0; i < 20; ++i) {\n            s += a[i];\n        }\n    }\n}\n```\nif you compile with `--ir` you will see two loops, but with in `--asm` you can see that one is annotated with the `for` loop, and the other is annotated with `utility.yul`, denoting that it's from a compiler routine (here it's abi decoding)",
+      "createdAt": "2022-01-18T20:11:41.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Huh, TIL, that will likely help a lot.",
+      "createdAt": "2022-01-18T20:27:10.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So it looks like compiler already puts in the information.",
+      "createdAt": "2022-01-18T20:27:19.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Thank you!",
+      "createdAt": "2022-01-18T20:27:31.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I am going to have a heuristic that will only attempt to fold a loop if no items on the wordstack are valid jump destinations which change between loop iterations, basically. This should be _safe_ in the sense that we won't detect loops which aren't actually loops (loop abstraction results in loss of control flow precision, so we want to do it as little as possible), but also give the user or external tool the option to explicitely specify where the loops are.",
+      "createdAt": "2022-01-18T20:29:03.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So that we can work on _most_ bytecode anyway, but if you provide hints (like the above, we'll be able to work on your code too).",
+      "createdAt": "2022-01-18T20:29:19.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'm also realizing it's important to make it possible to manually identify loops externally because we want this tool to work with any semantics.",
+      "createdAt": "2022-01-18T20:31:20.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But I think the heuristic of \"wordstack contains no items which change between loop iteration 1 and loop iteration 2 where both the pre and post are valid jump destinations\" should work most of the time, unless the code does something really silly like store the jump-back destination in the local memory....",
+      "createdAt": "2022-01-18T20:36:17.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "maybe it's better to instead calculate the state delta, and make sure that _nowhere_ in the state do you have a change from one integer to another where both integers are valid jump destinations. Then you know for sure that your jump structure must be the same. Still would rule out automatic detection of loops where every iteration of the loop changes something in the state from one valid jump destination to another, but is not using that part of the state for actual control flow. Kinda a hacky heuristic.",
+      "createdAt": "2022-01-18T20:37:49.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yea I think that makes sense",
+      "createdAt": "2022-01-18T21:09:58.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "leonardoalt",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "why no changes?",
+      "createdAt": "2022-01-18T21:12:22.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "When the compiler factors out a piece of code to be reused (but it's not a loop, it's just re-used in a bunch of places, eg. internal functions or argument processing routines), it stores the location to jump back to on the wordstack.",
+      "createdAt": "2022-01-18T21:13:20.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So in the twoAddress example above (which actually comes from a transferFrom example), the CFG builder sees \"hey, I've seen this state before\", because everything is identical except for (i) the argument it's processing (so the offset into th ecalldata that shows up on the wordstack), and (ii) the argument on the wordstack representing the location to jump back to.",
+      "createdAt": "2022-01-18T21:14:27.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Specifically, here is what the state delta looks like:",
+      "createdAt": "2022-01-18T21:15:04.980000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "9d1d5596bcf3bd98c39a9b689609db787ec04db9b07da70510d20c6b7a7e903f"
+        }
+      ]
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "If you look closely, you'll see the only change in pre and post state are on the `<gas>` cell, and the `<wordStack>` cell.",
+      "createdAt": "2022-01-18T21:15:43.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The `<gas>` cell change is expected.",
+      "createdAt": "2022-01-18T21:15:55.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Here we're trying to decide \"is this a loop or not?\" My old heuristic was \"<k>, <pc>, and <callData>\" cells are the same, so it returned \"true, this is a loop\", even though its not, it's just two jumps to the same piece of code which process the `address` arguments.",
+      "createdAt": "2022-01-18T21:16:36.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So I'm trying to come up with a better heuristic.",
+      "createdAt": "2022-01-18T21:16:46.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "And the only telling thing that this _isn't_ a loop is that the 6th argument on the `<wordStack>` goes from `306 => 323`, and that is the argument that is used as the \"jump-back\" destination after the argument processing.",
+      "createdAt": "2022-01-18T21:17:33.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "For a loop, that \"jump-back\" argument, if it's present (depending on how the loop is structured), should always be the same, so there shouldn't be a state delta.",
+      "createdAt": "2022-01-18T21:17:58.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'd rather error on the side of assuming things _aren't_ loops. So in this case, I basically decided that if the state-delta contains a rewrite anywhere from one valid jump destination (`306`) to another different one (`323`) (and we already have the valid jump destinations computed in the `<jumpDests>` cell), then do not consider the two states in looping relation.",
+      "createdAt": "2022-01-18T21:19:57.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So you can trick the tool into thinking things aren't loops by writing pathalogical code (think something that every iteration of a loop wrote a different valid jump destination to storage slot 0 and did nothing with it), but in that case you just lose out on automatic loop detection.",
+      "createdAt": "2022-01-18T21:22:25.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ehildenb",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Not sure if the above makes sense, but this new heuristic:\n\n```\ndef kevmShouldSubsume(constrainedTerm1, constrainedTerm2):\n    if all([getCell(constrainedTerm1, cn) == getCell(constrainedTerm2, cn) for cn in ['PC_CELL', 'K_CELL', 'CALLDATA_CELL', 'PROGRAM_CELL', 'JUMPDESTS_CELL']]):\n        jumpDests   = [ i['args'][0] for i in flattenLabel('_Set_', getCell(constrainedTerm1, 'JUMPDESTS_CELL')) ]\n        (state1, _) = splitConfigAndConstraints(constrainedTerm1)\n        (state2, _) = splitConfigAndConstraints(constrainedTerm2)\n        stateDelta  = pushDownRewrites(KRewrite(state1, state2))\n        rewrites    = []\n        def _collectRewrites(_k):\n            if isKRewrite(_k) and isKToken(_k['lhs']) and isKToken(_k['rhs']):\n                rewrites.append((_k['lhs'], _k['rhs']))\n            return _k\n        traverseBottomUp(stateDelta, _collectRewrites)\n        return not any([(i != j) and (i in jumpDests) and (j in jumpDests) for (i, j) in rewrites])\n    return False\n```\n\nchecks that:\n\n- All of the `<pc>`, `<k>`, `<callData>`, `<program>`, and `<jumpDests>` cells are identical (could probably also add `<callDepth>` to this one)\n- There are no deltas in the state between two integers that are valid jump destinations.\n\nThis correctly identifies the loop in this code:\n\n```\n    function sum(uint n) external pure returns (uint s) {\n        s = 0;\n        uint i = n;\n        while (0 < i) {\n            s = s + i;\n            i = i - 1;\n        }\n        return s;\n    }\n```\n\nwhile correctly not identifying a loop in this code:\n\n```\n    function twoAddress(address a1, address a2) public pure returns (uint256) {\n        if (a1 == a2) {\n            return 0;\n        }\n        return 1;\n    }\n```",
+      "createdAt": "2022-01-18T21:27:46.074000+00:00",
+      "attachments": []
+    }
+  ]
+}

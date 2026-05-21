@@ -1,0 +1,74 @@
+{
+  "id": 7923,
+  "title": "EIP-7923: Linear, Page-Based Memory Costing",
+  "status": "Draft",
+  "description": "Linearize Memory Costing and replace the current quadratic formula with a page-based cost model.",
+  "laymanDescription": "Linearizes EVM memory with 4KB pages: 100-gas allocation, 6-gas thrash, 64MB cap. Contracts that hit quadratic expansion limits finish with the same logic but steadier gas usage, allowing for more efficient memory management and predicatble gas costs.",
+  "author": "Charles Cooper (@charles-cooper), Qi Zhou (@qizhou)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-03-27",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-linearize-memory-costing/23290",
+  "requires": [],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/226",
+          "date": "2025-12-18"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Charles Cooper",
+          "telegram": "big_tech_sux"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Transaction gas for memory-heavy calls may be lower, wallets are better at estimating gas to spend."
+    },
+    "appDevs": {
+      "description": "Account for page allocation (4096 B) and thrash costs; 32-bit addresses; 64 MiB tx memory cap; MSIZE unchanged. Better ways to address memory with new optimizations. The changes are backwards compatible."
+    },
+    "walletDevs": {
+      "description": "Update simulators/estimators to model page allocation and thrash costs; surface OOM exceptional halts."
+    },
+    "toolingInfra": {
+      "description": "Clients, tracers, profilers need LRU(512) page tracking and new gas accounting; optional mmap-style backing."
+    },
+    "layer2s": {
+      "description": "EVM-equivalent chains must adopt new costing/limits; reassess proving and sequencer cost models for compatibility."
+    },
+    "stakersNodes": {
+      "description": "More predictable resource bounds via transaction-global memory limit, RPC providers can revise eth_call policies and DoS assumptions."
+    },
+    "clClients": {
+      "description": "This change doesn't touch the consensus layer."
+    },
+    "elClients": {
+      "description": "Implementation of new linear, page-based costing, LRU thrash checks, and OOM halts while preserving MSIZE semantics while maintaining compatibility with the old model."
+    }
+  },
+  "benefits": [
+    "Replaces quadratic memory expansion with linear, page-based costing for predictable gas.",
+    "Provides support for virtual memory addressing, unlocking heap/stack separation in high-level smart contract languages.",
+    "Providing developers with better ways to manage memory, similar to other architectures."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP replaces the quadratic memory model in the EVM with a linear, page-based costing model. Memory is virtually addressable. Page allocation is included in the cost model. After applying this EIP, memory limits are invariant to the state of the message call stack. ## Motivation The EVM currently uses a quadratic pricing model for its memory. This was originally put in place to defend against DoS attacks. However, the memory model has several drawbacks. 1. It is anachronistic. Even at a gas limit of 30 million gas, users can only use 3MB of memory in a message call (and that burns all gas). Since the quadratic term for memory expansion starts kicking in at 724 bytes, users use much less memory in practice. To use even 64KB of memory -- the amount of memory available to a PC from the early 80's -- costs 14336 gas! 2. The quadratic model makes it difficult to reason about how much memory a transaction can allocate. It requires solving an optimization problem which involves computing how many message calls are available to recurse into based on the call stack limit (and, post [EIP-150](./eip-150.md), the 63/64ths rule), and then maximizing the memory used per message call. 3. The quadratic model makes it impossible for high-level smart contracts languages to get the benefits of virtual memory. Most modern programming languages maintain what is known as the \"heap\" and the \"call stack\". The heap is used to allocate objects which live past the lifetime of their current function frame, whereas the call stack is used to allocate objects which live in the current function frames. Importantly, the call stack starts at the top of memory and grows down, while the heap starts at the bottom of memory and grows up, thus the language implementation does not need to worry about the two regions of memory interfering with each other. This is a feature which is enabled by virtual, paged memory, which has been present in operating systems since the early 90's. However, smart contract languages like Vyper and Solidity are not able to implement this, leading to inefficiencies in their memory models. This EIP proposes a linear costing model which more closely reflects the hardware of today, which is hierarchical (\"hot\" memory is much faster to access than \"cold\" memory), and virtually addressed (memory does not need to be allocated contiguously, but is rather served \"on-demand\" by the operating system). First, some preliminaries. A page is 4096 bytes on most architectures. Given a memory address, its page is simple to compute by masking out the rightmost 12 bits. There are two factors which contribute to \"cold\" memory (i.e. not-recently-used) being slower: CPU cache and TLB (Translation Lookaside Buffer) cache. The CPU cache is a least-recently-used memory cache, which is significantly faster than fetching all the way from RAM. The TLB is usually some hash table which maps virtual pages (used by the user) to physical pages in RAM. \"Thrashing\", or accessing a lot of different memory addresses, does two things: it pushes memory out of the hot cache and into cold memory, and it pushes pages out of the TLB cache. For this reason, it is worth limiting the amount of memory that is available to a transaction to memory which can be held in the hot set. This EIP uses a virtual addressing scheme so that memory pages are not allocated until they are actually accessed. Notably, the data structures used for costing memory do not need to be part of the memory implementation itself, which suggests an elegant implementation using the POSIX `mmap` syscall (or, its counterpart on Windows, `VirtualAlloc`). The implementation can be approached in two ways. The first way is to implement the virtual addressing \"manually\". This is intended for systems without `mmap` or a virtual addressing capability. The implementation needs to maintain a map from `map[page_id -> char[4096]]`, where `page_id` is an integer, computed as `memory_address >> 12`. (On reads or writes which cross page boundaries, the implementation needs to load both pages and combine the result of the read or write across both pages). The other implementation is easier, for systems with `mmap` or a similar facility. To hold the actual data of the memory, the implementation `mmap`s a `2**32` byte region of memory. Then, memory operations can be implemented simply as reads or writes against this buffer. (With an anonymous `mmap`, the operating system will not allocate the entire buffer up-front, rather, it will allocate pages \"on demand\", as they are touched). The `pages` map is still necessary, but it doesn't hold any data, it is just to track which pages have been allocated, for pricing purposes. In this implementation, there are two data structures: `memory char[2**32]` and `allocated_pages set[page_id]`. The `memory` data structure is only used for memory reads and writes. The `allocated_pages` is only used for gas costing. ## Specification Consider the following constants: ```python ALLOCATE_PAGE_COST = 100 PAGE_SIZE = 4096 MAXIMUM_MEMORY_SIZE = 64 * 1024 * 1024 ``` The memory costing algorithm is changed as follows: 1. For each page touched by an instruction, charge `ALLOCATE_PAGE_COST` gas if it has not been touched before in this message call, except for page 0 which is free. 2. The base gas cost for all memory instructions, e.g. `MLOAD` and `MSTORE`, remains the same, at 3. 3. The linear and quadratic terms in the memory expansion cost are removed. The behavior of `msize` remains the same. It returns the maximum byte touched by any memory instruction, rounded up by 32. Memory addresses are restricted to 32-bits. If an address is larger than `2**32 - 1`, an exceptional halt should be raised. A transaction-global memory limit is imposed. If the number of pages allocated in a transaction exceeds `MAXIMUM_MEMORY_SIZE // PAGE_SIZE` (i.e., 16384), an exceptional halt should be raised. ## Rationale Benchmarks were performed on a 2019-era CPU, with the abi"
+}

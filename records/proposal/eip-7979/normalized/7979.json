@@ -1,0 +1,78 @@
+{
+  "id": 7979,
+  "title": "EIP-7979: Call and Return Opcodes for the EVM",
+  "status": "Draft",
+  "description": "Three new instructions to support calls and returns, with optional validated control flow.",
+  "laymanDescription": "Introduces instructions to call and return from subroutines, which are missing from the EVM.  This lets compilers generate code with static control flow, which allows for more performant clients and quadradictally more efficient static analysis tools",
+  "author": "Greg Colvin (@gcolvin), Martin Holst Swende (@holiman), Brooklyn Zelenka (@expede), John Max Skaller <skaller@internode.on.net>",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-12-17",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7951-call-and-return-opcodes-for-the-evm/24615",
+  "requires": [
+    "3541"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/225",
+          "date": "2025-12-04"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Greg Colvin",
+          "email": "greg@colvin.org"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Increased security and more performant smart contract execution."
+    },
+    "appDevs": {
+      "description": "Better tools.  Especially, better static analysis and formal verification."
+    },
+    "walletDevs": {
+      "description": "No direct impact"
+    },
+    "toolingInfra": {
+      "description": "Compilers must produce static, validated EVM code."
+    },
+    "layer2s": {
+      "description": "Some Layer 2 and EVM-compatible chains could benefit from more performant client."
+    },
+    "stakersNodes": {
+      "description": "No direct impact, but enables more clients to implement performance gains"
+    },
+    "clClients": {
+      "description": "No changes required for consensus layer implementations."
+    },
+    "elClients": {
+      "description": "Implementation of the instructions and validation is straightforward, and clients can better optimize their execution of validated code."
+    }
+  },
+  "benefits": [
+    "Makes static EVM control flow possible, which static analysis people have been requesting for many years.",
+    "Static control flow can make static analysis and formal verification of EVM code quadratically more efficient.",
+    "Static control flow makes linear-time translators of EVM code possible, including one-pass compilers to machine code and RISC-V.",
+    "Clients can validate that deployed code cannot execute invalid instructions, jump to invalid locations, or misuse the stack.",
+    "Maintains backwards compatibility, enabling a smooth transition.  Tools and developers can take up the new features as they become available."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This is the smallest possible change to the EVM to support calls and returns. This proposal introduces three new control-flow instructions to the EVM: * `CALLSUB` transfers control to the `destination` on the `stack`. * `ENTERSUB` marks a `CALLSUB` destination. * `RETURNSUB` returns to the `PC` after the most recent `CALLSUB`. Code can also be prefixed with `MAGIC` bytes. The complete control flow of `MAGIC` code can be traversed in time and space linear in the size of the code, enabling tools for validation, static analysis, and AOT and JIT compilers. On-chain, `MAGIC` code is validated at `CREATE` time to ensure that it cannot execute invalid instructions, jump to invalid locations, underflow stack, or, in the absence of recursion, overflow stack. These changes are backwards-compatible: all instructions behave as specified whether or not they appear in `MAGIC` code. ## Motivation The EVM currently lacks explicit call and return instructions. Instead, calls and returns must be synthesized using the dynamic `JUMP` instruction, which takes its destination from the stack. This creates two fundamental problems: * **Inefficiency**: Synthesizing calls and returns with jumps wastes bytecode space and gas. * **Complexity**: Even more important, dynamic jumps can cause quadratic \"path explosions\" during control-flow analysis, creating a denial-of-service vulnerability for things like init-time compilation to RISC-V code. They can also trigger exponential \"state space explosions\" during formal analysis and ZK circuit construction. For detailed historical context, technical foundations of static control flow, and their impact on Ethereum's scaling roadmap, see proposal 8173: \"Static Control Flow for the EVM.\" ## Specification > _The key words MUST and MUST NOT in this Specification are to be interpreted as described in RFC 2119 and RFC 8174._ ### `CALLSUB (0x..)` Transfers control to a subsidiary operation. 1. Pop the `destination` on top of the `stack`. 2. Push the current `PC + 1` to the `return stack`. 3. Set `PC` to `destination`. The gas cost is _mid_ (`8`). ### `ENTERSUB (0x..)` The `destination` of every `CALLSUB` MUST be an `ENTERSUB`. ### `RETURNSUB (0x..)` Returns control to the caller of a subsidiary operation. 1. Pop the `return stack` to `PC`. The gas cost is _low_ (`5`). ### `MAGIC (0xEF....)` After this EIP has been activated, code beginning with the `MAGIC` bytes MUST be a `valid` program. Execution begins immediately after the `MAGIC` bytes. _Notes:_ * _Values popped off the `return stack` do not need to be validated, since they are alterable only by `CALLSUB` and `RETURNSUB`._ * _The description above lays out the semantics of these instructions in terms of a `return stack`. But the actual state of the `return stack` is not observable by EVM code or consensus-critical to the protocol. (For example, a node implementer may code `CALLSUB` to unobservably push `PC` on the `return stack` rather than `PC + 1`, which is allowed so long as `RETURNSUB` observably returns control to the `PC + 1` location.)_ * _Opcode and `MAGIC` values are still to be determined, but the `MAGIC` bytes will begin with 0xEF._ ### Costs A _mid_ cost for `CALLSUB` is justified by it taking very little more work than the _mid_ cost of `JUMP` — just pushing an integer to the `return stack`. A _jumpdest_ cost for `ENTERSUB` is justified by it being, like `JUMPDEST`, a mere label. A _low_ cost for `RETURNSUB` is justified by needing only to pop the `return stack` into the `PC` — less work than a jump. Benchmarking will be needed to tell if the costs are well-balanced. ### Validity Execution is defined in the Yellow Paper as a sequence of changes to the EVM state. The conditions on `valid` code are preserved by state changes. At runtime, if execution of an instruction would violate a condition, the execution is in an exceptional halting state and cannot continue. The Yellow Paper defines six such states: * State modification during a static call * Insufficient gas * More than 1024 stack items * Insufficient stack items * Invalid jump destination * Invalid instruction We would like to consider EVM code `valid` if and only if no execution of the program can lead to an exceptional halting state. In practice, we must test at runtime for the first three conditions — we don't know whether we will be called statically, how much gas there will be, or how deep a recursion may go. (However, we can validate that non-recursive programs do not overflow stack.) All of the remaining conditions MUST be validated statically. To allow for efficient algorithms, our validation considers only the code's control flow and stack use, not its data and computations. This means we will reject programs with invalid code paths, even if those paths are not reachable. #### Constraints on `valid` code Code beginning with `MAGIC` MUST be `valid`. Constraints on `valid` code MUST be validated at `CREATE` time, in time and space linear in the size of the code. The constraints on `valid` code are as follows: * All executable opcodes must be `valid`: * They MUST have been defined in the Yellow Paper or a deployed EIP and * MUST NOT have been deprecated in a subsequent deployed EIP. * The `INVALID` opcode is `valid`. * The `JUMP` and `JUMPI` instructions MUST be preceded by a `PUSH` instruction. * The `JUMP` and `JUMPI` instructions MUST NOT address immediate data, and MUST address a `JUMPDEST`. * The `CALLSUB` instruction MUST be preceded by a `PUSH` instruction. * The `CALLSUB` instruction MUST NOT address immediate data, and MUST address an `ENTERSUB`. * The number of items on the `data stack` MUST always be positive and less than or equal to 1024. * The number of items on the `return stack` MUST always be positive and less than or equal to 1024. * The `stack height` is the absolute difference between the current `stack pointer` and the `stack pointer` at the most recent `ENTERSUB`. * During execution, the `stack height` MUST be _the sam"
+}

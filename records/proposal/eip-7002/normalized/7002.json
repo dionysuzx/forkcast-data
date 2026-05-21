@@ -1,0 +1,65 @@
+{
+  "id": 7002,
+  "title": "EIP-7002: Execution layer triggerable withdrawals",
+  "status": "Final",
+  "description": "Allow validators to trigger exits and partial withdrawals via their execution layer (0x01) withdrawal credentials",
+  "laymanDescription": "A new system contract that lets the withdrawal credential owner trigger a validator exit onchain without the need for BLS validator key on CL.",
+  "author": "Danny Ryan (@djrtwo), Mikhail Kalinin (@mkalinin), Ansgar Dietrichs (@adietrichs), Hsiao-Wei Wang (@hwwhww), lightclient (@lightclient), Felix Lange (@fjl)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2023-05-09",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7002-execution-layer-triggerable-exits/14195",
+  "requires": [
+    "7685"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Pectra",
+      "statusHistory": [
+        {
+          "status": "Included",
+          "call": null,
+          "date": null
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Improves safety and UX of staking services that users interact with."
+    },
+    "appDevs": {
+      "description": "Staking protocols gain a safer, onchain way to coordinate exits."
+    },
+    "walletDevs": {
+      "description": "No changes to wallets."
+    },
+    "toolingInfra": {
+      "description": "EL explorers can track exit calls and state transitions onchain."
+    },
+    "layer2s": {
+      "description": "Not impacting L2s."
+    },
+    "stakersNodes": {
+      "description": "Alternative exit mechanism, enables withdrawals even when validator keys are lost."
+    },
+    "clClients": {
+      "description": "Implement the new exit flow initiated via execution-layer contract."
+    },
+    "elClients": {
+      "description": "Implement and expose the exit-trigger contract, new communication with CL."
+    }
+  },
+  "benefits": [
+    "Safer operational separation of keys for staking",
+    "Trust-minimized exits for staking protocols",
+    "Reduces reliance on validator keys access on Beacon Chain"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract Adds a new mechanism to allow validators to trigger withdrawals and exits from their execution layer (0x01) withdrawal credentials. These new execution layer exit messages are appended to the execution layer block and then processed by the consensus layer. ## Motivation Validators have two keys -- an active key and a withdrawal credential. The active key takes the form of a BLS key, whereas the withdrawal credential can either be a BLS key (0x00) or an execution layer address (0x01). The active key is \"hot\", actively signing and performing validator duties, whereas the withdrawal credential can remain \"cold\", only performing limited operations in relation to withdrawing and ownership of the staked ETH. Due to this security relationship, the withdrawal credential ultimately is the key that owns the staked ETH and any rewards. As currently specified, only the active key can initiate a validator exit. This means that in any non-standard custody relationship (i.e., the active key is a separate entity from the withdrawal credentials), the ultimate owner of the funds -- the possessor of the withdrawal credentials -- cannot independently choose to exit and begin the withdrawal process. This leads to either trust issues (e.g. ETH can be \"held hostage\" by the active key owner) or insufficient work-arounds such as pre-signed exits. Additionally, in the event that active keys are lost, a user should still be able to recover their funds by using their cold withdrawal credentials. To ensure that the withdrawal credentials (owned by both EOAs and smart contracts) can trustlessly control the destiny of the staked ETH, this specification enables exits triggerable by 0x01 withdrawal credentials. Note, 0x00 withdrawal credentials can be changed into 0x01 withdrawal credentials with a one-time signed message. Thus any functionality enabled for 0x01 credentials is defacto enabled for 0x00 credentials. ## Specification ### Configuration | Name | Value | Comment | | - | - | - | | `WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS` | `0x00000961Ef480Eb55e80D19ad83579A64c007002` | Where to call and store relevant details about exit / partial withdrawal mechanism | | `WITHDRAWAL_REQUEST_TYPE` | `0x01` | The [EIP-7685](./eip-7685.md) type prefix for withdrawal request | | `SYSTEM_ADDRESS` | `0xfffffffffffffffffffffffffffffffffffffffe` | Address used to invoke system operation on contract | `EXCESS_WITHDRAWAL_REQUESTS_STORAGE_SLOT` | 0 | | | `WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT` | 1 | | | `WITHDRAWAL_REQUEST_QUEUE_HEAD_STORAGE_SLOT` | 2 | Pointer to head of the withdrawal request message queue | | `WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT` | 3 | Pointer to the tail of the withdrawal request message queue| | `WITHDRAWAL_REQUEST_QUEUE_STORAGE_OFFSET` | 4 | The start memory slot of the in-state withdrawal request message queue| | `MAX_WITHDRAWAL_REQUESTS_PER_BLOCK` | 16 | Maximum number of withdrawal requests that can be dequeued into a block | | `TARGET_WITHDRAWAL_REQUESTS_PER_BLOCK` | 2 | | | `MIN_WITHDRAWAL_REQUEST_FEE` | 1 | | | `WITHDRAWAL_REQUEST_FEE_UPDATE_FRACTION` | 17 | | | `EXCESS_INHIBITOR` | `2**256-1` | Excess value used to compute the fee before the first system call | ### Execution layer #### Definitions * **`FORK_BLOCK`** -- the first block in a blockchain after this EIP has been activated. #### Withdrawal request operation The new withdrawal request operation is an [EIP-7685](./eip-7685.md) request with type `0x01` and consists of the following fields: 1. `source_address`: `Bytes20` 2. `validator_pubkey`: `Bytes48` 3. `amount`: `uint64` The [EIP-7685](./eip-7685.md) encoding of a withdrawal request is computed as follows. Note that `amount` is returned by the contract little-endian, and must be encoded as such. ```python request_type = WITHDRAWAL_REQUEST_TYPE request_data = read_withdrawal_requests() ``` #### Withdrawal Request Contract The contract has three different code paths, which can be summarized at a high level as follows: 1. Add withdrawal request - requires a `56` byte input, the validator's public key concatenated with a big-endian `uint64` amount value. 2. Fee getter - if the input length is zero, return the current fee required to add a withdrawal request. 3. System process - if called by system address, pop off the withdrawal requests for the current block from the queue. ##### Add Withdrawal Request If call data input to the contract is exactly `56` bytes, perform the following: * Ensure enough ETH was sent to cover the current withdrawal request fee (`check_fee()`) * Increase withdrawal request count by 1 for the current block (`increment_count()`) * Insert a withdrawal request into the queue for the source address and validator pubkey (`insert_withdrawal_request_into_queue()`) Specifically, the functionality is defined in pseudocode as the function `add_withdrawal_request()`: ```python def add_withdrawal_request(Bytes48: validator_pubkey, uint64: amount): \"\"\" Add withdrawal request adds new request to the withdrawal request queue, so long as a sufficient fee is provided. \"\"\" # Verify sufficient fee was provided. fee = get_fee() require(msg.value >= fee, 'Insufficient value for fee') # Increment withdrawal request count. count = sload(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT) sstore(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_COUNT_STORAGE_SLOT, count + 1) # Insert into queue. queue_tail_index = sload(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_QUEUE_TAIL_STORAGE_SLOT) queue_storage_slot = WITHDRAWAL_REQUEST_QUEUE_STORAGE_OFFSET + queue_tail_index * 3 sstore(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, queue_storage_slot, msg.sender) sstore(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, queue_storage_slot + 1, validator_pubkey[0:32]) sstore(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, queue_storage_slot + 2, validator_pubkey[32:48] ++ uint64_to_little_endian(amount)) sstore(WITHDRAWAL_REQUEST_PREDEPLOY_ADDRESS, WITHDRAWAL_REQUEST_QUEUE_TAIL_S"
+}

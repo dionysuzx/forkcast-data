@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "channel": "networking",
+  "date": "2024-04-03",
+  "messageCount": 21,
+  "sourceHash": "ce8821e9cd293d643635e5347fc1465c9e6e536f16b413158bf4401db11839d3",
+  "searchText": "I think its a good idea. In principle it would save us a lot, as the network layer would de-duplicate most of the data we're seeing on the subnets. However, as <@755590043632140352> points out there are complications we'd need to handle. It introduces a bunch more error modes. For example, validators making attestations with unknown attestation data roots. Handling this has problems that might degrade the propagation. For example, say you receive an attestation but haven't seen the attestation data. A parallel to this is an attestation that references a block we haven't seen. In this case we request the unknown block from the peer via an RPC method. We can do this because the gossip propagation rules state to only propagate the attestation if you know the block it targets. Now if we were to do this for attestations, we would need an RPC method to request attestation_data and we would need to add propagation rules that say not to propagate attestions without having seen the data (this could significantly slow attestation propagation). An alternative, could be to just ignore the attestation (we could lose attestations in this case) or propagate regardless (but this could lead to potential DOS vectors by validators sending junk). I think the best approach here isn't trivial. Secondly, as <@755590043632140352> mentions with the attestation data, we typically sign the message to prevent random spam from anyone sending junk on gossipsub. As soon as we add a signature, then the messages are unique and gossipsub cannot de-duplicate them (this is an annoying thing that is currently happening on the aggregate topics). If we add a signature, then we lose the potential bandwidth savings from de-duplicating all the data, because all the data is again unique and we're back to square 1. Not adding a signature, opens up a free for all where anyone can publish attestation data. We could use peer-scoring to potentially try to handle DOS vectors here. All in all, i think its a good idea, but we'd need to find elegant solutions to handling the extra race-conditions and error modes imo. So I do not think a DDOS vector is feasible with my design for a few reasons: - in the current design,, Attestation Data is checked before signatures and it is computationally cheap when compared to signatures verifications - Pubsub already filters out already seen messages and the attestation data input space is limited: the gossip checks only allow for specific beacon block roots and checkpoints for example thus, I think that the DDOS vectors are the same as with the current design. Regarding the added complexity for attestation processing, clients queues attestations/blocks for future execution, what road-blockers are there? Not saying this does not add complexity, definetely it does but it is not a new concept to the specs per say Oh btw this format change is only in subnets/aggregates not in blocks/slashings It is useless in blocks because attestations have repetead roots and snappy takes care of those I should make either a post on ethereum-magicians or an EIP just to put my exact thoughts on paper perhaps with some diagrams fwi, i recorded network activity on one of my nodes for 10 mins and made this pie chart showing the traffic distribution I could be misunderstanding something. But couldn't anyone come along and make an `AttestationData` that points to any random root/source/target (provided its valid) and send that. It costs virtually nothing to send. But that message will then get amplified to every single node on the network. Although the verification checks are small (they could still require db reads for old checkpoints) and if an attacker does this for every single possible valid AttestationData and every single message gets amplified to every node (we also get duplicates in gossipsub) won't this DOS bandwidth and potentially node IOs? `clients queues attestations/blocks for future execution,` Yes, but this is not the same as queuing for propagation. For a message to transfer rapidly across gossipsub we need very fast verification. For most attestations currently we can get them, check if they are good to send to others, then immediately send them. So everyone on the network gets them in a timely manner. Currently, this happens 95+% of the time. In the new approach if we get an attestation without seeing the attestation_data, we probably shouldn't propagate it onwards unless we know the data exists. So we'd have to wait. If every node is waiting on a lot of attestations, then the propagation could be significantly delayed. The root problem here, is that we are coupling two gossipsub topics with the propagation rules and the messages being sent at the same time. To my knowledge, we don't do this anywhere currently. <@498009160982724610> I mean I would like to note that anyone can also make up any attestation with different sigs but that does not DDOS the network because we reject those peers You can also see the points below for the \"beacon block root\" case (which you used as an example) except they would become REJECT AttestationData has exponentially faster verification time than bls sig checks as its just a bunch of if statements We do this for blob sidecars, it is the same logic and concept The attestation data root would be the equivalent of the kzg commitment, to make a direct comparison * according to the constraints up there, the input space for attestation data is very limited. E.g: BeaconBlockRoot must be an ancestor of the finalized checkpoint. * If I am not mistaken pubsub uses the msg id to filter duplicates otherwise pubsub would be very inefficient. * The same scenario for the IO DDOS that you describe can happen already on the current design. Same checks applies, same lookup in db. If anything it is better with my design. * The only nodes who would not see new attestation datas would be new nodes which can underperform imo as they can catch up later The checks itself dont change, which is why computational ddos is unlikely, and the input space for attestation datas would still be too limited to just print any attestation data to publish on pubsub without a ban. And btw the exact same can happen now with regular Attestations, it does not happen because (afaik) msg id of the messages would be already advertised and the message skipped TL;DR I mean, sure, everyone can produce any message and spam it but gossip rules bans ban actor and pubsub prevents duplicates. as a matter of fact, by that logic then any IGNORE is just a spammable DDOS vector because you do not ban the peer. i can create fake messages of any sort: voluntary exits, blocks, etc... and spam it to oblivion in the same way i can do with attestation datas but this is not because they have a signature (whose verification CAN actually lead to DDOS as it happened in past mainnet incidents) but rather it is because they are open for everyone to query Lastly, I agree, it is extra complexity and maybe you can argue it is not like sidecars. but by getting to the bones of it, i **think** that DDOS-wise the garantees are the same (if not slightly better) even if the finalized checkpoint is many blocks behind and you get flodded with unseen attestation datas, the end result would be better bandwidth anyway in all likelihood fyi: https://github.com/libp2p/specs/blob/master/pubsub/gossipsub/gossipsub-v1.0.md#iwant. the message id is what gets amplified not the message itself",
+  "excerpts": [
+    {
+      "author": "agemanning",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think its a good idea. \n\nIn principle it would save us a lot, as the network layer would de-duplicate most of the data we're seeing on the subnets. \n\nHowever, as <@755590043632140352> points out there are complications we'd need to handle.\n\nIt introduces a bunch more error modes. For example, validators making attestations with unknown attestation data roots.\n\nHandling this has problems that might degrade the propagation. For example, say you receive an attestation but haven't seen the attestation data. A parallel to this is an attestation that references a block we haven't seen.  In this case we request the unknown block from the peer via an RPC method. We can do this because the gossip propagation rules state to only propagate the attestation if you know the block it targets. Now if we were to do this for attestations, we would need an RPC method to request attestation_data and we would need to add propagation rules that say not to propagate attestions without having seen the data (this could significantly slow attestation propagation). An alternative, could be to just ignore the attestation (we could lose attestations in this case) or propagate regardless (but this could lead to potential DOS vectors by validators sending junk).  I think the best approach here isn't trivial. \n\nSecondly, as <@755590043632140352> mentions with the attestation data, we typically sign the message to prevent random spam from anyone sending junk on gossipsub. As soon as we add a signature, then the messages are unique and gossipsub cannot de-duplicate them (this is an annoying thing that is currently happening on the aggregate topics). If we add a signature, then we lose the potential bandwidth savings from de-duplicating all the data, because all the data is again unique and we're back to square 1. \n\nNot adding a signature, opens up a free for all where anyone can publish attestation data. We could use peer-scoring to potentially try to handle DOS vectors here.",
+      "createdAt": "2024-04-03T04:15:14.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "All in all, i think its a good idea, but we'd need to find elegant solutions to handling the extra race-conditions and error modes imo.",
+      "createdAt": "2024-04-03T04:15:42.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So I do not think a DDOS vector is feasible with my design for a few reasons:\n\n-  in the current design,, Attestation Data is checked before signatures and it is computationally cheap when compared to signatures verifications\n- Pubsub already filters out already seen messages and the attestation data input space is limited: the gossip checks only allow for specific beacon block roots and checkpoints for example\nthus, I think that the DDOS vectors are the same as with the current design.\n\nRegarding the added complexity for attestation processing, clients queues attestations/blocks for future execution, what road-blockers are there? Not saying this does not add complexity, definetely it does but it is not a new concept to the specs per say",
+      "createdAt": "2024-04-03T13:45:16.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Oh btw this format change is only in subnets/aggregates not in blocks/slashings",
+      "createdAt": "2024-04-03T15:48:56.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "It is useless in blocks because attestations have repetead roots and snappy takes care of those",
+      "createdAt": "2024-04-03T15:49:41.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I should make either a post on ethereum-magicians or an EIP just to put my exact thoughts on paper perhaps with some diagrams",
+      "createdAt": "2024-04-03T19:24:24.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "fwi, i recorded network activity on one of my nodes for 10 mins and made this pie chart showing the traffic distribution",
+      "createdAt": "2024-04-03T20:06:01.525000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-04-03_alle_22.05.22.png",
+          "content": "4c6b97e86c727b60a2f50f071bf1996724292d11c0a69b1231be3cf137a4cbd5"
+        }
+      ]
+    },
+    {
+      "author": "agemanning",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I could be misunderstanding something. \n\nBut couldn't anyone come along and make an `AttestationData` that points to any random root/source/target (provided its valid) and send that. \nIt costs virtually nothing to send. But that message will then get amplified to every single node on the network. Although the verification checks are small (they could still require db reads for old checkpoints) and if an attacker does this for every single possible valid AttestationData and every single message gets amplified to every node (we also get duplicates in gossipsub) won't this DOS bandwidth and potentially node IOs?",
+      "createdAt": "2024-04-03T21:46:26.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "`clients queues attestations/blocks for future execution,`\n\nYes, but this is not the same as queuing for propagation. \n\nFor a message to transfer rapidly across gossipsub we need very fast verification. For most attestations currently we can get them, check if they are good to send to others, then immediately send them. So everyone on the network gets them in a timely manner. \nCurrently, this happens 95+% of the time. \n\nIn the new approach if we get an attestation without seeing the attestation_data, we probably shouldn't propagate it onwards unless we know the data exists. So we'd have to wait. If every node is waiting on a lot of attestations, then the propagation could be significantly delayed. \nThe root problem here, is that we are coupling two gossipsub topics with the propagation rules and the messages being sent at the same time. To my knowledge, we don't do this anywhere currently.",
+      "createdAt": "2024-04-03T21:51:34.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@498009160982724610>  I mean",
+      "createdAt": "2024-04-03T22:46:31.212000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_20240404-004612.png",
+          "content": "f45fc704327127b366b3558ca1a69d8ee58ea1d2f5a2099e612bd15ac67d6e33"
+        }
+      ]
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I would like to note that anyone can also make up any attestation with different sigs but that does not DDOS the network because we reject those peers",
+      "createdAt": "2024-04-03T22:47:23.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "You can also see the points below for  the \"beacon block root\" case (which you used as an example) except they would become REJECT",
+      "createdAt": "2024-04-03T22:48:07.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "AttestationData has exponentially faster verification time than bls sig checks as its just a bunch of if statements",
+      "createdAt": "2024-04-03T22:48:48.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "We do this for blob sidecars, it is the same logic and concept",
+      "createdAt": "2024-04-03T22:49:38.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The attestation data root would be the equivalent of the kzg commitment, to make a direct comparison",
+      "createdAt": "2024-04-03T22:50:30.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "* according to the constraints up there, the input space for attestation data is very limited. E.g: BeaconBlockRoot must be an ancestor of the finalized checkpoint.\n\n * If I am not mistaken pubsub uses the msg id to filter duplicates otherwise pubsub would be very inefficient.\n\n* The same scenario for the IO DDOS that you describe can happen already on the current design. Same checks applies, same lookup in db. If anything it is better with my design.\n\n* The only nodes who would not see new attestation datas would be new nodes which can underperform imo as they can catch up later",
+      "createdAt": "2024-04-03T22:58:53.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The checks itself dont change, which is why computational ddos is unlikely, and the input space for attestation datas would still be too limited to just print any attestation data to publish on pubsub without a ban. And btw the exact same can happen now with regular Attestations, it does not happen because (afaik) msg id of the messages would be already advertised and the message skipped",
+      "createdAt": "2024-04-03T23:00:15.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "TL;DR I mean, sure, everyone can produce any message and spam it but gossip rules bans ban actor and pubsub prevents duplicates. as a matter of fact, by that logic then any IGNORE is just a spammable DDOS vector because you do not ban the peer. i can create fake messages of any sort: voluntary exits, blocks, etc... and spam it to oblivion in the same way i can do with attestation datas but this is not because they have a signature (whose verification CAN actually lead to DDOS as it happened in past mainnet incidents) but rather it is because they are open for everyone to query",
+      "createdAt": "2024-04-03T23:12:23.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Lastly, I agree, it is extra complexity and maybe you can argue it is not like sidecars. but by getting to the bones of it, i **think** that DDOS-wise the garantees are the same (if not slightly better)",
+      "createdAt": "2024-04-03T23:15:31.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "even if the finalized checkpoint is many blocks behind and you get flodded with unseen attestation datas, the end result would be better bandwidth anyway in all likelihood",
+      "createdAt": "2024-04-03T23:17:09.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "fyi: https://github.com/libp2p/specs/blob/master/pubsub/gossipsub/gossipsub-v1.0.md#iwant. the message id is what gets amplified not the message itself",
+      "createdAt": "2024-04-03T23:40:26.321000+00:00",
+      "attachments": []
+    }
+  ]
+}

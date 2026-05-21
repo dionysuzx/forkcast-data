@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "pectra-public",
+  "date": "2021-08-31",
+  "messageCount": 258,
+  "sourceHash": "47480203098bf9f7c5bd724d30da28ed9a6271459dbe13157162a1d26921de12",
+  "searchText": "<@!291925846556540928> <@!301186049323958275> <@!552133098075193354> <@!425572898787426305> Here are my thoughts on coinbase address selection: From an MEV perspective, knowing the coinbase address of a block ahead of others provides a sustained advantage in the creation of more accurate execution payloads. This is because the coinbase address is available inside the evm execution and can trigger path dependent logic. To produce an accurate payload, builders must know *all* the components of the block which can cause path dependent logic. As such, it is necessary for the coinbase address to be publicly known as soon as a validator is assigned to a slot. Here are a few ways to acheive this property: 1) tie the coinbase address to a validator 2) let block builder set their own coinbase address 3) remove coinbase opcode from the evm Under option 1) the protocol would enforce that the coinbase address must be a publicly known ethereum address like the validator withdrawal keys. Special care must be taken to limit changing the coinbase address once the validator is assigned a slot. Passing the coinbase address as a part of `engine_preparePayload` is untenable because it prevents builders from constructing blocks ahead of time and therefore the coinbase address will be ignored. Under option 2) the block builders would set their own address as the coinbase address and include an out-of-band payment to the validator for inclusion (for example, using an L2). This option likely introduces counter-party risk, obfuscates payments, and increases the complexity of profit switching. Under option 3) the coinbase address can be arbitrarily picked by the validator without impacting the accuracy of a block as the coinbase address can no longer trigger path dependent logic. This option would break any contract with logic that depends on coinbase address. In order to maximize transparency and security, I recommend pursuing option 1). If no action is taken, I expect option 2) to become the default. > For maximum flexibility we would want the block builder to be able to execute a block that transfers money to the block proposer, but such that the block builder doesn't need to know the block proposer's address at the time of block build. I agree strongly with this statement > Just as there might be a public market for blocks, there is similarly a public market for transactions. The transactions need a way to publish into the global pending pool such that any block builder can build a block and receive payment from those transactions. > In the latter case, having the block builder be the coinbase actually does help, because the transaction author wants to pay the block builder, not the block proposer in this two tier model. Under option 2) the address that is passed in the `engine_preparePayload` should be used to make the payment to the proposer, right? How would a proposer know the size of this payment without executing a block? Post-state proof. Option 1) would require adding a new field to the validator record. We can't use `withdrawal_credentials` for this purpose unless BLS credentials are deprecated and nobody in the system uses it. > Ultimately it should be up to the proposer to select whichever block they want, for whatever reasons they want. Otherwise we're back in to restricting models. This is not always true, as there are proposer behaviors which can be considered harmful to the network: - accepting bribes in tokens other than eth - performing attestation bribery For my understanding, is this related to the system *after* proposer/builder separation is introduced? Ideally, we'd have a proof linked to a block hash (a hash of an execution block). This would allow for reading the size of a bribe without revealing any information on the block body and do this fast enough to pick up the best block builder proposal. Yeah, you can do that today and after The Merge. When you give the block header to the proposer, you would *also* give them a proof of their balance after the block that is rooted to the state root for that block. Doesn't it need all block header fields today? Header fields yes, body no. It is the body that the block builder wants to keep secret. Right, curious if this scheme is sensitive to revealing block header fields or not. For instance, is `coinbase` reveal acceptable? <@!273808422753796097> can you expand on this? the only case I can think of is censorship from buying the full block space over multiple blocks - I always assumed it was a feature not a bug since validators have this power regardless <vbuterin> Expand on what specifically? <vbuterin> The builder driven censorship I am basically describing is: a builder makes a block not containing transactions that they want to censor, and then the builder themselves pays for the bribe to make their blocks win the auction despite missing out on a source of txfees <vbuterin> It's a simple attack, though it's also easy to see why the griefing factors are heavily against the censor <vbuterin> *unless* the builder has access to some proprietary tx choosing logic that make them reliably more profitable than the rest of the builders. In that case, they have some margin that they can censor for free <vbuterin> though even then, the most that they can do is force the victims to resubmit with high priority fees Keeping thinking on it. It won't work if the address of the proposer is not known in advance. It should either be publicly known or communicated somehow to block builders <vbuterin> Ah this is why I always thought in this approach the COINBASE opcode would just map to the builder and not the proposer Yes, the builder needs *all* properties of the block up front in order to build a complete block. <vbuterin> right, so the builder sets the coinbase <vbuterin> > Under option 2) the block builders would set their own address as the coinbase address and include an out-of-band payment to the validator for inclusion (for example, using an L2). This option likely introduces counter-party risk, obfuscates payments, and increases the complexity of profit switching. <vbuterin> Ah, I see you responded to this suggestion <vbuterin> THe payment does not have to be out of band! <vbuterin> In all existing proposals, the payment is part of the header that the builder submits and so is done in protocol <vbuterin> No counterparty risk involved I suspect there will be significant politics involved wen trying to reduce validator power as validators have and even stronger economic interest in mev extraction relative to miners <vbuterin> I think realistically validators don't yet have strong beliefs about their entitlements (beyond basic things like \"withdrawals get implemented eventually\" and \"there should be a good reason to change the issuance schedule\") <vbuterin> So they don't really care about losing fine-grained block selection power I still favor the option of \"validator suggests a coinbase in the prepareBlock payload, execution engine can choose to ignore it\". <vbuterin> wait what's prepareBlock? The message from consensus client to execution client that says \"start building a block with these details, I'll be back shortly to ask for it\". `preparePayload` + `getPayload` is a new couple of methods that supplants `assemblePayload` <vbuterin> Are we talking about the same thing here? It is when the consensus client provides randao & timestamp to the execution client (both of which are required for the execution client to build a block). I thought so. 😄 <vbuterin> If the builder (and not the proposer) is building a block, then it's not the validator calling any kind of assembly method right The consensus client has to give some details to the execution client before it can *start* building a valid block (RANDAO + timestamp). This is gonna be two different ways of getting an execution payload if we keep the way optional <vbuterin> right <vbuterin> So, post-merge timestamp is fixed for a given slot there will be no single execution client in case of block builder market, there will be a network of them Is the idea that the block builder will figure that out \"on their own\"? <vbuterin> Ooh now that I think about it, proposer/builder separation is a good reason to NOT make the current-slot randao accessible Can the RANDAO be figured out out of band? Or is the current slot validator the only one who knows it? <vbuterin> Only the current slot validator knows it It shouldn't be known in advance actually <vbuterin> That's the point, it's a commit-reveal 😖 <vbuterin> We could add an extra step where the proposer broadcasts their randao, but.... that feels ugly <vbuterin> One whole extra step in the block creation process *just* for a randomness gadget <vbuterin> Just make randao return the previous-slot randao So we have to choose between a block builder market or on-chain randomness or protocol complexity? RANDAO returning previous slot means it is prone to manipulation? <vbuterin> I don't think making RANDAO return the previous-slot randao is complexity Then builders will have to listen to beacon chain to get the randao mix. It should be exposed via API of BN <vbuterin> No more than RANDAO returning current slot imo (re @merge_chat_bot: <Micah> RANDAO returning previous slot means it is prone to manipulation?) Because now someone knows next-block's random number before previous block. Right, while in case of current slot it is only known to the proposer <vbuterin> If an app is manipulable in the case where someone can stick transactions in while knowing the RANDAO, then in any case it is vulnerable to manipulation by the proposer Prior to the construction of block `n`, the validator for slot `n+1` can know what the RANDAO value for block `n+1` will be, right? <vbuterin> So such apps are not secure regardless <vbuterin> No, they need the slot n block to know that (re @merge_chat_bot: <Micah> Prior to the construction of block `n`, the validator for slot `n+1` can know what the RANDAO value for block `n+1` will be, right?) You could pull that from `/eth/v1/beacon/blocks/head` In this \"just use the previous RANDAO\" scenario, the RANDAO for slot `n` would become available to the EVM in the block in slot `n+1` IIUC? There is a _mix_ not a reveal that is used into a block <vbuterin> yes (re @merge_chat_bot: <Micah> In this \"just use the previous RANDAO\" scenario, the RANDAO for slot `n` would become available to the EVM in the block in slot `n+1` IIUC?) So you'd have to pull it from state? Or is it held anywhere else? Btw, single leader election makes the `coinbase` in the validator record useless, right? <vbuterin> The purpose of single leader election is to make future proposers unknowable until the proposer themselves publishes a block with a proof showing they're entitled to produce it either from state if this is for the previous slot or from state + mix in the reveal from the block in case of a current slot <vbuterin> So the proposer pre-advertising themselves in any way already contravenes SSLE <vbuterin> yeah it would have to be pulled from the state (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> either from state if this is for the previous slot or from state + mix in the reveal from the block in case of a current slot) Right, but there is an option 1) listed by <@!385978868131168259> that requires coinbase to be publicly known address <vbuterin> But the prev block randao is already in the state, fortunately <vbuterin> Because it is needed to compute the current block randao yes <vbuterin> Right, so if SSLE is in the roadmap, then that option is a no go (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> Right, but there is an option 1) listed by <@385978868131168259> that requires coinbase to be publicly known address) What is SSLE? <vbuterin> single secret leader election <vbuterin> Also, the whole concept of builder/proposer separation is built on the idea that the builder collects all the fees, and the only mechanism by which the proposer ",
+  "excerpts": [
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!291925846556540928> <@!301186049323958275> <@!552133098075193354> <@!425572898787426305> Here are my thoughts on coinbase address selection:\n\nFrom an MEV perspective, knowing the coinbase address of a block ahead of others provides a sustained advantage in the creation of more accurate execution payloads. This is because the coinbase address is available inside the evm execution and can trigger path dependent logic. To produce an accurate payload, builders must know *all* the components of the block which can cause path dependent logic. As such, it is necessary for the coinbase address to be publicly known as soon as a validator is assigned to a slot.\n\nHere are a few ways to acheive this property:\n1) tie the coinbase address to a validator\n2) let block builder set their own coinbase address\n3) remove coinbase opcode from the evm\n\nUnder option 1) the protocol would enforce that the coinbase address must be a publicly known ethereum address like the  validator withdrawal keys. Special care must be taken to limit changing the coinbase address once the validator is assigned a slot. Passing the coinbase address as a part of `engine_preparePayload` is untenable because it prevents builders from constructing blocks ahead of time and therefore the coinbase address will be ignored.\n\nUnder option 2) the block builders would set their own address as the coinbase address and include an out-of-band payment to the validator for inclusion (for example, using an L2). This option likely introduces counter-party risk, obfuscates payments, and increases the complexity of profit switching.\n\nUnder option 3) the coinbase address can be arbitrarily picked by the validator without impacting the accuracy of a block as the coinbase address can no longer trigger path dependent logic. This option would break any contract with logic that depends on coinbase address.\n\nIn order to maximize transparency and security, I recommend pursuing option 1). If no action is taken, I expect option 2) to become the default.",
+      "createdAt": "2021-08-31T12:11:57.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> For maximum flexibility we would want the block builder to be able to execute a block that transfers money to the block proposer, but such that the block builder doesn't need to know the block proposer's address at the time of block build.\nI agree strongly with this statement",
+      "createdAt": "2021-08-31T12:13:22.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Just as there might be a public market for blocks, there is similarly a public market for transactions.  The transactions need a way to publish into the global pending pool such that any block builder can build a block and receive payment from those transactions.\n> In the latter case, having the block builder be the coinbase actually does help, because the transaction author wants to pay the block builder, not the block proposer in this two tier model.",
+      "createdAt": "2021-08-31T12:17:05.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Under option 2) the address that is passed in the `engine_preparePayload` should be used to make the payment to the proposer, right? How would a proposer know the size of this payment without executing a block?",
+      "createdAt": "2021-08-31T12:17:20.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Post-state proof.",
+      "createdAt": "2021-08-31T12:19:38.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Option 1) would require adding a new field to the validator record. We can't use `withdrawal_credentials` for this purpose unless BLS credentials are deprecated and nobody in the system uses it.",
+      "createdAt": "2021-08-31T12:26:33.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Ultimately it should be up to the proposer to select whichever block they want, for whatever reasons they want.  Otherwise we're back in to restricting models.\nThis is not always true, as there are proposer behaviors which can be considered harmful to the network:\n- accepting bribes in tokens other than eth\n- performing attestation bribery",
+      "createdAt": "2021-08-31T12:36:58.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For my understanding, is this related to the system *after* proposer/builder separation is introduced?",
+      "createdAt": "2021-08-31T12:39:06.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ideally, we'd have a proof linked to a block hash (a hash of an execution block). This would allow for reading the size of a bribe without revealing any information on the block body and do this fast enough to pick up the best block builder proposal.",
+      "createdAt": "2021-08-31T12:44:54.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, you can do that today and after The Merge.",
+      "createdAt": "2021-08-31T12:46:01.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "When you give the block header to the proposer, you would *also* give them a proof of their balance after the block that is rooted to the state root for that block.",
+      "createdAt": "2021-08-31T12:46:39.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Doesn't it need all block header fields today?",
+      "createdAt": "2021-08-31T12:46:40.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Header fields yes, body no.",
+      "createdAt": "2021-08-31T12:46:50.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is the body that the block builder wants to keep secret.",
+      "createdAt": "2021-08-31T12:47:01.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, curious if this scheme is sensitive to revealing block header fields or not. For instance, is `coinbase` reveal acceptable?",
+      "createdAt": "2021-08-31T12:47:09.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!273808422753796097> can you expand on this? the only case I can think of is censorship from buying the full block space over multiple blocks - I always assumed it was a feature  not a bug since validators have this power regardless",
+      "createdAt": "2021-08-31T12:49:52.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Expand on what specifically?",
+      "createdAt": "2021-08-31T12:50:14.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> The builder driven censorship I am basically describing is: a builder makes a block not containing transactions that they want to censor, and then the builder themselves pays for the bribe to make their blocks win the auction despite missing out on a source of txfees",
+      "createdAt": "2021-08-31T12:54:45.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> It's a simple attack, though it's also easy to see why the griefing factors are heavily against the censor",
+      "createdAt": "2021-08-31T12:55:05.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> *unless* the builder has access to some proprietary tx choosing logic that make them reliably more profitable than the rest of the builders. In that case, they have some margin that they can censor for free",
+      "createdAt": "2021-08-31T12:55:55.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> though even then, the most that they can do is force the victims to resubmit with high priority fees",
+      "createdAt": "2021-08-31T12:56:19.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Keeping thinking on it. It won't work if the address of the proposer is not known in advance. It should either be publicly known or communicated somehow to block builders",
+      "createdAt": "2021-08-31T12:56:48.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Ah this is why I always thought in this approach the COINBASE opcode would just map to the builder and not the proposer",
+      "createdAt": "2021-08-31T12:57:29.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, the builder needs *all* properties of the block up front in order to build a complete block.",
+      "createdAt": "2021-08-31T12:58:02.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> right, so the builder sets the coinbase",
+      "createdAt": "2021-08-31T12:58:16.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> > Under option 2) the block builders would set their own address as the coinbase address and include an out-of-band payment to the validator for inclusion (for example, using an L2). This option likely introduces counter-party risk, obfuscates payments, and increases the complexity of profit switching.",
+      "createdAt": "2021-08-31T12:58:18.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Ah, I see you responded to this suggestion",
+      "createdAt": "2021-08-31T12:58:23.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> THe payment does not have to be out of band!",
+      "createdAt": "2021-08-31T12:58:29.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> In all existing proposals, the payment is part of the header that the builder submits and so is done in protocol",
+      "createdAt": "2021-08-31T12:58:44.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> No counterparty risk involved",
+      "createdAt": "2021-08-31T12:58:51.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "thegostep",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I suspect there will be significant politics involved wen trying to reduce validator power as validators have and even stronger economic interest in mev extraction relative to miners",
+      "createdAt": "2021-08-31T12:58:54.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> I think realistically validators don't yet have strong beliefs about their entitlements (beyond basic things like \"withdrawals get implemented eventually\" and \"there should be a good reason to change the issuance schedule\")",
+      "createdAt": "2021-08-31T12:59:59.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So they don't really care about losing fine-grained block selection power",
+      "createdAt": "2021-08-31T13:00:17.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I still favor the option of \"validator suggests a coinbase in the prepareBlock payload, execution engine can choose to ignore it\".",
+      "createdAt": "2021-08-31T13:01:15.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> wait what's prepareBlock?",
+      "createdAt": "2021-08-31T13:01:32.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The message from consensus client to execution client that says \"start building a block with these details, I'll be back shortly to ask for it\".",
+      "createdAt": "2021-08-31T13:02:02.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`preparePayload` + `getPayload` is a new couple of methods that supplants `assemblePayload`",
+      "createdAt": "2021-08-31T13:02:14.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Are we talking about the same thing here?",
+      "createdAt": "2021-08-31T13:02:29.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is when the consensus client provides randao & timestamp to the execution client (both of which are required for the execution client to build a block).",
+      "createdAt": "2021-08-31T13:02:34.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I thought so.  😄",
+      "createdAt": "2021-08-31T13:02:39.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> If the builder (and not the proposer) is building a block, then it's not the validator calling any kind of assembly method",
+      "createdAt": "2021-08-31T13:02:42.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-08-31T13:02:50.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The consensus client has to give some details to the execution client before it can *start* building a valid block (RANDAO + timestamp).",
+      "createdAt": "2021-08-31T13:03:13.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is gonna be two different ways of getting an execution payload if we keep the way optional",
+      "createdAt": "2021-08-31T13:03:15.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> right",
+      "createdAt": "2021-08-31T13:03:27.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So, post-merge timestamp is fixed for a given slot",
+      "createdAt": "2021-08-31T13:03:36.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "there will be no single execution client in case of block builder market, there will be a network of them",
+      "createdAt": "2021-08-31T13:03:49.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is the idea that the block builder will figure that out \"on their own\"?",
+      "createdAt": "2021-08-31T13:03:50.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Ooh now that I think about it, proposer/builder separation is a good reason to NOT make the current-slot randao accessible",
+      "createdAt": "2021-08-31T13:03:53.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Can the RANDAO be figured out out of band?",
+      "createdAt": "2021-08-31T13:03:58.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or is the current slot validator the only one who knows it?",
+      "createdAt": "2021-08-31T13:04:13.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Only the current slot validator knows it",
+      "createdAt": "2021-08-31T13:04:25.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It shouldn't be known in advance actually",
+      "createdAt": "2021-08-31T13:04:27.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> That's the point, it's a commit-reveal",
+      "createdAt": "2021-08-31T13:04:29.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "😖",
+      "createdAt": "2021-08-31T13:04:35.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> We could add an extra step where the proposer broadcasts their randao, but.... that feels ugly",
+      "createdAt": "2021-08-31T13:04:35.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> One whole extra step in the block creation process *just* for a randomness gadget",
+      "createdAt": "2021-08-31T13:04:46.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Just make randao return the previous-slot randao",
+      "createdAt": "2021-08-31T13:05:02.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So we have to choose between a block builder market or on-chain randomness or protocol complexity?",
+      "createdAt": "2021-08-31T13:05:17.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "RANDAO returning previous slot means it is prone to manipulation?",
+      "createdAt": "2021-08-31T13:05:36.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> I don't think making RANDAO return the previous-slot randao is complexity",
+      "createdAt": "2021-08-31T13:05:40.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then builders will have to listen to beacon chain to get the randao mix. It should be exposed via API of BN",
+      "createdAt": "2021-08-31T13:05:41.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> No more than RANDAO returning current slot imo (re @merge_chat_bot: <Micah> RANDAO returning previous slot means it is prone to manipulation?)",
+      "createdAt": "2021-08-31T13:05:48.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because now someone knows next-block's random number before previous block.",
+      "createdAt": "2021-08-31T13:05:52.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, while in case of current slot it is only known to the proposer",
+      "createdAt": "2021-08-31T13:06:09.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> If an app is manipulable in the case where someone can stick transactions in while knowing the RANDAO, then in any case it is vulnerable to manipulation by the proposer",
+      "createdAt": "2021-08-31T13:06:25.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Prior to the construction of block `n`, the validator for slot `n+1` can know what the RANDAO value for block `n+1` will be, right?",
+      "createdAt": "2021-08-31T13:06:29.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So such apps are not secure regardless",
+      "createdAt": "2021-08-31T13:06:33.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> No, they need the slot n block to know that (re @merge_chat_bot: <Micah> Prior to the construction of block `n`, the validator for slot `n+1` can know what the RANDAO value for block `n+1` will be, right?)",
+      "createdAt": "2021-08-31T13:06:45.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You could pull that from `/eth/v1/beacon/blocks/head`",
+      "createdAt": "2021-08-31T13:07:26.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In this \"just use the previous RANDAO\" scenario, the RANDAO for slot `n` would become available to the EVM in the block in slot `n+1` IIUC?",
+      "createdAt": "2021-08-31T13:07:53.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is a _mix_ not a reveal that is used into a block",
+      "createdAt": "2021-08-31T13:07:58.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> yes (re @merge_chat_bot: <Micah> In this \"just use the previous RANDAO\" scenario, the RANDAO for slot `n` would become available to the EVM in the block in slot `n+1` IIUC?)",
+      "createdAt": "2021-08-31T13:08:27.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So you'd have to pull it from state?  Or is it held anywhere else?",
+      "createdAt": "2021-08-31T13:09:12.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Btw, single leader election makes the `coinbase` in the validator record useless, right?",
+      "createdAt": "2021-08-31T13:09:19.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> The purpose of single leader election is to make future proposers unknowable until the proposer themselves publishes a block with a proof showing they're entitled to produce it",
+      "createdAt": "2021-08-31T13:09:48.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "either from state if this is for the previous slot or from state + mix in the reveal from the block in case of a current slot",
+      "createdAt": "2021-08-31T13:09:50.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So the proposer pre-advertising themselves in any way already contravenes SSLE",
+      "createdAt": "2021-08-31T13:10:01.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> yeah it would have to be pulled from the state (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> either from state if this is for the previous slot or from state + mix in the reveal from the block in case of a current slot)",
+      "createdAt": "2021-08-31T13:10:35.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, but there is an option 1) listed by <@!385978868131168259> that requires coinbase to be publicly known address",
+      "createdAt": "2021-08-31T13:10:42.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> But the prev block randao is already in the state, fortunately",
+      "createdAt": "2021-08-31T13:10:42.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Because it is needed to compute the current block randao",
+      "createdAt": "2021-08-31T13:10:48.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2021-08-31T13:10:56.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Right, so if SSLE is in the roadmap, then that option is a no go (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> Right, but there is an option 1) listed by <@385978868131168259> that requires coinbase to be publicly known address)",
+      "createdAt": "2021-08-31T13:11:00.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is SSLE?",
+      "createdAt": "2021-08-31T13:11:13.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> single secret leader election",
+      "createdAt": "2021-08-31T13:11:19.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Also, the whole concept of builder/proposer separation is built on the idea that the builder collects all the fees, and the only mechanism by which the proposer gets paid is the bribe in the header",
+      "createdAt": "2021-08-31T13:11:31.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and it is in the roadmap, isn't it?",
+      "createdAt": "2021-08-31T13:11:38.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> so far it is!",
+      "createdAt": "2021-08-31T13:11:44.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "cool!",
+      "createdAt": "2021-08-31T13:11:49.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Any deviation from that means that we sacrifice the principle that the proposer can just run the algorithm of \"choose the header with the biggest bribe\" (the goal being that keeping proposer algorithms simpler promotes staking decentralization and makes MPC staking pools easier to build) (re @vbuterin: Also, the whole concept of builder/proposer separation is built on the idea that the builder collects all the fees, and the only mechanism by which the proposer gets paid is the bribe in the header)",
+      "createdAt": "2021-08-31T13:12:15.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Have you thought about it as a new payment mechanism introduced to the beacon chain? It might be complex but won't require tricks with revealing all the information that is required to build a block which we're discussing currently",
+      "createdAt": "2021-08-31T13:13:08.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe there are several people who want the ability for a proposer to be able to tell their connected execution engine where to send fees.",
+      "createdAt": "2021-08-31T13:13:29.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> I feel like talking about  execution engines and proposers is mixing layers",
+      "createdAt": "2021-08-31T13:13:54.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Execution engine is part of a client",
+      "createdAt": "2021-08-31T13:13:58.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Proposer / builder is a separation between two economic actors",
+      "createdAt": "2021-08-31T13:14:05.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But proposer's execution engine won't participate in a block proposal if a proposer chooses to use block builder market",
+      "createdAt": "2021-08-31T13:14:35.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> I think for builder/proposer separation, the \"header contains a bribe\" thing that's already in the sharding PoC is fine enough, but I would be fine with a separate on-beacon-chain transfer mechanism (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> Have you thought about it as a new payment mechanism introduced to the beacon chain? It might be complex but won't require tricks with revealing all the information that is required to build a block which we're discussing currently)",
+      "createdAt": "2021-08-31T13:14:39.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry, there are people who want the consensus client to be able to tell the execution client where to send fees.  This would be for scenarios where you have multiple validators, running on multiple consensus clients, backed by a single execution client.  You might legitimately do this for privacy reasons, or you might illegitimately do this for pooling reasons or execution client outsourcing reasons.",
+      "createdAt": "2021-08-31T13:14:47.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So, if the builder is not the proposer, then the builder creates the block and chooses the coinbase, and there's an RPC method of the execution engine that does all of this",
+      "createdAt": "2021-08-31T13:15:43.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> And if the proposer self-proposes, then they do the same thing",
+      "createdAt": "2021-08-31T13:15:51.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> what's the problem?",
+      "createdAt": "2021-08-31T13:15:53.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> Is this just a question of what params to include in the \"create a block proposal\" RPC method (regardless of which economic actor ends up using that method)?",
+      "createdAt": "2021-08-31T13:16:17.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not opposed to making the coinbase optional in the prepare block method.",
+      "createdAt": "2021-08-31T13:16:21.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, it should be a separate method which pulls the best builder's proposal",
+      "createdAt": "2021-08-31T13:16:25.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not a massive fan of the general idea of pushing more payments on to the consensus layer.  If there is to be a bribe from the block builder to the block proposer it should be a tx on the execution client if possible.",
+      "createdAt": "2021-08-31T13:16:30.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> The problem with that is that then you need a separate proof to prove to the proposer that the tx is there (re @merge_chat_bot: <jgm> Not a massive fan of the general idea of pushing more payments on to the consensus layer.  If there is to be a bribe from the block builder to the block proposer it should be a tx on the execution client if possible.)",
+      "createdAt": "2021-08-31T13:16:57.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> So it ends up creating considerably more protocol complexity than just making the header (which is needed anyway) have a fee field",
+      "createdAt": "2021-08-31T13:17:15.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> I definitely think that the proposer should NOT have any influence over block execution if they are not building the block themselves",
+      "createdAt": "2021-08-31T13:17:48.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, but it introduces some complexity that is related to proposer revealing some information in order for builders to build a block. Some of this data like randao will be known only a slot before. Proposer's address that the payments go to should be somehow communicated, through the network probably",
+      "createdAt": "2021-08-31T13:18:16.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> It just complicates things if that happens (example: it could make it harder for builders to determine how much fees they collect in a block, and so what bribe they can safely pay to the proposer)",
+      "createdAt": "2021-08-31T13:18:21.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My preference:\nShort term: Coinbase parameter on prepareBlock is optional.  Execution client can ignore it or use it.\nLong term: PROPOSER opcode or special PAY_PROPOSER transaction type or PROPOSER_PAYMENT header field is introduced that allows a block to pay the proposer, without knowing who that is in advance.  This would require more significant changes than are reasonable for The Merge, but I think long term this would be ideal as it would give builders a way to pay proposers.",
+      "createdAt": "2021-08-31T13:18:54.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<vbuterin> The good thing about the builder -> proposer payment being in the header is that the builder can make the payment without needing to know who the proposer is! (re @merge_chat_bot: <Mikhail Kalinin [mkalinin]> Yes, but it introduces some complexity that is related to proposer revealing some information in order for builders to build a block. Some of this data like randao will be known only a slot before. Proposer's address that the payments go to should be somehow communicated, through the network probably)",
+      "createdAt": "2021-08-31T13:18:57.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If a header have a fee field then the corresponding proof should be passed anyway, no?",
+      "createdAt": "2021-08-31T13:19:12.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No, headers will be visible to proposers, bodies are what is secret.",
+      "createdAt": "2021-08-31T13:19:28.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The proposer would see dozens or hundreds of headers that they can compare and choose the one they want.  Then they would pick the \"best\", and it is up to the builder at that point to provide the body.",
+      "createdAt": "2021-08-31T13:20:04.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Doesn't that mean that the bribe transfer is stuck on the consensus layer though?  Unless there is an additional field of execution address attached somewhere by the block publisher, there will be no information on where the bribe is to be sent.",
+      "createdAt": "2021-08-31T13:20:07.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe at the least sending ETH to the proposer is \"complicated\" and will require engineering not appropriate for The Merge.",
+      "createdAt": "2021-08-31T13:20:39.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "sorry, but I don't understand how *only* the *fee address* in the header would be enough information to redeem the bribe",
+      "createdAt": "2021-08-31T13:21:27.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Though I do like that as a long term solution.",
+      "createdAt": "2021-08-31T13:21:29.613000+00:00",
+      "attachments": []
+    }
+  ]
+}

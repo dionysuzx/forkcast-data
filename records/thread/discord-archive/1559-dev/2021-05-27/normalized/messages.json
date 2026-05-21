@@ -1,0 +1,686 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-05-27",
+  "messageCount": 80,
+  "sourceHash": "5f67192aedf3708f771710d3e452b009a27ffcf97aaa99f96fac9c74b193451c",
+  "searchText": "We integrated the 1559 blockchain tests today and ran into some issues with the `<,>` vs `<=,>=` boundaries, I added some more details here https://github.com/ethereum/tests/pull/837#issuecomment-849201825 Is anyone planning on building a complex system for `minGasPremium` that miners use, or is everyone planning on just having a launch config variable for it (or perhaps repurposing the already existing `minGasPrice` config variable)? Yes we plan to dynamically adjust it to the MEV value of a block (trivial as MEV reward is known before adding any other tx) it's known to the miner, but not to the user. would you consider adding transactions that may have set their premium below the \"true\" `minGasPremium` you have for the block? otherwise users would always need to bid the upper bound of the `minGasPremium` range to guarantee next-block inclusion by this i mean, instead of setting dynamically `minGasPremium` block-to-block, would you consider using an optimistic average instead, that is updated less frequently? No as increases our risk of uncling a block What is the planned algorithm for this adjustment? Just the `* 500,000,000` that was suggested previously? There is no upper bound. We have seen MEV that is 100 ETH before. And in theory we may see even bigger in the future. (100 ETH MEV in a block using the simple algorithm is 50 nanoeth / gas) I've updated the baikal sealer to run the latest PR from <@!202397237962211328> . Please check if it works better? At least it appears to have `pending` now And blocks looks full too I'm trying to spam the network and all the blocks had transactions. I have some issues with besu's ethstats but nodes are fine. looks like we have the issue again. A sealer makes empty blocks Okay this is some serious spamming 😅 `INFO [05-27|11:53:34] Executed blocks count=24 first=42990 hash=6e5eb5f3... hardfork=london last=43014 hash=e034d40c... with txs=12462` Fun easter egg Which sealer makes the empty blocks? Definitely Nethermind. I stopped Nethermind for a moment to test it then we had full blocks. <@!680337202521440470> if it is not a problem for you could you continue spamming the network? Yes I restarted the spam Hi, I synced geth with baikal and tried sending some 1559 txs but I'm not sure if they are being really being interpreted as 1559. Does anyone have an example of a correct 1559 tx payload? (I'm not sure if this is the right channel to ask this, please let me know if it isn't) Here's the last tx I tried: ``` { from: a, to: a, maxFeePerGas: \"0x3c9aca00\", maxPriorityFeePerGas: \"0x100\", gas: \"0x10000\", chainId: \"0x66a\", accessList: [] } ``` This is the tx: http://18.224.51.102:3000/tx/0x766fd0d81c788723263f94bef52aec5d658a4cdbad8ea99c7af25340d56468ae If I then fetch the tx with `eth_getTransaction`, the type is 0x1 instead of 0x2. If I remove the `accessList`, it just shows as a legacy tx. Then it's not a 1559 type What should I change in the tx payload to make it a 1559? I assumed including the `maxFeePerGas` and `maxPriorityFeePerGas` fields would be enough it happens again a sealer produces empty blocks <@!758579010027782144> http://18.224.51.102:3000/block/43226 Thx, I know. I am diagnosing it We have now released London/EIP-1559 compatible versions of our libraries (in particular the EthereumJS VM and our Tx library), see https://github.com/ethereumjs/ethereumjs-monorepo/releases for a release overview. <@!130156954273316865> It is not really apparent what the resulting serialization format is from what you are posting as your transaction value input. And if feeding a tx library with a `maxPriorityFeePerGas` field will result in the creation of a 1559 tx is likely depending on the implementation. With the `@ethereumjs/tx` library you can create a 1559 tx with `FeeMarketEIP1559Transaction.fromTxData()`, this will automatically result in a 1559 tx which you can then use to create the correct serialized tx payload with `tx.serialize()`. See the tx release notes from the link above for a more complete example. Generally note that the tx payload format has changed with the introduction of typed txs, for 1559 it is e.g. `0x02 || rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, access_list, signatureYParity, signatureR, signatureS])`, see the respective section in the EIP: https://eips.ethereum.org/EIPS/eip-1559#abstract A tx payload now always starts with a first byte for the tx type. So if it is not `0x02` for 1559 tx, you can already see that your payload is malformed. Yeah, I'm interested in the JSON-RPC interface because that's what we need to implement in Hardhat, so I'm trying to understand how geth implements that, and be able to experiment with it I just changed my spam a bit with more diversity for the MaxFeePerGas <@!552133098075193354> where is actually `eth_sendTransaction` in the RPC spec https://github.com/ethereum/eth1.0-specs/blob/master/json-rpc/spec.json ? Am I missing something? Is this spec complete? A sealer seems to have trouble filling the blocks when I spam with 1559 transactions and a random maxFeePerGas between 0 and 50,000,000,000. I think it's Geth because Besu produces well and I think Nethermind is not producing now ? http://18.224.51.102:3000/block/43441 http://18.224.51.102:3000/block/43443 Well, it does have a `Transaction` object with a `oneOf([maxFeePerGas, maxPriorityFeePerGas], [gasPrice])` entry, so that matches my guess of how the RPC would work (although it also has `gasPrice` in the list of required fields, that's probably a mistake?) <@!130156954273316865> this renders to the following in the playground https://playground.open-rpc.org/ , I guess this is correct. I was talking about `eth_sendTransaction` method not being present in the specs at all (in the `eth1.0-specs` repo). Oh yeah, I understood the missing `eth_sendTransaction` part, I was just saying that that spec seems to indicate that my tx payload was correct Maybe it's just that geth's JSON-RPC layer isn't fully implemented yet for London? I don't know Hi everyone, is there an RPC endpoint which I can publicly forward to other devs (and e.g. also promote here to <@!130156954273316865> for testing)? I know we have got 1-2 but doesn't want to just throw (half-)publicly in the ring here myself. Would this be an RPC endpoint we could eventually also add to the baikal spec document https://github.com/ethereum/eth1.0-specs/blob/master/network-upgrades/client-integration-testnets/baikal.md and promote in the Ecosystem Developer calls? //cc <@!420951281910284289> <@!552133098075193354> Guess this would be helpful for ecosystem developers to test their stuff. 🙂 What are you using to send those txs? They do show up as 1559 txs, but if I send a tx with the same values (from my address), they don't show up as type 0x02 I did a PR on web3j if you want to check https://github.com/web3j/web3j/pull/1417 <@!130156954273316865> Sample of EIP1559 transaction https://github.com/web3j/web3j/pull/1417/files#diff-6f0d1894b3790b679aa7f0abea5391f9ab05185a948af37a3d507053b2cc6249R96 Hmm, I guess web3j always creates a raw transaction, right? I suppose those work, but I'm interested in the `eth_sendTransaction` endpoint My guess is that that isn't implemented yet ah yes I use sendRawTransaction. Maybe eth_sendTransaction is not up to date 🤔 I see, thanks. <@!425269142615097345> just told me that <#804019759934078987> is the right place to ask about this, so I'll stop spamming here 😅 yes Geth's pool has few transactions in the pool (<50) we are planning a 1559 API coordination call for next week, would anyone from your team be interested in joining? definitely! ~~will add to the 1559 Cheatsheet! have you tweeted this out yet?~~ sorry, thought this was your full release Yes, I stopped Nethermind temporarily, so it looks like geth is producing empty blocks now Weird, the new geth branch seems to work well and pick up txs on mainnet. Are you sure this is not basefee oscillation? With a synthetic tx generator i guess it's possible to create such a nice oscillation pattern. It would be interesting to test with Nethermind when it will run again to see if it does the same. the maxFeePerGas is generally very high compared to the baseFee and so the vast majority of transactions are good for the current block. I could put a minimum for the maxFeePerGas at 1,000,000,000 to be sure we're still valid for the block How much is the tip? Does it reach the minimum threshold setting of geth? I rerun Nethermind, but I will stop it again to debug this thing. Geth and Nethermind are including significantly fewer transactions in the block than Besu Since the pool is also almost empty, my guess is now that these txs are filtered out by 2 of 3 implementations because of the miner tip threshold. I just changed so all transactions is at least 1,000,000,000 of maxFeePerGas (alias feecap). The baseFee is around 120,000 right now the MaxPriorityFeePerGas (alias gasPremium) is always 1,000,000,000 during this spam test It's indeed probably not the basefee. Can you try setting the tip to 10 billion? the tip it's already 1 billion for all of the transaction (no variation) . Do you think 10 billion will change something ? I can try several blocks were better without changing the tip. the issue seems to come back What, it's actually worse with 10 gwei tip? Or you didn't try that yet? If not then please do. We reused the min gasprice threshold and did not change the default value so it's probably too high now. I will do that I just changed the tip to 10 billions. it's better. do you want the spam to continue or do you prefer I stop it ? It does seem to stabilize Please continue for a little longer It's still weird, will analyze it later, i'm on my phone now. I think it comes from the fact that accounts don't have a lot of ethers anymore. if one of the genesis accounts can put in a big amount . To see if it fixes the problem 0xfe3b557e8fb62b89f4916b721be55ceb828dbd73 or this one 0x5211cea3870c7ba7c6c44b185e62eecdb864cd8c <@!471975503859810316> can you add me as friend so I can DM you an invite to the Gas API call next week? When the base fee is super low then all clients can fill up the blocks. I don't see yet how these low basefee values can even make a difference though. I think it comes from value . I'm doing transfers with value between 0.01 and 0.02 . If the sender has only 0.1 this limits the number of transactions in the block from this sender.I have two account sending between them but I think it can come from there. I don't have enough ethers after all this spam 🤔 I see the best would be to fill these accounts with ethers in order to eliminate this Indeed. Is there a baikal faucet? Or can anyone with a big genesis account supply those two addresses? It's better now with ethers 😀",
+  "excerpts": [
+    {
+      "author": "r.alxz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We integrated the 1559 blockchain tests today and ran into some issues with the `<,>` vs `<=,>=` boundaries, I added some more details here https://github.com/ethereum/tests/pull/837#issuecomment-849201825",
+      "createdAt": "2021-05-27T00:14:08.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is anyone planning on building a complex system for `minGasPremium` that miners use, or is everyone planning on just having a launch config variable for it (or perhaps repurposing the already existing `minGasPrice` config variable)?",
+      "createdAt": "2021-05-27T04:02:51.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "p_bitfly",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes we plan to dynamically adjust it to the MEV value of a block (trivial as MEV reward is known before adding any other tx)",
+      "createdAt": "2021-05-27T06:39:35.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it's known to the miner, but not to the user. would you consider adding transactions that may have set their premium below the \"true\" `minGasPremium` you have for the block? otherwise users would always need to bid the upper bound of the `minGasPremium` range to guarantee next-block inclusion",
+      "createdAt": "2021-05-27T06:45:59.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "by this i mean, instead of setting dynamically `minGasPremium` block-to-block, would you consider using an optimistic average instead, that is updated less frequently?",
+      "createdAt": "2021-05-27T06:47:03.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "p_bitfly",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No as increases our risk of uncling a block",
+      "createdAt": "2021-05-27T07:08:44.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is the planned algorithm for this adjustment?  Just the `* 500,000,000` that was suggested previously?",
+      "createdAt": "2021-05-27T07:28:23.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is no upper bound.  We have seen MEV that is 100 ETH before.",
+      "createdAt": "2021-05-27T07:28:49.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And in theory we may see even bigger in the future.",
+      "createdAt": "2021-05-27T07:29:08.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(100 ETH MEV in a block using the simple algorithm is 50 nanoeth / gas)",
+      "createdAt": "2021-05-27T07:29:24.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I've updated the baikal sealer to run the latest PR from <@!202397237962211328> . Please check if it works better?",
+      "createdAt": "2021-05-27T09:45:47.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "At least it appears to have `pending` now",
+      "createdAt": "2021-05-27T09:47:06.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And blocks looks full too",
+      "createdAt": "2021-05-27T09:48:38.868000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2021-05-27_Ethereum_Network_Status.png",
+          "content": "1b795c609074ccbb928f181e4039f69ff6596390700c6ee8572ba68319b06945"
+        }
+      ]
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm trying to spam the network and all the blocks had transactions. I have some issues with besu's ethstats but nodes are fine.",
+      "createdAt": "2021-05-27T09:48:46.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "looks like we have the issue again. A sealer makes empty blocks",
+      "createdAt": "2021-05-27T09:51:38.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2021-05-27T09:52:26.494000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "d91c4c291fb63ebf06162367d5d7120a426b8b55dda187006da894a8a66fe47e"
+        }
+      ]
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Okay this is some serious spamming 😅 `INFO [05-27|11:53:34] Executed blocks count=24 first=42990 hash=6e5eb5f3... hardfork=london last=43014 hash=e034d40c... with txs=12462`",
+      "createdAt": "2021-05-27T09:55:27.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Fun easter egg",
+      "createdAt": "2021-05-27T09:57:20.975000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_from_2021-05-27_11-56-45.png",
+          "content": "4f18216ce31844d08ace97cbfce003e0598aa4fb61e31de83f38f400fab70c77"
+        }
+      ]
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which sealer makes the empty blocks?",
+      "createdAt": "2021-05-27T10:03:22.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Definitely Nethermind. I stopped Nethermind for a moment to test it then we had full blocks.",
+      "createdAt": "2021-05-27T10:04:49.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!680337202521440470> if it is not a problem for you could you continue spamming the network?",
+      "createdAt": "2021-05-27T10:07:19.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes I restarted the spam",
+      "createdAt": "2021-05-27T10:10:54.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hi, I synced geth with baikal and tried sending some 1559 txs but I'm not sure if they are being really being interpreted as 1559. Does anyone have an example of a correct 1559 tx payload?\n\n(I'm not sure if this is the right channel to ask this, please let me know if it isn't)",
+      "createdAt": "2021-05-27T10:13:07.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Here's the last tx I tried:\n\n```\n{ from: a, to: a, maxFeePerGas: \"0x3c9aca00\", maxPriorityFeePerGas: \"0x100\", gas: \"0x10000\", chainId: \"0x66a\", accessList: [] }\n```",
+      "createdAt": "2021-05-27T10:13:41.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is the tx: http://18.224.51.102:3000/tx/0x766fd0d81c788723263f94bef52aec5d658a4cdbad8ea99c7af25340d56468ae",
+      "createdAt": "2021-05-27T10:14:08.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If I then fetch the tx with `eth_getTransaction`, the type is 0x1 instead of 0x2. If I remove the `accessList`, it just shows as a legacy tx.",
+      "createdAt": "2021-05-27T10:15:24.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then it's not a 1559 type",
+      "createdAt": "2021-05-27T10:17:49.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What should I change in the tx payload to make it a 1559?",
+      "createdAt": "2021-05-27T10:18:28.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I assumed including the `maxFeePerGas` and `maxPriorityFeePerGas` fields would be enough",
+      "createdAt": "2021-05-27T10:18:46.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it happens again a sealer produces empty blocks <@!758579010027782144> \nhttp://18.224.51.102:3000/block/43226",
+      "createdAt": "2021-05-27T10:48:34.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Thx, I know. I am diagnosing it",
+      "createdAt": "2021-05-27T10:55:06.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We have now released London/EIP-1559 compatible versions of our libraries (in particular the EthereumJS VM and our Tx library), see https://github.com/ethereumjs/ethereumjs-monorepo/releases for a release overview.",
+      "createdAt": "2021-05-27T12:02:45.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!130156954273316865> It is not really apparent what the resulting serialization format is from what you are posting as your transaction value input. And if feeding a tx library with a `maxPriorityFeePerGas` field will result in the creation of a 1559 tx is likely depending on the implementation.\n\nWith the `@ethereumjs/tx` library you can create a 1559 tx with `FeeMarketEIP1559Transaction.fromTxData()`, this will automatically result in a 1559 tx which you can then use to create the correct serialized tx payload with `tx.serialize()`. See the tx release notes from the link above for a more complete example.\n\nGenerally note that the tx payload format has changed with the introduction of typed txs, for 1559 it is e.g. `0x02 || rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, access_list, signatureYParity, signatureR, signatureS])`, see the respective section in the EIP: https://eips.ethereum.org/EIPS/eip-1559#abstract\n\nA tx payload now always starts with a first byte for the tx type. So if it is not `0x02` for 1559 tx, you can already see that your payload is malformed.",
+      "createdAt": "2021-05-27T12:14:27.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, I'm interested in the JSON-RPC interface because that's what we need to implement in Hardhat, so I'm trying to understand how geth implements that, and be able to experiment with it",
+      "createdAt": "2021-05-27T12:20:54.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just changed my spam a bit with more diversity for the MaxFeePerGas",
+      "createdAt": "2021-05-27T12:31:17.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!552133098075193354> where is actually `eth_sendTransaction` in the RPC spec https://github.com/ethereum/eth1.0-specs/blob/master/json-rpc/spec.json ? Am I missing something? Is this spec complete?",
+      "createdAt": "2021-05-27T12:32:49.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A sealer seems to have trouble filling the blocks when I spam with 1559 transactions and a random maxFeePerGas between 0 and 50,000,000,000. I think it's Geth because Besu produces well  and I think Nethermind is not producing now ?\nhttp://18.224.51.102:3000/block/43441\nhttp://18.224.51.102:3000/block/43443",
+      "createdAt": "2021-05-27T12:37:33.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2021-05-27T12:38:23.524000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "2fd59e396f50dac7b7821b94e77ca27a4740773d49cf63907a35dbe9bd70d720"
+        }
+      ]
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well, it does have a `Transaction` object with a `oneOf([maxFeePerGas, maxPriorityFeePerGas], [gasPrice])` entry, so that matches my guess of how the RPC would work (although it also has `gasPrice` in the list of required fields, that's probably a mistake?)",
+      "createdAt": "2021-05-27T12:38:38.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!130156954273316865> this renders to the following in the playground https://playground.open-rpc.org/ , I guess this is correct.\n\nI was talking about `eth_sendTransaction`  method not being present in the specs at all (in the `eth1.0-specs` repo).",
+      "createdAt": "2021-05-27T12:43:35.048000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "5ec19aef23c6b0b941b3e76eec816fab6c7bcdc0d3608d92dabd59ce8016569e"
+        }
+      ]
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh yeah, I understood the missing `eth_sendTransaction` part, I was just saying that that spec seems to indicate that my tx payload was correct",
+      "createdAt": "2021-05-27T12:45:14.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe it's just that geth's JSON-RPC layer isn't fully implemented yet for London? I don't know",
+      "createdAt": "2021-05-27T12:45:38.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hi everyone,\nis there an RPC endpoint which I can publicly forward to other devs (and e.g. also promote here to <@!130156954273316865> for testing)? I know we have got 1-2 but doesn't want to just throw (half-)publicly in the ring here myself.\n\nWould this be an RPC endpoint we could eventually also add to the baikal spec document https://github.com/ethereum/eth1.0-specs/blob/master/network-upgrades/client-integration-testnets/baikal.md and promote in the Ecosystem Developer calls? //cc <@!420951281910284289> <@!552133098075193354> \n\nGuess this would be helpful for ecosystem developers to test their stuff. 🙂",
+      "createdAt": "2021-05-27T13:03:44.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What are you using to send those txs? They do show up as 1559 txs, but if I send a tx with the same values (from my address), they don't show up as type 0x02",
+      "createdAt": "2021-05-27T13:30:45.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I did a PR on web3j if you want to check https://github.com/web3j/web3j/pull/1417",
+      "createdAt": "2021-05-27T13:34:34.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!130156954273316865> Sample of EIP1559 transaction https://github.com/web3j/web3j/pull/1417/files#diff-6f0d1894b3790b679aa7f0abea5391f9ab05185a948af37a3d507053b2cc6249R96",
+      "createdAt": "2021-05-27T13:35:48.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, I guess web3j always creates a raw transaction, right? I suppose those work, but I'm interested in the `eth_sendTransaction` endpoint",
+      "createdAt": "2021-05-27T13:36:08.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My guess is that that isn't implemented yet",
+      "createdAt": "2021-05-27T13:36:17.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah yes I use sendRawTransaction. Maybe eth_sendTransaction is not up to date 🤔",
+      "createdAt": "2021-05-27T13:38:31.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fvictorio",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see, thanks. <@!425269142615097345> just told me that <#804019759934078987> is the right place to ask about this, so I'll stop spamming here 😅",
+      "createdAt": "2021-05-27T13:38:56.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes Geth's pool has few transactions in the pool (<50)",
+      "createdAt": "2021-05-27T13:51:39.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we are planning a 1559 API coordination call for next week, would anyone from your team be interested in joining?",
+      "createdAt": "2021-05-27T15:12:42.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "definitely! ~~will add to the 1559 Cheatsheet! have you tweeted this out yet?~~ sorry, thought this was your full release",
+      "createdAt": "2021-05-27T15:13:58.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, I stopped Nethermind temporarily, so it looks like geth is producing empty blocks now",
+      "createdAt": "2021-05-27T15:16:00.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Weird, the new geth branch seems to work well and pick up txs on mainnet. Are you sure this is not basefee oscillation? With a synthetic tx generator i guess it's possible to create such a nice oscillation pattern.",
+      "createdAt": "2021-05-27T15:49:26.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It would be interesting to test with Nethermind when it will run again to see if it does the same. the maxFeePerGas is generally very high compared to the baseFee and so the vast majority of transactions are  good for the current block. I could put a minimum for the maxFeePerGas at 1,000,000,000 to be sure we're still valid for the block",
+      "createdAt": "2021-05-27T15:57:42.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How much is the tip? Does it reach the minimum threshold setting of geth?",
+      "createdAt": "2021-05-27T16:14:31.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I rerun Nethermind, but I will stop it again to debug this thing. Geth and Nethermind are including significantly fewer transactions in the block than Besu",
+      "createdAt": "2021-05-27T16:18:30.377000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "2598447d746e483df5c04e63bebb54165a00651629d3168a6d50fd79de0462b7"
+        }
+      ]
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Since the pool is also almost empty, my guess is now that these txs are filtered out by 2 of 3 implementations because of the miner tip threshold.",
+      "createdAt": "2021-05-27T16:21:25.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just changed so all transactions is at least 1,000,000,000 of maxFeePerGas (alias feecap). The baseFee is around 120,000 right now",
+      "createdAt": "2021-05-27T16:22:20.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the MaxPriorityFeePerGas (alias gasPremium) is always 1,000,000,000 during this spam test",
+      "createdAt": "2021-05-27T16:23:31.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's indeed probably not the basefee. Can you try setting the tip to 10 billion?",
+      "createdAt": "2021-05-27T16:24:06.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the tip it's already 1 billion for all of the transaction (no variation) . Do you think 10 billion will change something ?",
+      "createdAt": "2021-05-27T16:25:34.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I can try",
+      "createdAt": "2021-05-27T16:25:50.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "several blocks were better without changing the tip. the issue seems to come back",
+      "createdAt": "2021-05-27T16:36:53.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What, it's actually worse with 10 gwei tip?",
+      "createdAt": "2021-05-27T16:39:52.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or you didn't try that yet? If not then please do. We reused the min gasprice threshold and did not change the default value so it's probably too high now.",
+      "createdAt": "2021-05-27T16:45:35.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will do that",
+      "createdAt": "2021-05-27T16:49:26.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just changed the tip to 10 billions. it's better. do you want the spam to continue or do you prefer I stop it ?",
+      "createdAt": "2021-05-27T16:54:52.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It does seem to stabilize",
+      "createdAt": "2021-05-27T16:59:41.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Please continue for a little longer",
+      "createdAt": "2021-05-27T17:00:22.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's still weird, will analyze it later, i'm on my phone now.",
+      "createdAt": "2021-05-27T17:58:59.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think it comes from the fact that accounts don't have a lot of ethers anymore. if one of the genesis accounts can put in a big amount  . To see if it fixes the problem 0xfe3b557e8fb62b89f4916b721be55ceb828dbd73 or this one 0x5211cea3870c7ba7c6c44b185e62eecdb864cd8c",
+      "createdAt": "2021-05-27T18:17:00.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!471975503859810316> can you add me as friend so I can DM you an invite to the Gas API call next week?",
+      "createdAt": "2021-05-27T18:17:38.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "When the base fee is super low then all clients can fill up the blocks. I don't see yet how these low basefee values can even make a difference though.",
+      "createdAt": "2021-05-27T18:21:39.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think it comes from value . I'm doing transfers with value between 0.01 and 0.02 . If the sender has only 0.1 this limits the number of transactions in the block from this sender.I have two account sending between them but I think it can come from there. I don't have enough ethers  after all this spam 🤔",
+      "createdAt": "2021-05-27T18:25:17.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see",
+      "createdAt": "2021-05-27T18:26:37.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the best would be to fill these accounts with ethers in order to eliminate this",
+      "createdAt": "2021-05-27T18:28:21.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Indeed. Is there a baikal faucet? Or can anyone with a big genesis account supply those two addresses?",
+      "createdAt": "2021-05-27T18:49:55.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's better now with ethers 😀",
+      "createdAt": "2021-05-27T19:37:45.269000+00:00",
+      "attachments": []
+    }
+  ]
+}

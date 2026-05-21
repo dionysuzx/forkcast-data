@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-07-26",
+  "messageCount": 173,
+  "sourceHash": "900f1a6b0f80183ef6341261c65862a312eec60109e461357618c01c2903eef0",
+  "searchText": "We've found a breaking change in current 1559 implementations, and recommend that all clients and wallets begin providing a computed `gasPrice` field when returning Transaction objects: https://github.com/ethereum/eth1.0-apis/pull/22 <@!135612611923279872> is this fixed by <@!543900561460822016>'s PR? https://github.com/ethereum/eth1.0-specs/pull/251#issuecomment-886878571 we agreed to merge it on the last ACD Yes, I think that should do. How soon will this be in client production? It's already in geth, and AIUI, most if not all other client implementations We were not getting this value back on ropsten over the weekend, I'll have us check again.. We actually agreed to this 2 calls ago, but <@!301186049323958275> was unhappy with the fact that the `gasPrice` value returned changed based on the time of the transaction (mined vs. unmined), so eventually decided to keep it, but deprecate it after the next upgrade (not London, the one after). With geth? Yes. For example: That comes from ethers.js expecting the `gasPrice` value. My proposed fix would resolve that. And not have a long tail of bugs that wallet developers have to deal with. 🙂 <@135612611923279872> You should be getting the `effectiveGasPrice` from the receipt, not the transaction. The transaction *should* only have details about the transaction itself, not its execution. For 1559 transactions this means `maxFeePerGas` and `maxPremiumPerGas`. The receipt is the proper object for data about the transactions execution/inclusion, which includes effective gas price, block number, transaction index, etc. For legacy reasons, the transaction includes a *subset* of details about the transaction's execution, but that will all hopefully go away so it is recommended you switch over to using the receipt for that class of data going forward. cc <@358385024573243393> since getting ethers moved over would go a long way. I fixed the Transaction object the other day as Etherscan started returning null for `gasPrice` and it killed the CI. Easy fix though and it is out. What other info needs to change in the transaction object? The issue is partly that not everyone will update immediately. We want to not break older dapps also. Yeah. I tried having ethers return *something*, but it was a headache. Because someone might get a transaction object to clone, change a few things in it and then send it. Which will fail otherwise, since ethers forbids including both a gasPrice and maxFee*. (I originally supported it as long as gasPrice = maxBaseFeePerGas, but that was also riddled with issues) These are the reasons there were 12 re-implementations of 1559 in my ethers local Dev branch. Once I started using it for day-to-day, problems cropped up. Actually, now that I think of it, older Dapps will break if null in returned. 😦 Ideally, you only grab things from the transaction object that are part of the actual transaction. This means the core transaction fields and hash basically. Everything else you should be getting from the receipt. By not including this info on the Transaction, we still have a breaking change. Block number, transaction index, effective gas price, etc. are all things that you should avoid trying to grab from the transaction. My counter-proposal to the PR by lightclient is to have `gasPrice == maxFeePerGas` from the transaction. This way it has a number that is not *completely* unreasonable so nothing should crash at least. And unlike the current proposal, it won't result in an incredibly hard to debug problem. The current proposal is basically, \"lets create heisenbugs in every integration!\" Ethers checks the return types match a descriptor. For Transactions, it ensures gasPrice is a BigNumberish (something that can be converted to a bug number); for 1559 it became a allowNull(BigNumberish). But that means old versions of the lib will crash and burn. We should check on Etherscan to see what they are doing then. I think they are passing null. I agree this is a simpler fix, I'm not sure it avoids heisenbugs in unpredictable ways. Which is why the CI started failing. i find it pretty conceptually easier to only include things in the Transaction that were there as signed. Everything else is more appropriate to be found in the receipt. At the least it would make it so behavior doesn't change depending on when you observe the transaction. There will still be bugs, but they will be consistently reproducible (easy to fix). Haha! I haven’t heard the term heisenbugs in forever. 🙂 I agree this is idealistically preferable, but also I respect avoiding breaking changes. This is probably a simple enough change, I would probably recommend including it on Transaction objects also, to minimize breakage. Sorry, yeah. The proposal would be to specifically add `gasPrice: maxFeePerGas` to the returned Transaction object from stuff like `eth_getTransactionByHash`. I think I can get behind that. Currently, the receipt has `effectiveGasPrice` and I think everyone agrees that is the right long term solution. The inclusion of *something* in the `gasPrice` spot of transaction objects is just a bandaide for backward compatibility. <@135612611923279872> <@358385024573243393> What sort of end-of-life/deprecation timeline is acceptable to you two for removing some fields from returned transaction objects? I tentatively proposed \"first patch after Shanghai\", but it was basically a strawman for people to argue against. will that not be an issue when replacing transactions, as the gas price will be populated, so the user will need to check if other fields are populated and remove that accordingly (just thinking out loud) Like 18 months. And even then I'd likely have us continue to polyfill it. I'd need a good reason to remove it. I mean, I support ES3. :p We have to pay down tech debt eventually, and encourage people to stop using lies. 😄 (╯°□°）╯︵ ┻━┻ But if the network breaks me, it might help force people to update. Do you have *any* users who actually are limited to ES3? If so, what are they doing?! \"I'm using Ethereum from my Windows 98 laptop.\" Good question. Possibly people building things in ionic, or other weird platforms. People often forget JavaScript isn’t just a browser thing. 🙂 But isn’t my biggest concern. But if the JSON-RPC didn’t make non-backwards compatible changes, it’d be preferred. What is the threshold where you go from \"raging mad because we broke things without enough warning\" to \"annoyed, but will get over it relatively quickly\"? As a maintainer of older projects it sucks when things break and basically means they don’t get fixed. The Python 3 migration finally broke my AES implementation the other day, written for 2, now one of the most popular implementations of AES has issues on some versions of Python. Hmm. I guess, a year? But take that with a grain of salt. 🙂 I can take a look at npm to get an idea of where people are. When we start having more \"statically distributed dapps\", this will get worse. All of my apps are statically distributed. 😬 Luckily though, no one uses anything I build. 😅 It means I don't have to worry about angry users when stuff breaks. 🙂 Looks like about 36% of ethers users are using versions over a year old. Based on downloads. Which means probably a dependency. Which is the other place long lead times are needed. Once you are a deep dependency, updating means that first dependant must update, followed by the next and so on. It can take a while. 🙂 I need to pull logs from my cdn to get some loose numbers, based on developers that use a CDN. People only tend to upgrade when things break though Otherwise, why bother My biggest concern is that this would break v4. Which would force them to make a major version change. Which means it isn’t just bumping a version, but code changes. I might have to make an emergency fix for v4. What is currently used? gasPrice = maxFeePerGas? while it's in the mempool, yes if it's included, it's whatever the user paid iirc Oh, it changes? Hmm. I think it makes more sense to not change. This is the heisenbug creator that I hate. If it doesn't change, other weird things will happen If it was a tx being signed, the signature would be based on gasPrice. Not effective gasPrice. Like gasLimit is the gas *limit*, not gasUsed. Geth *currently* does `gasPrice: maxFeePerGas` prior to inclusion, then `gasPrice: effectiveGasPrice` after inclusion. Lightclient has a JSON-RPC spec PR that proposes all clients do that. I argued that we should just do `gasPrice: maxFeePerGas` always, but I may lose (depends on call this week with app developers). well, but gasPrice currently _is_ what is paid In that case could you add effectiveGasPrice to a tx and leave gasPrice = maxFee? `effectiveGasPrice` is on the receipt. That is where you should go for that information. The only reason 1559 transactions have a `gasPrice` field is to try to limit the number of things that hard fail. I know, but if weird things happen if the effectiveGasPrice isn’t included on the tx. Include both. 🙂 The problem isn't \"what happens for people who update their code\". It is \"what happens for people who don't\". when will it not be included in the tx? If you are updating code for London, then you'll just get `effectiveGasPrice` from the receipt if that is what you want. If you are not updating code for London, then in theory returning *some number* in a `gasPrice` field on transaction objects will reduce the number of broken apps. The thing that won me over to Micah's view was considering how an uncle could cause a `gasPrice` result to change between API calls. If we know `gasPrice` will be able to return an inaccurate result post-1559, then it might as well be simple to derive. I guess my question is what weird things happen if we make gasPrice = maxFee both before and after inclusion in a block? Hard to say, depends on what exactly people are doing with `gasPrice` from transactions. Whatever the bugs though, those bugs will exist for anyone that looks at un-mined transactions. I will be the first to create a transaction that says maxFeePerGas = 1 gazillion, and see what breaks I suspect many things will break with that will break will break no matter what we do. Since the pending pool will have 1 gazillion regardless of path we choose. I wondered that as well, but figure that if they aren’t EIP-1559-aware lots of things in the tx will break them. Intrinsic gas. *Rinkeby weeps* I mean, I have only been involved in the discussion for 10 minutes or so, so you have all had more time to think through it, but i think either solution will cause bugs, but I’d prefer gasPrice be kept for quite a while (forever; it can be removed in eth2 ;)). And just document what it’s behaviour is? There is no ETH2. Will eth2 use the exact same rpc? There is no ETH2. Post-merge? nothing will change except for the consensus mechanism Ethereum needs a way to pay down technical debt. It is growing to the point where it is causing real pain across the ecosystem, so we do need some kind of EOL policy. Really? That’s good to know. 😉 I feel out of the loop. :p For you, there is probably very little that needs to be done for The Merge I suspect. Some block header fields will be changing to constants, and RANDAO will be included in one of them most likely. I mean, somethings are hard to remove. Bitcoin checksigblah opcode still has to pop off a useless value. 🙂 That’s awesome. I was expecting to have to rewrite a bunch of stuff. 🙂 So anything you do around difficulty calculation (if anything) or block times will need to be adjusted, but largely I suspect `ethers` won't need to change much of anything. If you care about block validity checking then there may be a good amount of work. I do not do that. 🙂 Well, V6 will be coming out by the end of the year. At that point I will have very little support for v4, which might bump people to migrate quicker. Actually, even versions before v5.4.0 will break if gasPrice is null. (off topic here, but I ",
+  "excerpts": [
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We've found a breaking change in current 1559 implementations, and recommend that all clients and wallets begin providing a computed `gasPrice` field when returning Transaction objects: https://github.com/ethereum/eth1.0-apis/pull/22",
+      "createdAt": "2021-07-26T17:56:17.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!135612611923279872> is this fixed by <@!543900561460822016>'s PR? https://github.com/ethereum/eth1.0-specs/pull/251#issuecomment-886878571",
+      "createdAt": "2021-07-26T17:57:45+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we agreed to merge it on the last ACD",
+      "createdAt": "2021-07-26T17:57:50.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, I think that should do. How soon will this be in client production?",
+      "createdAt": "2021-07-26T17:58:58.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's already in geth, and AIUI, most if not all other client implementations",
+      "createdAt": "2021-07-26T17:59:38.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We were not getting this value back on ropsten over the weekend, I'll have us check again..",
+      "createdAt": "2021-07-26T18:00:00.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We actually agreed to this 2 calls ago, but <@!301186049323958275> was unhappy with the fact that the `gasPrice` value returned changed based on the time of the transaction (mined vs. unmined), so eventually decided to keep it, but deprecate it after the next upgrade (not London, the one after).",
+      "createdAt": "2021-07-26T18:00:47.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "With geth?",
+      "createdAt": "2021-07-26T18:00:50.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes. For example:",
+      "createdAt": "2021-07-26T18:02:52.797000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "048db6f8e025a2040b119b511ea40dbd005a48471d68660e4eed0267964203c5"
+        }
+      ]
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That comes from ethers.js expecting the `gasPrice` value.",
+      "createdAt": "2021-07-26T18:03:03.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My proposed fix would resolve that.",
+      "createdAt": "2021-07-26T18:04:11.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And not have a long tail of bugs that wallet developers have to deal with.  🙂",
+      "createdAt": "2021-07-26T18:04:22.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@135612611923279872> You should be getting the `effectiveGasPrice` from the receipt, not the transaction.",
+      "createdAt": "2021-07-26T18:04:45.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The transaction *should* only have details about the transaction itself, not its execution.  For 1559 transactions this means `maxFeePerGas` and `maxPremiumPerGas`.",
+      "createdAt": "2021-07-26T18:05:16.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The receipt is the proper object for data about the transactions execution/inclusion, which includes effective gas price, block number, transaction index, etc.",
+      "createdAt": "2021-07-26T18:05:39.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For legacy reasons, the transaction includes a *subset* of details about the transaction's execution, but that will all hopefully go away so it is recommended you switch over to using the receipt for that class of data going forward.",
+      "createdAt": "2021-07-26T18:06:13.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "cc <@358385024573243393> since getting ethers moved over would go a long way.",
+      "createdAt": "2021-07-26T18:06:32.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I fixed the Transaction object the other day as Etherscan started returning null for `gasPrice` and it killed the CI. Easy fix though and it is out. What other info needs to change in the transaction object?",
+      "createdAt": "2021-07-26T18:14:23.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The issue is partly that not everyone will update immediately. We want to not break older dapps also.",
+      "createdAt": "2021-07-26T18:14:47.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah. I tried having ethers return *something*, but it was a headache.",
+      "createdAt": "2021-07-26T18:15:13.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because someone might get a transaction object to clone, change a few things in it and then send it.",
+      "createdAt": "2021-07-26T18:15:42.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which will fail otherwise, since ethers forbids including both a gasPrice and maxFee*.",
+      "createdAt": "2021-07-26T18:16:03.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(I originally supported it as long as gasPrice = maxBaseFeePerGas, but that was also riddled with issues)",
+      "createdAt": "2021-07-26T18:16:34.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "These are the reasons there were 12 re-implementations of 1559 in my ethers local Dev branch. Once I started using it for day-to-day, problems cropped up.",
+      "createdAt": "2021-07-26T18:17:14.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Actually, now that I think of it, older Dapps will break if null in returned. 😦",
+      "createdAt": "2021-07-26T18:19:22.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ideally, you only grab things from the transaction object that are part of the actual transaction.  This means the core transaction fields and hash basically.",
+      "createdAt": "2021-07-26T18:19:25.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Everything else you should be getting from the receipt.",
+      "createdAt": "2021-07-26T18:19:30.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "By not including this info on the Transaction, we still have a breaking change.",
+      "createdAt": "2021-07-26T18:19:57.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Block number, transaction index, effective gas price, etc. are all things that you should avoid trying to grab from the transaction.",
+      "createdAt": "2021-07-26T18:20:00.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My counter-proposal to the PR by lightclient is to have `gasPrice == maxFeePerGas` from the transaction.",
+      "createdAt": "2021-07-26T18:20:27.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This way it has a number that is not *completely* unreasonable so nothing should crash at least.",
+      "createdAt": "2021-07-26T18:20:42.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And unlike the current proposal, it won't result in an incredibly hard to debug problem.",
+      "createdAt": "2021-07-26T18:20:54.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The current proposal is basically, \"lets create heisenbugs in every integration!\"",
+      "createdAt": "2021-07-26T18:21:09.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ethers checks the return types match a descriptor. For Transactions, it ensures gasPrice is a BigNumberish (something that can be converted to a bug number); for 1559 it became a allowNull(BigNumberish). But that means old versions of the lib will crash and burn.",
+      "createdAt": "2021-07-26T18:21:21.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We should check on Etherscan to see what they are doing then.",
+      "createdAt": "2021-07-26T18:21:47.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think they are passing null.",
+      "createdAt": "2021-07-26T18:21:53.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I agree this is a simpler fix, I'm not sure it avoids heisenbugs in unpredictable ways.",
+      "createdAt": "2021-07-26T18:22:01.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which is why the CI started failing.",
+      "createdAt": "2021-07-26T18:22:03.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad3303",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i find it pretty conceptually easier to only include things in the Transaction that were there as signed. Everything else is more appropriate to be found in the receipt.",
+      "createdAt": "2021-07-26T18:22:27.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "At the least it would make it so behavior doesn't change depending on when you observe the transaction.  There will still be bugs, but they will be consistently reproducible (easy to fix).",
+      "createdAt": "2021-07-26T18:22:28.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Haha! I haven’t heard the term heisenbugs in forever. 🙂",
+      "createdAt": "2021-07-26T18:22:36.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I agree this is idealistically preferable, but also I respect avoiding breaking changes.",
+      "createdAt": "2021-07-26T18:23:03.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is probably a simple enough change, I would probably recommend including it on Transaction objects also, to minimize breakage.",
+      "createdAt": "2021-07-26T18:24:05.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry, yeah.  The proposal would be to specifically add `gasPrice: maxFeePerGas` to the returned Transaction object from stuff like `eth_getTransactionByHash`.",
+      "createdAt": "2021-07-26T18:25:27.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think I can get behind that.",
+      "createdAt": "2021-07-26T18:25:49.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, the receipt has `effectiveGasPrice` and I think everyone agrees that is the right long term solution.  The inclusion of *something* in the `gasPrice` spot of transaction objects is just a bandaide for backward compatibility.",
+      "createdAt": "2021-07-26T18:26:03.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@135612611923279872> <@358385024573243393> What sort of end-of-life/deprecation timeline is acceptable to you two for removing some fields from returned transaction objects?",
+      "createdAt": "2021-07-26T18:26:33.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I tentatively proposed \"first patch after Shanghai\", but it was basically a strawman for people to argue against.",
+      "createdAt": "2021-07-26T18:26:56.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "juanblanco",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "will that not be an issue when replacing transactions, as the gas price will be populated, so the user will need to check if other fields are populated and remove that accordingly (just thinking out loud)",
+      "createdAt": "2021-07-26T18:26:57.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Like 18 months. And even then I'd likely have us continue to polyfill it. I'd need a good reason to remove it.",
+      "createdAt": "2021-07-26T18:27:05.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I mean, I support ES3. :p",
+      "createdAt": "2021-07-26T18:27:29.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We have to pay down tech debt eventually, and encourage people to stop using lies.  😄",
+      "createdAt": "2021-07-26T18:27:34.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(╯°□°）╯︵ ┻━┻",
+      "createdAt": "2021-07-26T18:27:40.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But if the network breaks me, it might help force people to update.",
+      "createdAt": "2021-07-26T18:28:06.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you have *any* users who actually are limited to ES3?",
+      "createdAt": "2021-07-26T18:28:06.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If so, what are they doing?!",
+      "createdAt": "2021-07-26T18:28:18.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"I'm using Ethereum from my Windows 98 laptop.\"",
+      "createdAt": "2021-07-26T18:28:33.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Good question. Possibly people building things in ionic, or other weird platforms. People often forget JavaScript isn’t just a browser thing. 🙂",
+      "createdAt": "2021-07-26T18:29:52.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But isn’t my biggest concern.",
+      "createdAt": "2021-07-26T18:30:05.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But if the JSON-RPC didn’t make non-backwards compatible changes, it’d be preferred.",
+      "createdAt": "2021-07-26T18:30:28.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is the threshold where you go from \"raging mad because we broke things without enough warning\" to \"annoyed, but will get over it relatively quickly\"?",
+      "createdAt": "2021-07-26T18:31:10.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "As a maintainer of older projects it sucks when things break and basically means they don’t get fixed. The Python 3 migration finally broke my AES implementation the other day, written for 2, now one of the most popular implementations of AES has issues on some versions of Python.",
+      "createdAt": "2021-07-26T18:31:57.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm. I guess, a year?",
+      "createdAt": "2021-07-26T18:32:16.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But take that with a grain of salt. 🙂",
+      "createdAt": "2021-07-26T18:32:27.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I can take a look at npm to get an idea of where people are.",
+      "createdAt": "2021-07-26T18:32:41.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "When we start having more \"statically distributed dapps\", this will get worse.",
+      "createdAt": "2021-07-26T18:32:45.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "All of my apps are statically distributed.  😬",
+      "createdAt": "2021-07-26T18:33:39.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Luckily though, no one uses anything I build.  😅",
+      "createdAt": "2021-07-26T18:33:47.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It means I don't have to worry about angry users when stuff breaks.  🙂",
+      "createdAt": "2021-07-26T18:34:23.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Looks like about 36% of ethers users are using versions over a year old.",
+      "createdAt": "2021-07-26T18:35:22.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Based on downloads. Which means probably a dependency.",
+      "createdAt": "2021-07-26T18:35:49.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which is the other place long lead times are needed. Once you are a deep dependency, updating means that first dependant must update, followed by the next and so on. It can take a while. 🙂",
+      "createdAt": "2021-07-26T18:36:57.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I need to pull logs from my cdn to get some loose numbers, based on developers that use a CDN.",
+      "createdAt": "2021-07-26T18:38:00.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "People only tend to upgrade when things break though",
+      "createdAt": "2021-07-26T18:38:04.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Otherwise, why bother",
+      "createdAt": "2021-07-26T18:38:08.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My biggest concern is that this would break v4. Which would force them to make a major version change. Which means it isn’t just bumping a version, but code changes. I might have to make an emergency fix for v4.",
+      "createdAt": "2021-07-26T18:39:17.983000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is currently used? gasPrice = maxFeePerGas?",
+      "createdAt": "2021-07-26T18:40:25.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "while it's in the mempool, yes",
+      "createdAt": "2021-07-26T18:41:07.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if it's included, it's whatever the user paid iirc",
+      "createdAt": "2021-07-26T18:41:15.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, it changes?",
+      "createdAt": "2021-07-26T18:41:16.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm. I think it makes more sense to not change.",
+      "createdAt": "2021-07-26T18:41:29.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is the heisenbug creator that I hate.",
+      "createdAt": "2021-07-26T18:41:33.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If it doesn't change, other weird things will happen",
+      "createdAt": "2021-07-26T18:41:52.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If it was a tx being signed, the signature would be based on gasPrice. Not effective gasPrice.",
+      "createdAt": "2021-07-26T18:41:54.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Like gasLimit is the gas *limit*, not gasUsed.",
+      "createdAt": "2021-07-26T18:42:21.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Geth *currently* does `gasPrice: maxFeePerGas` prior to inclusion, then `gasPrice: effectiveGasPrice` after inclusion.  Lightclient has a JSON-RPC spec PR that proposes all clients do that.  I argued that we should just do `gasPrice: maxFeePerGas` always, but I may lose (depends on call this week with app developers).",
+      "createdAt": "2021-07-26T18:42:49.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "well, but gasPrice currently _is_ what is paid",
+      "createdAt": "2021-07-26T18:42:50.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In that case could you add effectiveGasPrice to a tx and leave gasPrice = maxFee?",
+      "createdAt": "2021-07-26T18:43:10.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`effectiveGasPrice` is on the receipt.",
+      "createdAt": "2021-07-26T18:43:21.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is where you should go for that information.",
+      "createdAt": "2021-07-26T18:43:25.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The only reason 1559 transactions have a `gasPrice` field is to try to limit the number of things that hard fail.",
+      "createdAt": "2021-07-26T18:43:37.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I know, but if weird things happen if the effectiveGasPrice isn’t included on the tx.",
+      "createdAt": "2021-07-26T18:43:43.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Include both. 🙂",
+      "createdAt": "2021-07-26T18:43:47.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The problem isn't \"what happens for people who update their code\".  It is \"what happens for people who don't\".",
+      "createdAt": "2021-07-26T18:44:05.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "when will it not be included in the tx?",
+      "createdAt": "2021-07-26T18:44:11.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If you are updating code for London, then you'll just get `effectiveGasPrice` from the receipt if that is what you want.",
+      "createdAt": "2021-07-26T18:44:18.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If you are not updating code for London, then in theory returning *some number* in a `gasPrice` field on transaction objects will reduce the number of broken apps.",
+      "createdAt": "2021-07-26T18:44:48.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The thing that won me over to Micah's view was considering how an uncle could cause a `gasPrice` result to change between API calls.",
+      "createdAt": "2021-07-26T18:44:51.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danfinlay",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If we know `gasPrice` will be able to return an inaccurate result post-1559, then it might as well be simple to derive.",
+      "createdAt": "2021-07-26T18:45:09.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess my question is what weird things happen if we make gasPrice = maxFee both before and after inclusion in a block?",
+      "createdAt": "2021-07-26T18:45:18.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hard to say, depends on what exactly people are doing with `gasPrice` from transactions.",
+      "createdAt": "2021-07-26T18:45:38.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Whatever the bugs though, those bugs will exist for anyone that looks at un-mined transactions.",
+      "createdAt": "2021-07-26T18:45:49.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will be the first to create a transaction that says maxFeePerGas = 1 gazillion, and see what breaks",
+      "createdAt": "2021-07-26T18:45:56.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I suspect many things will break with that will break will break no matter what we do.",
+      "createdAt": "2021-07-26T18:46:24.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Since the pending pool will have 1 gazillion regardless of path we choose.",
+      "createdAt": "2021-07-26T18:46:38.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I wondered that as well, but figure that if they aren’t EIP-1559-aware lots of things in the tx will break them. Intrinsic gas.",
+      "createdAt": "2021-07-26T18:46:52.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "*Rinkeby weeps*",
+      "createdAt": "2021-07-26T18:47:24.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I mean, I have only been involved in the discussion for 10 minutes or so, so you have all had more time to think through it, but i think either solution will cause bugs, but I’d prefer gasPrice be kept for quite a while (forever; it can be removed in eth2 ;)). And just document what it’s behaviour is?",
+      "createdAt": "2021-07-26T18:49:23.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is no ETH2.",
+      "createdAt": "2021-07-26T18:49:40.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Will eth2 use the exact same rpc?",
+      "createdAt": "2021-07-26T18:49:55.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is no ETH2.",
+      "createdAt": "2021-07-26T18:50:01.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Post-merge?",
+      "createdAt": "2021-07-26T18:50:04.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "nothing will change except for the consensus mechanism",
+      "createdAt": "2021-07-26T18:50:15.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ethereum needs a way to pay down technical debt.  It is growing to the point where it is causing real pain across the ecosystem, so we do need some kind of EOL policy.",
+      "createdAt": "2021-07-26T18:50:24.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Really? That’s good to know. 😉",
+      "createdAt": "2021-07-26T18:50:26.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I feel out of the loop. :p",
+      "createdAt": "2021-07-26T18:50:33.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For you, there is probably very little that needs to be done for The Merge I suspect.",
+      "createdAt": "2021-07-26T18:50:51.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Some block header fields will be changing to constants, and RANDAO will be included in one of them most likely.",
+      "createdAt": "2021-07-26T18:51:09.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I mean, somethings are hard to remove. Bitcoin checksigblah opcode still has to pop off a useless value. 🙂",
+      "createdAt": "2021-07-26T18:51:29.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ricmoo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That’s awesome. I was expecting to have to rewrite a bunch of stuff. 🙂",
+      "createdAt": "2021-07-26T18:51:53.839000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "consensus-dev",
+  "date": "2022-01-12",
+  "messageCount": 193,
+  "sourceHash": "f5bf2b3917925ad68e0d0eec303de4bf8c4a63821af612f17c78c15623942697",
+  "searchText": "Tada https://twitter.com/sproulM_/status/1481109509544513539 That’s fantastic thanks so much!! I wonder why nimbus is at such low utilization? They have a fantastic client that’s pretty friendly for new comers Easy one single binary to run. Not really split into beacon chain/validator processes. Not too many flags either to choose from. Worth reading the thread - Nimbus isn't being reliably identified so some of the teku and lighthouse share will really be Nimbus. Ah I see what you mean there in <@602753420033785856>’s explanation Is there any way to incentivize via rewards more client diversity? The node count is probably more accurate for Nimbus, so maybe ~5% https://migalabs.es/crawler/dashboard Not really. If you paid more or less based on how the client identified itself, clients would just identify themselves as the client that pays the most. Reliably identifying clients if they really don't want to be identified is pretty much impossible - sproul has had to do some pretty impressive work to get this level of identification and it's still not perfect. That said, the protocol does already have incentives for diversity built in because of the various correlation penalties and the risk involved. See https://upgrading-ethereum.info/altair/part2/incentives/diversity for some more details from Ben Edgington's very excellent upgrading ethereum. It's not perfect and it is risk based rather than direct but I'm not sure how you'd do much better (and it works across a lot of forms of diversity like hosting provider etc) I’ll read up. Thanks <@340345049063882753> Does it run on Windows? Do we have data on OS breakdown? I wonder how much of Prysm's lead is due to its OS support? Back when I looked into running a beacon client, most didn't run on Windows. Have things improved since then? I think we could achieve client diversity without breaking incentives by just making it so finality halts if any client has > 66% market share. Especially if it is *easier* to just run a different client than it is to fork a client and modify it. By turning this into a tragedy of the commons, we can incentivize people to altruistically switch without giving out individualized rewards. But the fundamental problem is we can't tell if a client has > 66% market share reliably. I also wouldn't want to build a liveness failure into the chain since the aim here is to prevent a liveness failure. We would need clients to include an agent string in their signatures. This could be spoofed, but defaults are powerful enough here that I think we can ignore that problem. I consider >66% of one client to be a *worse* failure than failure to finalize. By turning >66% into a finalization failure, we *correctly* inform users (indirectly, but via a channel they care about) that the system is undergoing problems. Teku has always supported Windows. Lighthouse and Nimbus both have for quite a while now too. I'm not sure why people keep perpetuating the myth that only Prysm supports Windows. My information on Windows support is just out of date then. It was a long time ago that I checked. oh that would be spoofed so fast. big operations will change their identification on the fly if that would be a requirement Having finality while one client is >66% is just asking for critical failure (e.g., an ETH minting bug that only exists in the 66% client, if we go to finality with that we are in a horrible place). What incentive do those big operations have to spoof in this case? They would have to take an action that actively hurts the network and they would gain nothing but *less* security. wouldnt it hurt them more if the network halts just because one client just hit 66%? Coinbase (a very large staker who also sells offchain goods for on-chain goods), for example is far better off knowing that finality cannot be trusted than they are believing finality can be trusted. It doesn't halt, it just it just doesn't achieve finality. i would say coinbase would be more interested in transactions finalizing than preventing the slim chance of a consensus failure No way. If there is a rollback coinbase loses *massive* amounts of money. It is critically important for anyone doing on-chain => off-chain transactions to have incredibly strong finality guarantees. If there is no finality, then Coinbase simply delays payouts until finality is achieved (so they are protected). i can see that, havent thought too far into it 😆 I particularly like this strategy because the biggest stakers currently are exchanges, who have the biggest incentive for *secure* finality (not insecure finality). This means the ones who have the most power to fix the finality problem in this case (by switching clients) are also the ones who benefit the most from the agent strings being accurate. So you have a class of user who *wants* ultra-secure finality (meaning extremely low risk of user activated rollback fork), who also is the dominate party submitting the data needed for this feature. This is why I'm not too worried about them spoofing. People who run solo staking likely fall into a class of user that \"doesn't know how to run a forked client with the agent string modified\" and \"is running a node altruistically\" and \"is too lazy to bother\". All combined, I think we can easily hit very high percentage of honest agent string reports. In the case of >66%, I think the people we need to switch are exchanges, and I think that is an easier sell since switching in this case is in their best interest (since they suffer the biggest losses in a post-finality rollback). If you delay finality the inactivity leak kicks in and no one earns any more rewards. So they have a very big incentive to spoof their client identity. Hmm... is there a way to have finality be prevented without triggering a leak? Another option might be two have two different types of finality. Single client finality and multiclient finality. Though, I don't see any value in single client finality as off-chain goods providers really want multiclient finality. It's possible I guess if you track why finality was delayed. Starting to get complicated (and delaying finality comes with it's own set of challenges anyway). I think what matters here is less what the chain considers finality and more what we present to off-chain goods 'and services as \"final\". We want to give them very strong guarantees that there will not be a rollback if they payout once \"finality\" is reached. I feel like that signal shouldn't happen until we have seen all clients sign-off. I guess we don't *need* a 66% threshold for this. Even if one client is 97%, we can still look at that 3% remaining to see \"do other clients agree, or only the 97% dominant client?\" 🤔 in a world where everyone did the right thing, off-chain goods/service providers would run all of the clients and determine finality on their own only when all of *their* nodes confirm. Yeah if the incentive to declare your client correctly is that you don't want to do off-chain activities without knowing all clients signed off, the solution is for you to personally run all clients. Otherwise it could just be that the one client you run has a bug and incorrectly finalized when the rest of the chain didn't and you're still up the creek. I feel like we should make running multiple clients and aggregating results as easy as possible. Surely this defeats the whole purpose of consensus, if a minority client can stop finality with a (potentially incorrect) dissenting opinion. And even if all nodes implement the protocol correctly you have differences in strategy between clients, and client versions, that could result in disagreement. This feels like a problem that should be solved by people talking to the major staking services rather than attempting to build something (easily gameable) into the protocol. The idea is that you need `m` of `n` clients to agree before you accept finality. Currently, if we have one client with 66% of stake, you end up with 1 of `n` finality, which defeats a big part of the purpose of authoring multiple clients. `m` can be 2 or 3, (it doesn't have to be 4) but it seems like 1 is a *terrible* choice. It is similar to writing tests, you write the code once, then you write the tests once, and you run one against the other to make sure they agree. This means you only get bugs if you either didn't cover some code with one of the two or you introduced the same or similar bugs into both. This is why we (and security critical infrastructure like space and airplane stuff) has multiple teams write the same code and then you run them side by side and take action when they agree and halt when they don't (or you do 2/3 consensus for things where halting isn't an option). This would be similar to authoring 3 separate implementations to send up into space and then ignoring 2 of them entirely at runtime. The question also is, what does \"finality\" mean in that context (just Prysm). I know there are different views on this - Finality is finality, so regardless what the spec says, we'll just say that Prysm was right and change other clients to match - The spec is the spec, otherwise what's the point of having a spec in the first place? If Prysm caused a wrong finality, then those 68% of ~~people~~ validators will just have to get slashed. They agreed to this by knowingly running the supermajority client. The current system seems like it already tries to do this, with a requirement of 2/3 of validating stake to reach finality. If that stake all comes from a single client that's an out-of-protocol problem, in my eyes. Bear in mind there is a very important difference between 68% of validators and 68% of nodes (or users or value). If say Infura used say teku and lighthouse, then prysm validators could finalise a chain but the majority of users might actually be following the non-finalised chain. It will be very hard to get an accurate measure of where the value and community landed in the case of a split in a short period of time. <@602753420033785856> do you have a description of your algo to differentiate from the block proposed? Is it some fancy inner knowledge of how each client packs attestations? Hmm, this is a good point I hadn't considered. 🤔 Moving out-of-protocol problems in-protocol is often desired because we can solve in-protocol problems with the protocol, but we cannot solve out-of-protocol problems with the protocol. Adrian makes a good point though, that validators reaching finality != users reaching to finality. Similar to miners forking off, we don't really care (even a majority fork) since users will follow the chain that maps to *their* ruleset. I don't see how this can be fixed in-protocol, to be honest. Relying on clients to accurately provide a client type/version with their block proposals is hopeful, at best. I think as long as there aren't strong individual incentives to change defaults, they can be powerful. Also, the attack in this case requires someone stake enough ETH to push the top client over the 66% mark, which is a pretty substantial investment (unless the top client is already very close, in which case we have a problem anyway). The way I would look at this is not by thinking about \"can we definitely solve that problem in theory without a doubt\", but rather by doing whatever we can that isn't a major inconvenience to solve it we may not be able to solve the problem of client distribution in-protocol, that's true, but this issue is so concerning that we may as well try stuff trusting clients to accurately provide a client version and installing one of the least represented clients by default is not very invasive and it may significantly alleviate the issue unless there is widespread adversarial behavior in this case there is no direct incentive for an adversarial behavior (e.g. lying about which client one is running) Being forced to install an objectively inferior piece of software because too many others have already installed the superior ",
+  "excerpts": [
+    {
+      "author": "sproul",
+      "category": "general",
+      "parent": "",
+      "content": "Tada\n\nhttps://twitter.com/sproulM_/status/1481109509544513539",
+      "createdAt": "2022-01-12T03:47:42.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "That’s fantastic thanks so much!!",
+      "createdAt": "2022-01-12T03:48:08.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "I wonder why nimbus is at such low utilization? They have a fantastic client that’s pretty friendly for new comers",
+      "createdAt": "2022-01-12T03:55:36.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "Easy one single binary to run. Not really split into beacon chain/validator processes. Not too many flags either to choose from.",
+      "createdAt": "2022-01-12T03:56:07.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "Worth reading the thread - Nimbus isn't being reliably identified so some of the teku and lighthouse share will really be Nimbus.",
+      "createdAt": "2022-01-12T03:59:45.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "Ah I see what you mean there in <@602753420033785856>’s explanation",
+      "createdAt": "2022-01-12T04:00:28.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "Is there any way to incentivize via rewards more client diversity?",
+      "createdAt": "2022-01-12T04:00:51.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "general",
+      "parent": "",
+      "content": "The node count is probably more accurate for Nimbus, so maybe ~5%",
+      "createdAt": "2022-01-12T04:03:07.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "general",
+      "parent": "",
+      "content": "https://migalabs.es/crawler/dashboard",
+      "createdAt": "2022-01-12T04:03:10.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "Not really. If you paid more or less based on how the client identified itself, clients would just identify themselves as the client that pays the most. Reliably identifying clients if they really don't want to be identified is pretty much impossible - sproul has had to do some pretty impressive work to get this level of identification and it's still not perfect.\n\nThat said, the protocol does already have incentives for diversity built in because of the various correlation penalties and the risk involved.",
+      "createdAt": "2022-01-12T04:03:12.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "See https://upgrading-ethereum.info/altair/part2/incentives/diversity for some more details from Ben Edgington's very excellent upgrading ethereum.",
+      "createdAt": "2022-01-12T04:04:11.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "It's not perfect and it is risk based rather than direct but I'm not sure how you'd do much better (and it works across a lot of forms of diversity like hosting provider etc)",
+      "createdAt": "2022-01-12T04:05:19.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "schone_wizard",
+      "category": "general",
+      "parent": "",
+      "content": "I’ll read up. Thanks <@340345049063882753>",
+      "createdAt": "2022-01-12T04:06:38.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Does it run on Windows?",
+      "createdAt": "2022-01-12T06:48:53.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Do we have data on OS breakdown?  I wonder how much of Prysm's lead is due to its OS support?  Back when I looked into running a beacon client, most didn't run on Windows.  Have things improved since then?",
+      "createdAt": "2022-01-12T06:49:24.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think we could achieve client diversity without breaking incentives by just making it so finality halts if any client has > 66% market share.  Especially if it is *easier* to just run a different client than it is to fork a client and modify it.  By turning this into a tragedy of the commons, we can incentivize people to altruistically switch without giving out individualized rewards.",
+      "createdAt": "2022-01-12T06:50:49.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "But the fundamental problem is we can't tell if a client has > 66% market share reliably.  I also wouldn't want to build a liveness failure into the chain since the aim here is to prevent a liveness failure.",
+      "createdAt": "2022-01-12T06:54:34.908000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We would need clients to include an agent string in their signatures.  This could be spoofed, but defaults are powerful enough here that I think we can ignore that problem.",
+      "createdAt": "2022-01-12T06:55:49.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I consider >66% of one client to be a *worse* failure than failure to finalize.",
+      "createdAt": "2022-01-12T06:56:06.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "By turning >66% into a finalization failure, we *correctly* inform users (indirectly, but via a channel they care about) that the system is undergoing problems.",
+      "createdAt": "2022-01-12T06:56:28.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "Teku has always supported Windows.  Lighthouse and Nimbus both have for quite a while now too. I'm not sure why people keep perpetuating the myth that only Prysm supports Windows.",
+      "createdAt": "2022-01-12T06:56:32.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "My information on Windows support is just out of date then.  It was a long time ago that I checked.",
+      "createdAt": "2022-01-12T06:56:51.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raphael1234",
+      "category": "general",
+      "parent": "",
+      "content": "oh that would be spoofed so fast. big operations will change their identification on the fly if that would be a requirement",
+      "createdAt": "2022-01-12T06:57:44.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Having finality while one client is >66% is just asking for critical failure (e.g., an ETH minting bug that only exists in the 66% client, if we go to finality with that we are in a horrible place).",
+      "createdAt": "2022-01-12T06:58:18.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "What incentive do those big operations have to spoof in this case?",
+      "createdAt": "2022-01-12T06:58:32.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "They would have to take an action that actively hurts the network and they would gain nothing but *less* security.",
+      "createdAt": "2022-01-12T06:58:47.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raphael1234",
+      "category": "general",
+      "parent": "",
+      "content": "wouldnt it hurt them more if the network halts just because one client just hit 66%?",
+      "createdAt": "2022-01-12T06:59:12.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Coinbase (a very large staker who also sells offchain goods for on-chain goods), for example is far better off knowing that finality cannot be trusted than they are believing finality can be trusted.",
+      "createdAt": "2022-01-12T06:59:49.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It doesn't halt, it just it just doesn't achieve finality.",
+      "createdAt": "2022-01-12T07:00:13.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raphael1234",
+      "category": "general",
+      "parent": "",
+      "content": "i would say coinbase would be more interested in transactions finalizing than preventing the slim chance of a consensus failure",
+      "createdAt": "2022-01-12T07:01:18.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "No way.  If there is a rollback coinbase loses *massive* amounts of money.",
+      "createdAt": "2022-01-12T07:01:33.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It is critically important for anyone doing on-chain => off-chain transactions to have incredibly strong finality guarantees.",
+      "createdAt": "2022-01-12T07:01:46.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If there is no finality, then Coinbase simply delays payouts until finality is achieved (so they are protected).",
+      "createdAt": "2022-01-12T07:02:17.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raphael1234",
+      "category": "general",
+      "parent": "",
+      "content": "i can see that, havent thought too far into it 😆",
+      "createdAt": "2022-01-12T07:02:57.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I particularly like this strategy because the biggest stakers currently are exchanges, who have the biggest incentive for *secure* finality (not insecure finality).  This means the ones who have the most power to fix the finality problem in this case (by switching clients) are also the ones who benefit the most from the agent strings being accurate.",
+      "createdAt": "2022-01-12T07:04:26.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "So you have a class of user who *wants* ultra-secure finality (meaning extremely low risk of user activated rollback fork), who also is the dominate party submitting the data needed for this feature.  This is why I'm not too worried about them spoofing.",
+      "createdAt": "2022-01-12T07:05:27.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "People who run solo staking likely fall into a class of user that \"doesn't know how to run a forked client with the agent string modified\" and \"is running a node altruistically\" and \"is too lazy to bother\".",
+      "createdAt": "2022-01-12T07:05:57.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "All combined, I think we can easily hit very high percentage of honest agent string reports.",
+      "createdAt": "2022-01-12T07:06:21.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "In the case of >66%, I think the people we need to switch are exchanges, and I think that is an easier sell since switching in this case is in their best interest (since they suffer the biggest losses in a post-finality rollback).",
+      "createdAt": "2022-01-12T07:07:41.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "If you delay finality the inactivity leak kicks in and no one earns any more rewards.  So they have a very big incentive to spoof their client identity.",
+      "createdAt": "2022-01-12T09:09:54.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Hmm... is there a way to have finality be prevented without triggering a leak?",
+      "createdAt": "2022-01-12T09:14:57.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Another option might be two have two different types of finality.  Single client finality and multiclient finality.  Though, I don't see any value in single client finality as off-chain goods providers really want multiclient finality.",
+      "createdAt": "2022-01-12T09:15:57.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "It's possible I guess if you track why finality was delayed. Starting to get complicated (and delaying finality comes with it's own set of challenges anyway).",
+      "createdAt": "2022-01-12T09:16:01.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think what matters here is less what the chain considers finality and more what we present to off-chain goods 'and services as \"final\".",
+      "createdAt": "2022-01-12T09:16:42.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We want to give them very strong guarantees that there will not be a rollback if they payout once \"finality\" is reached.  I feel like that signal shouldn't happen until we have seen all clients sign-off.",
+      "createdAt": "2022-01-12T09:17:26.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I guess we don't *need* a 66% threshold for this.  Even if one client is 97%, we can still look at that 3% remaining to see \"do other clients agree, or only the 97% dominant client?\"",
+      "createdAt": "2022-01-12T09:18:26.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "🤔 in a world where everyone did the right thing, off-chain goods/service providers would run all of the clients and determine finality on their own only when all of *their* nodes confirm.",
+      "createdAt": "2022-01-12T09:19:52.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "Yeah if the incentive to declare your client correctly is that you don't want to do off-chain activities without knowing all clients signed off, the solution is for you to personally run all clients.  Otherwise it could just be that the one client you run has a bug and incorrectly finalized when the rest of the chain didn't and you're still up the creek.",
+      "createdAt": "2022-01-12T09:21:55.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I feel like we should make running multiple clients and aggregating results as easy as possible.",
+      "createdAt": "2022-01-12T09:28:03.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "Surely this defeats the whole purpose of consensus, if a minority client can stop finality with a (potentially incorrect) dissenting opinion. And even if all nodes implement the protocol correctly you have differences in strategy between clients, and client versions, that could result in disagreement.",
+      "createdAt": "2022-01-12T09:39:35.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "This feels like a problem that should be solved by people talking to the major staking services rather than attempting to build something (easily gameable) into the protocol.",
+      "createdAt": "2022-01-12T09:41:13.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The idea is that you need `m` of `n` clients to agree before you accept finality.",
+      "createdAt": "2022-01-12T09:47:55.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Currently, if we have one client with 66% of stake, you end up with 1 of `n` finality, which defeats a big part of the purpose of authoring multiple clients.",
+      "createdAt": "2022-01-12T09:48:25.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "`m` can be 2 or 3, (it doesn't have to be 4) but it seems like 1 is a *terrible* choice.",
+      "createdAt": "2022-01-12T09:48:50.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It is similar to writing tests, you write the code once, then you write the tests once, and you run one against the other to make sure they agree.  This means you only get bugs if you either didn't cover some code with one of the two or you introduced the same or similar bugs into both.  This is why we (and security critical infrastructure like space and airplane stuff) has multiple teams write the same code and then you run them side by side and take action when they agree and halt when they don't (or you do 2/3 consensus for things where halting isn't an option).",
+      "createdAt": "2022-01-12T09:50:32.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "This would be similar to authoring 3 separate implementations to send up into space and then ignoring 2 of them entirely at runtime.",
+      "createdAt": "2022-01-12T09:50:58.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "general",
+      "parent": "",
+      "content": "The question also is, what does \"finality\" mean in that context (just Prysm). I know there are different views on this\n- Finality is finality, so regardless what the spec says, we'll just say that Prysm was right and change other clients to match\n- The spec is the spec, otherwise what's the point of having a spec in the first place? If Prysm caused a wrong finality, then those 68% of ~~people~~ validators will just have to get slashed. They agreed to this by knowingly running the supermajority client.",
+      "createdAt": "2022-01-12T10:07:56.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "The current system seems like it already tries to do this, with a requirement of 2/3 of validating stake to reach finality.  If that stake all comes from a single client that's an out-of-protocol problem, in my eyes.",
+      "createdAt": "2022-01-12T10:34:27.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "Bear in mind there is a very important difference between 68% of validators and 68% of nodes (or users or value).",
+      "createdAt": "2022-01-12T10:34:44.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "general",
+      "parent": "",
+      "content": "If say Infura used say teku and lighthouse, then prysm validators could finalise a chain but the majority of users might actually be following the non-finalised chain. It will be very hard to get an accurate measure of where the value and community landed in the case of a split in a short period of time.",
+      "createdAt": "2022-01-12T10:37:34.244000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "<@602753420033785856> do you have a description of your algo to differentiate from the block proposed? Is it some fancy inner knowledge of how each client packs attestations?",
+      "createdAt": "2022-01-12T10:50:16.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Hmm, this is a good point I hadn't considered.  🤔",
+      "createdAt": "2022-01-12T13:06:37.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Moving out-of-protocol problems in-protocol is often desired because we can solve in-protocol problems with the protocol, but we cannot solve out-of-protocol problems with the protocol.",
+      "createdAt": "2022-01-12T13:07:33.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Adrian makes a good point though, that validators reaching finality != users reaching to finality.",
+      "createdAt": "2022-01-12T13:07:54.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Similar to miners forking off, we don't really care (even a majority fork) since users will follow the chain that maps to *their* ruleset.",
+      "createdAt": "2022-01-12T13:08:34.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "I don't see how this can be fixed in-protocol, to be honest.  Relying on clients to accurately provide a client type/version with their block proposals is hopeful, at best.",
+      "createdAt": "2022-01-12T13:12:16.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think as long as there aren't strong individual incentives to change defaults, they can be powerful.  Also, the attack in this case requires someone stake enough ETH to push the top client over the 66% mark, which is a pretty substantial investment (unless the top client is already very close, in which case we have a problem anyway).",
+      "createdAt": "2022-01-12T13:16:18.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "The way I would look at this is not by thinking about \"can we definitely solve that problem in theory without a doubt\", but rather by doing whatever we can that isn't a major inconvenience to solve it",
+      "createdAt": "2022-01-12T13:17:16.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "we may not be able to solve the problem of client distribution in-protocol, that's true, but this issue is so concerning that we may as well try stuff",
+      "createdAt": "2022-01-12T13:17:54.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "trusting clients to accurately provide a client version and installing one of the least represented clients by default is not very invasive",
+      "createdAt": "2022-01-12T13:18:30.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "and it may significantly alleviate the issue unless there is widespread adversarial behavior",
+      "createdAt": "2022-01-12T13:18:51.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "in this case there is no direct incentive for an adversarial behavior",
+      "createdAt": "2022-01-12T13:19:04.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "(e.g. lying about which client one is running)",
+      "createdAt": "2022-01-12T13:19:21.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "Being forced to install an objectively inferior piece of software because too many others have already installed the superior piece of software appears to be a good reason for lying about the software you are running.",
+      "createdAt": "2022-01-12T13:42:38.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "no one is forcing anyone though",
+      "createdAt": "2022-01-12T13:42:56.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "that's not really the proposal",
+      "createdAt": "2022-01-12T13:42:59.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "the proposal is for it to default for what's best for the network, and as a result what is indirectly best for the stake of the operator in the network",
+      "createdAt": "2022-01-12T13:43:19.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "one might suppose that an operator would be greatly concerned about the general health of the network and reducing the probability of catastrophic error, because it would hurt the value of their assets",
+      "createdAt": "2022-01-12T13:44:08.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "key word here is \"default\"",
+      "createdAt": "2022-01-12T13:44:17.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "so anyone could opt out of that default and decide to install whatever software they want",
+      "createdAt": "2022-01-12T13:44:44.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "Also what does objectively superior mean quantitatively, and does it really matter to users, and if yes to what extent? It's my understand that Prysm is far from being the all class best client on metrics such as resource usage and sync time, and yet it has a supermajority. Some food for thought here.",
+      "createdAt": "2022-01-12T13:47:15.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "Objectively superior == better results for the network (and higher rewards for stakers).",
+      "createdAt": "2022-01-12T13:47:57.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "If it's a purely optional proposal then it seems to be a massive amount of effort to implement compared to hassling the major staking service providers.",
+      "createdAt": "2022-01-12T13:48:48.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "It is debatable whether higher rewards for stakers is the only metric that matters to qualify for \"objectively superior\".",
+      "createdAt": "2022-01-12T13:49:10.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "If you have better rewards in the short term but you critically endanger the network in the mid to long term, the EV might actually turn out negative.",
+      "createdAt": "2022-01-12T13:49:31.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "It is objectively superior to another client, in that it is doing more to achieve finality.  Given that all attempts to calculate client diversity are at least partially guesswork you have to work with the metrics that are available.",
+      "createdAt": "2022-01-12T14:07:25.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "Not sure I'm following you on that last message.",
+      "createdAt": "2022-01-12T14:11:22.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "We're trying to achieve finality.  If beacon node A's block proposal does more than beacon node B's block proposal to achieve that then a validator client really should be going with beacon node A's proposal, regardless of the particular software that it is running.\n\nIf beacon node A has a supermajority then yes it should be addressed, but attempting to do so in-protocol is going to result in providing a potentially false sense of security.",
+      "createdAt": "2022-01-12T14:19:14.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "> If beacon node A's block proposal does more than beacon node B's block proposal\nWhat do you mean by this?",
+      "createdAt": "2022-01-12T14:34:56.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "For example, has more attestations present.",
+      "createdAt": "2022-01-12T14:35:33.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I'm still not following what that has to do with what we are talking about.",
+      "createdAt": "2022-01-12T14:36:12.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We aren't talking about changing the fork choice rule (which it sounds like you are talking about).",
+      "createdAt": "2022-01-12T14:36:23.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "Take an extreme example: minority client X only produces empty blocks, with no attestations in it.  But if you want minority client X to be part of the quorum that has to come to agreement on the state of the chain for finality someone needs to be running it.",
+      "createdAt": "2022-01-12T14:38:46.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "I am not convinced that it's an inferiority/superiority problem. Quite frankly\n\nIt's a stickiness problem. It's a branding problem. It's a \"if it ain't broke, don't touch it problem\". It's apparently a problem (for institutions) that only prysm had a remote signer at genesis.",
+      "createdAt": "2022-01-12T14:39:22.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "ah, took that out of context.",
+      "createdAt": "2022-01-12T14:39:26.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "For us to fail that hard we would need 3 clients to all be worse enough to warrant not wanting to run them (out of 4).",
+      "createdAt": "2022-01-12T14:39:39.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "I do agree <@!144468805697929216> that you cannot reliably identify  a client in-protocol and cannot thus incentivize it in protocol",
+      "createdAt": "2022-01-12T14:39:54.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "plus then you need gate keeping on which clients enter the consensus",
+      "createdAt": "2022-01-12T14:40:16.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I suspect we don't need reliable in this case because there aren't individual rewards, only commons rewards.",
+      "createdAt": "2022-01-12T14:40:20.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I don't think we need gatekeeping either.",
+      "createdAt": "2022-01-12T14:40:30.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "one thing about multiple clients is if there is a failure in one, you should be able to switch to another very dynamically",
+      "createdAt": "2022-01-12T14:40:39.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We just want <66% of clients to self-report the same agent.",
+      "createdAt": "2022-01-12T14:40:39.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "hmm",
+      "createdAt": "2022-01-12T14:41:01.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If >66% of agents self report the same thing, then it means >66% of people didn't override a default and are using the same client.",
+      "createdAt": "2022-01-12T14:41:08.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "it's so utterly gamable though",
+      "createdAt": "2022-01-12T14:41:22.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<66% means *either* people are spoofing their agent string (requires effort) or we have sufficient client diversity.",
+      "createdAt": "2022-01-12T14:41:32.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "general",
+      "parent": "",
+      "content": "Which I suggest means we have no gain from doing it, as we have no information about which of those two statements are true.",
+      "createdAt": "2022-01-12T14:42:05.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "To what end though?  Only stakers can game it (if we are talking about adding agent to attestations), which presumably are people who are *mostly* aligned with long-term health of the network.",
+      "createdAt": "2022-01-12T14:42:15.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "say I'm 15% of the network",
+      "createdAt": "2022-01-12T14:42:36.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "and I can either securely add another client to split it",
+      "createdAt": "2022-01-12T14:42:44.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "or I can change a string",
+      "createdAt": "2022-01-12T14:42:50.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Which would put the network at risk.",
+      "createdAt": "2022-01-12T14:42:59.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "And you would get nothing for it.",
+      "createdAt": "2022-01-12T14:43:03.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "general",
+      "parent": "",
+      "content": "they are already putting the network at risk, no?",
+      "createdAt": "2022-01-12T14:43:10.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It *is* a troll vector for whales.",
+      "createdAt": "2022-01-12T14:43:11.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "My argument is prefaced with the following assertion:\nIt is better to not reach finality than it is to reach finality with a single client.",
+      "createdAt": "2022-01-12T14:43:37.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I would *rather* finality stop happening if we have a dominant client than continue to have finality and risk reaching incorrect finality due to a dominant client bug.",
+      "createdAt": "2022-01-12T14:44:23.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We want finality to be *final*, which ideally includes incredibly low chance of user activated rollback.",
+      "createdAt": "2022-01-12T14:44:49.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "One way we can do that is by refusing to achieve finality if we *think* that the network only has one client making the decisions.",
+      "createdAt": "2022-01-12T14:45:11.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "experience_",
+      "category": "general",
+      "parent": "",
+      "content": "Exactly. A troll vector, with no direct financial incentive and requiring a large amount of capital.",
+      "createdAt": "2022-01-12T14:45:42.090000+00:00",
+      "attachments": []
+    }
+  ]
+}

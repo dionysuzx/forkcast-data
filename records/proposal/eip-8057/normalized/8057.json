@@ -1,0 +1,78 @@
+{
+  "id": 8057,
+  "title": "EIP-8057: Inter-Block Temporal Locality Gas Discounts",
+  "status": "Draft",
+  "description": "Multi‑block temporal locality discounts for state and account access",
+  "laymanDescription": "Ethereum clients already cache recently used state, so touching the same contracts again soon is cheaper in practice. This EIP updates gas costs to reflect that reality: if an account or storage slot was accessed in the last few blocks, the first access in a new transaction costs less gas. Nothing else about how transactions work changes.",
+  "author": "Ben Adams (@benaadams), Toni Wahrstätter (@nerolation), Maria Inês Silva (@misilva73), Amirul Ashraf (@asdacap)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-10-20",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-8057-block-temporal-locality-gas-discounts/25912",
+  "requires": [
+    "2929",
+    "7928"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/225",
+          "date": "2025-12-04"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Ben Adams",
+          "discord": "ben_a_adams"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Some transactions touching recently used contracts or storage may cost less gas, lowering typical fees without changing how users interact."
+    },
+    "appDevs": {
+      "description": "Apps that reuse the same accounts or storage in nearby blocks pay less gas on first access. No opcode changes required."
+    },
+    "walletDevs": {
+      "description": "Wallet gas estimators must include temporal discounts using recent block access lists. Pricing is deterministic from public chain data."
+    },
+    "toolingInfra": {
+      "description": "Builders and searchers may batch related operations across back-to-back blocks to capture discounts. Tooling must report per-call gas using this rule."
+    },
+    "layer2s": {
+      "description": "Rollup bridges and keepers reusing L1 state across nearby blocks pay less gas on first access. Rollup protocol rules remain unchanged."
+    },
+    "stakersNodes": {
+      "description": "Validators must upgrade for the fork and maintain a short rolling index of recently accessed items to verify block gas charges."
+    },
+    "clClients": {
+      "description": "Consensus clients mostly just activate the fork and accept payloads using the new gas schedule. No other logic changes."
+    },
+    "elClients": {
+      "description": "Execution-layer clients must implement the new temporal discount logic, track prior-block access lists, and update gas accounting for first accesses."
+    }
+  },
+  "benefits": [
+    "Aligns gas costs with real client caching and hardware behavior.",
+    "Lowers average per-access gas without increasing worst-case cost.",
+    "Improves effective L1 throughput and block execution efficiency.",
+    "Enables deterministic, provable pricing from recent block data, easing stateless validation."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This proposal introduces a deterministic, multi-block discount for the first access to accounts and storage keys in a transaction. The discount depends on how many blocks have passed since the item was last accessed, decaying smoothly to zero over a fixed recent window. Intra-block warming semantics are unchanged - there is no warming across transactions within a block. The mechanism builds on block-level access lists ([EIP-7928](./eip-7928.md)), which are committed in prior blocks. This allows a newly synced node to correctly price the first block it validates without replaying historical execution. ## Motivation Current warm and cold access pricing correctly models client state costs in the *worst case* but leaves a predictable efficiency gap in the *common case*. Clients maintain short-lived in-memory caches of recently accessed accounts and storage slots to handle short reorgs and pipeline execution across blocks. These caches make accesses from recent blocks materially cheaper than fully cold loads, yet the gas model does not reflect this. As a result, Ethereum's gas schedule is conservative: it prices every \"first access\" as if it were completely cold, even though for most active contracts those lookups are served from hot caches or SSD pages still in memory. The gap between average and worst-case cost limits how far the block gas limit can safely rise-clients must size for the worst case even if most blocks are far cheaper in practice. We can adjust gas prices to surface this mechanical sympathy, rewarding patterns that align naturally with how hardware and clients already behave. This proposal narrows that gap in a deterministic and consensus-safe way. It introduces a smoothly decaying, per-item discount based solely on *publicly observable prior-block activity* recorded in block-level access lists ([EIP-7928](./eip-7928.md)). That achieves three effects: 1. **Predictability at submission time** - Unlike same-block or cross-transaction warming, discounts depend only on past blocks, so users, builders, and wallets can compute exact costs deterministically from on-chain data. 2. **Behavioural alignment** - The mechanism encourages natural temporal locality: dapps and operators who reuse state within a few blocks save gas, reflecting the real cost profile of client caching. 3. **Improved L1 scalability** - By reducing the *average* gas cost of realistic workloads without changing the *worst case*, 8057 effectively raises real execution throughput per gas, helping move toward the \"Scale L1\" goal of larger blocks and better hardware utilisation. Empirically, traces show that most hot contracts are touched repeatedly within a few blocks. A 32-block (≈6-minute) window captures the majority of these recurrences. In this regime, total gas usage per block can fall by several percent in steady state, freeing execution capacity without altering consensus rules or transaction semantics. In short, 8057 aligns Ethereum's gas economics with real execution cost, using already-available data (BALs) to make temporal locality explicit, deterministic, and beneficial. As the saving depends only on publicly observable prior-block activity, it is knowable at submission time. Unlike same-block effects, it is therefore behaviour-shaping rather than incidental. It nudges workloads that naturally cluster accesses to keep doing so, matching how clients amortise repeated recent accesses. This proposal is intentionally scoped to per-transaction warming and does not apply intra-block warming across transactions. ## Specification ### Terminology and constants | Name | Description | Default | |-----------------------------|-----------------------|-----------------| | `WINDOW_SIZE_BLOCKS`| Number of recent blocks over which a discount may apply. | `32` | | `CURRENT_BLOCK_NUMBER` | The block number of the transaction being executed. | - | | `LAST_ACCESS_BLOCK_NUMBER(item)` | The most recent block number strictly less than `CURRENT_BLOCK_NUMBER` in which `item` was accessed by an executed transaction. If unknown or older than `WINDOW_SIZE_BLOCKS`, it is treated as not found. | - | | `BLOCK_DISTANCE_IN_BLOCKS(item)` | Defined as `CURRENT_BLOCK_NUMBER - LAST_ACCESS_BLOCK_NUMBER(item)` when the latter is found, else a value greater than `WINDOW_SIZE_BLOCKS`. | - | Gas constants from existing behaviour: | Name | Value | |-----------------------------|-------:| | `SLOAD_WARM_GAS_COST` | `100` | | `SLOAD_COLD_SURCHARGE_GAS` | `2100` | | `ACCOUNT_WARM_GAS_COST` | `100` | | `ACCOUNT_COLD_SURCHARGE_GAS`| `2600` | Discount caps (this EIP treats maximum as full cold surcharge, minimum as zero): | Name | Value | |---------------------------|-----------------------------:| | `DISCOUNT_MAX_SLOAD` | `SLOAD_COLD_SURCHARGE_GAS` | | `DISCOUNT_MIN_SLOAD` | `0` | | `DISCOUNT_MAX_ACCOUNT` | `ACCOUNT_COLD_SURCHARGE_GAS` | | `DISCOUNT_MIN_ACCOUNT` | `0` | This means the closest prior-block usage allows the first access in a transaction to be charged at warm cost, and the far edge of the window trends to the normal cold-plus-warm cost. ### Scope of operations This EIP applies the discount to the **first access in a transaction** of: - Storage keys accessed by `SLOAD` and by any operation that first reads a slot as part of its semantics (for example, `SSTORE`'s read step). - Account touches that incur the cold account access surcharge under the current gas schedule, including but not limited to: `BALANCE`, `EXTCODEHASH`, `EXTCODESIZE`, `EXTCODECOPY`, and the target account of `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL`. Writes are affected **only** to the extent they perform an initial read or account touch that would have been charged as cold. Write-specific costs and any refund semantics are unchanged. Precompiles remain unchanged and are always warm. Because they do not pay a cold surcharge, no discount is applied to precompile calls. Access lists per [EIP-2930](./eip-2930.md) remain effective and, when present, pre-warm"
+}

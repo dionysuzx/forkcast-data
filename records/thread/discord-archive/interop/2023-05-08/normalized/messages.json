@@ -1,0 +1,988 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2023-05-08",
+  "messageCount": 299,
+  "sourceHash": "14fe26490046d3416092423d276bc28c8fdc17af2b64906b44ba353247783ac5",
+  "searchText": "<@602753420033785856> @otherlighthousepeeps, I'm having an issue where lighthouse-geth (our rpc endpoint) fails to gossip blobtxs to the rest of the network. The node itself runs no validators, thus it now has 105 pending tx on devnet-5. Should the gossip work already with LH ? I haven't been working on Deneb yet, but I'll summon those who have You had a little green tag next to your name 😄 thats more like en EL side issue, not sure if ELs have implemented blob tx broadcasting <@403636673914863626> I remember ethereumjs broadcasting blob tx ids to peers and then allowing them to download (or downloading from peers) nethermind block proposals are also lacking. with all CL pairs Would the gossiped blobs show up in the `txpool` or `txpool_status` related RPC calls? Or is there a new RPC call to dump pending blobs? Depending on the version of geth they show up on txpool.status gossiped blobs of CL side would already be in the block, i think we are talking about pending blobs in a particular EL node which haven't yet been minted in a block (mdehoog's branch should show up) afaik EL side APIs aren't standardized right? Would all clients be adding a similar pending blob call? That would probably make debugging tons easier in the future I think the mechanism on EL side is, broadcast blob tx hash and then peer pulls the tx using the old mechanisms let me check in ethereumjs code eth/68, but have all clients implemented that already? i think ethereumjs implemented it afaik mdehoog/geth still broadcasts the blob transactions afaict, so they should arrive even if you have not implemented eth/68 cc <@898563924440543283> we send `NewPooledTransactionHashes` messages to peers on every `sendRawTransaction` call This would probably be the place to add a check that we're not distributing blob transactions: https://github.com/mdehoog/go-ethereum/blob/ac64c4400e35cf8c7e2d02f99e257534096d2ec9/eth/protocols/eth/broadcast.go#L83 <@898563924440543283> Don't know if it makes sense to add that now, since the new blob txpool will have a different mechanism anyway ethereumjs seems to be handling `Transactions` so should ideally get the txs or download from hashes, <@412614104222531604> i think its also worth checking if EL nodes are peered properly <@412614104222531604> Are you sure the txs are not getting distributed correctly, or could it be that the transactions are actually invalid and thus are not included in a block? https://ethstats.4844-devnet-5.ethpandaops.io/ Yea looks like they're not peered too optimally, esp if different clients have different blob gossip concepts implimented Could round robin submit a new blob to each node and see which one's make it on chain. Yeah peering is always a struggle. Or just set up a new node and see if they get the transactions I am in the process of doing that when you talk gossip its on EL side or CL side ? but then you'd just know that one node is peered well or badly right? ethstats just shows the EL side of things 😄 so i meant EL gossip ahh ok thanks, i was getting confused You see if transactions have the ability to travel around the network or if they are not passed at all nvm, the rpc endpoint is actually geth/prysm pair, that is not monitored by forkmon/ethstats Will add the node to ethstats in a few mins Trying to sync up a new lh node I get the following output: ``` May 08 07:46:15.622 DEBG Connection established connection: Dialer, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p May 08 07:46:15.622 DEBG Sending Status Request fork_digest: [79, 101, 45, 11], finalized_epoch: 0, finalized_root: 0x0000…0000, head_slot: 0, head_root: 0x66c7…6f7b, peer: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: router May 08 07:46:15.706 DEBG Obtained peer's metadata new_seq_no: 0, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p May 08 07:46:15.793 DEBG Received Status Response fork_digest: [61, 8, 154, 17], finalized_epoch: 2677, finalized_root: 0xa54d…5902, head_slot: 85728, head_root: 0x333c…5fcd, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: router May 08 07:46:15.793 DEBG Handshake Failure reason: Incompatible forks Ours:4f652d0b Theirs:3d089a11, peer: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx May 08 07:46:15.793 DEBG Sending goodbye to peer score: 0.00, reason: Irrelevant Network, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p May 08 07:46:15.793 DEBG Peer has been banned score: -100.00, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p May 08 07:46:15.793 DEBG Peer Manager disconnecting peer reason: Irrelevant Network, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p May 08 07:46:15.815 DEBG Ignoring rpc message of disconnecting peer, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, msg_kind: outbound_err, protocol: goodbye, service: libp2p May 08 07:46:15.815 DEBG Peer disconnected peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p ``` Can the CL not sync from a node that is on a further fork? use lodestar 😆 Do you have a guide for that? that peer was on an irrelevant network (atleast what the logs say), what bootnode are you using? I used both the first and last enr in this list: https://config.4844-devnet-5.ethpandaops.io/enr.txt refreshing the list now may have been outdated. lool, first bootnode on the nw is Lodestar <@792822129019584562> 😝 shouldn't have been all outdated ``` Args\": [ \"./packages/cli/bin/lodestar\", \"beacon\", \"--dataDir=/data\", \"--discv5\", \"--listenAddress=0.0.0.0\", \"--port=9000\", \"--enr.ip=104.248.93.148\", \"--enr.tcp=9000\", \"--enr.udp=9000\", \"--rest\", \"--rest.address=0.0.0.0\", \"--rest.port=5052\", \"--jwt-secret=/execution-auth.jwt\", \"--execution.urls=http://geth:8551\", \"--metrics\", \"--metrics.address=0.0.0.0\", \"--metrics.port=5054\", \"--paramsFile=/network-config/config.yaml\", \"--genesisStateFile=/network-config/genesis.ssz\", \"--bootnodes=enr:-Iq4QDaIjg-Io_OamJKGZEGPE8smXZwH3gBgo-gk6zmUhu7zTBvYQeY8kqT19ShPxH8NhnqvEghDT2AK5O1fONZoRl-GAYe88F5ngmlkgnY0gmlwhIbRx2aJc2VjcDI1NmsxoQPZLBX2rEiQ20AfN2f1SQLfnGMQd_t7Rq0-HNkYA9d4uoN1ZHCCIyk,enr:-MS4QDPpPzkDJ65iCq9dthJZ5p49OljTrtbHN_D3f97T-BKjNMdd2MQi4Vu7N--dmotiLZDgiw8BnrdDxkd_ICgvneIHh2F0dG5ldHOIAAAAAAAAAACEZXRoMpCzMmyVQEhEBQEAAAAAAAAAgmlkgnY0gmlwhIbRx2aJc2VjcDI1NmsxoQJoQoV-vbiuItOSCsczcQ9vvL_IoaNaslVeqUpnyxP0jYhzeW5jbmV0c4gAAAAAAAAAAIN0Y3CCIyiDdWRwgiMo\", \"--network.connectToDiscv5Bootnodes\", \"--nat=true\" ], \"State\": { ``` args from deployed lodestar<>geth of devnet5 (so just space separate them) the first ENR is valid for sure, just cross-checked via the API and the peer ID (`16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx`) matches what one sees in marius's logs so lighthouse is banning that lodestar node for being on an irrelevant nw, which it shouldnt do I'm on LH version: Lighthouse v4.1.0-b2ccc82 Which is ``` commit b2ccc822d8183068b6d2feee7fe81441841fbf80 (HEAD -> eip4844, origin/eip4844) Author: Pawan Dhananjay <pawandhananjay@gmail.com> Date: Fri Apr 21 14:14:57 2023 -0700 Fix compiler issues ``` maybe the wrong branch? probably wrong branch, we're on `ethpandaops/lighthouse:realbigsean-devnetv5-fa9c263` Yeah just saw, okay will switch, sorry for the noise this branch 😄 https://github.com/realbigsean/lighthouse/tree/devnetv5 The rpc endpoint processed a faucet request without much issues. included the rpc endpoint now in forkmon/ethstats too txpool content of the rpc endpoint: Okay syncing Could you run the fuzzer again? Yep, just send a handcrafted tx It's not being mined proposals are infrequent now 😦 we have issues with multiple ELs proposing blocks I think its a gossiped issue rpc doesn't seem to gossip the blob txs to other nodes. Bit of a heads up for anyone planning to participate/test anything on devnet-5 in the next couple of weeks. <@199561711278227457> and I are going on holiday for 2 weeks starting from Tuesday/Wednesday this week. Most stuff will be taken over by <@131476523050860545> for those couple weeks, so if you need help with getting something working, feel free to ping him. We seem to have had a fork at 62717 - 62719 all erigon nodes forked off to their own chain https://forkmon.4844-devnet-5.ethpandaops.io Hmm that might have been me Transaction three is my handcrafted one and it does the following: ``` // PUSH0, DATAHASH, PUSH0, DATAHASH, SSTORE exec([]byte{0x5f, 0x49, 0x5f, 0x49, 0x55}) ``` (with a random blob) Yeah erigon still can't get back to head ```[INFO] [05-08|13:10:40.025] [1/5 MiningCreateBlock] Start mine block=62719 baseFee=7 gasLimit=30000000 [INFO] [05-08|13:10:40.055] Built block hash=0x3862be4921d3ec82be7a9720d35154da3bb701b590e3924ca2db8cc0347b11d6 height=62719 txs=0 gas used %=0.000 time=44.316931ms [INFO] [05-08|13:10:48.095] Received GetPayloadV3 payloadId=163 [INFO] [05-08|13:10:48.146] [2/15 Headers] Handling new payload height=62719 hash=0x3862be4921d3ec82be7a9720d35154da3bb701b590e3924ca2db8cc0347b11d6 [INFO] [05-08|13:10:48.160] [2/15 Headers] DONE in=1m59.932070218s [INFO] [05-08|13:10:48.163] [2/15 Headers] Waiting for Consensus Layer... [INFO] [05-08|13:10:48.168] [2/15 Headers] Fork choice update: flushing in-memory state (built by previous newPayload)``` ```[WARN] [05-08|13:07:00.544] Could not validate block err=\"[5/7 Execution] mismatched receipt headers for block 62717 (0x239fa451f462fec2e4f77bad18f6016b013409dd3f88be821de250d32b5aab99 != 0xe0dabb4958b38ae35ea6a86dfb216bc4f0b57add10675f50d43cabbd1b893265)\" ``` <@360491619402776577> you think that means the datahash precompile is computing the wrong value? not entirely sure where to start looking 🙂 I'm not even triggering the datahash precompile, only the opcode. I think the easiest is to `debug.standardtracebadblocktofile` on a node that rejected the canonical block ``` > debug.standardTraceBlockToFile(\"0x8479de330419e8acc597cda0fb467dcd1fdd4fb0f20f54970328df8c328a1f37\", {\"reexec\":100000}) INFO [05-08|15:36:12.648] Wrote standard trace file=/tmp/block_0x8479de33-0-0xc1953f69-1298618860 WARN [05-08|15:36:12.648] Served debug_standardTraceBlockToFile reqid=35 duration=\"341.309µs\" err=\"data gas limit reached\" Error: data gas limit reached at web3.js:6365:9(39) at send (web3.js:5099:62(29)) at <eval>:1:31(6) ``` Upps looks like the tracing is broken as well that error is from geth I assume? I wonder if we forgot to load up datagas in tracing. Erigon doesn't seem to support that RPC at least as we configured it? I get method does not exist/is not available. It might not be enabled. `http.api=eth,erigon,engine,web3,net,debug,trace,txpool,admin` these are enabled In geth you can only really use that api via console I think I don't see DataGasLimit being set in TransactionToMessage but its being used to set the datagas limit. not even sure why DataGasLimit is a part of the \"Message\" struct. (in Geth -- so this is the tracer issue I think) 62764 has another fork. geth-prysm and lodestar-ethereumjs geth-prysm is the rpc port Are you using a local node to submit tx <@360491619402776577> yes can I track that node also with forkmon? There are no tx in the canonical chain for that block afaict fix for geth: https://github.com/mdehoog/go-ethereum/pull/127 building img that's just a tracer fix so if Marius is running locally he can patch it in to his client don't think it needs to be rolled out everywhere. I can also patch one of the nodes I'm unfortunately going to have iffy availability today so may not be able to debug the erigon issue right away. Both are from me and doing exactly the datahash opcode thingy The transaction: ``` eth.getTransaction(\"0x8e3b43edd589a7188dca9e7f151a8f4acba18dcf24e930809b32b6f763d01e74\") { accessList: [], blobVersionedHashes: [\"0x01d343d3cd62abd9c5754cbe5128c25ea90786a8ae75fb79c8cf95f4dcdd08ec\"], blockHash: \"0x8479de330419e8acc597cda0fb467dcd1fdd4fb0f20f54970328df8c328a1f37\", blockNumber: 62717, cha",
+  "excerpts": [
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@602753420033785856> @otherlighthousepeeps, I'm having an issue where lighthouse-geth (our rpc endpoint) fails to gossip blobtxs to the rest of the network. The node itself runs no validators, thus it now has 105 pending tx on devnet-5. Should the gossip work already with LH ?",
+      "createdAt": "2023-05-08T07:16:52.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "I haven't been working on Deneb yet, but I'll summon those who have",
+      "createdAt": "2023-05-08T07:18:38.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "You had a little green tag next to your name 😄",
+      "createdAt": "2023-05-08T07:19:08.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "thats more like en EL side issue, not sure if ELs have implemented blob tx broadcasting",
+      "createdAt": "2023-05-08T07:20:43.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@403636673914863626> I remember ethereumjs broadcasting blob tx ids to peers and then allowing them to download",
+      "createdAt": "2023-05-08T07:21:31.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "(or downloading from peers)",
+      "createdAt": "2023-05-08T07:21:56.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "nethermind block proposals are also lacking.",
+      "createdAt": "2023-05-08T07:23:34.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "with all CL pairs",
+      "createdAt": "2023-05-08T07:23:48.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Would the gossiped blobs show up in the `txpool` or `txpool_status` related RPC calls? Or is there a new RPC call to dump pending blobs?",
+      "createdAt": "2023-05-08T07:24:35.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Depending on the version of geth they show up on txpool.status",
+      "createdAt": "2023-05-08T07:26:28.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "gossiped blobs of CL side would already be in the block, i think we are talking about pending blobs in a particular EL node which haven't yet been minted in a block",
+      "createdAt": "2023-05-08T07:26:59.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "(mdehoog's branch should show up)",
+      "createdAt": "2023-05-08T07:27:03.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "afaik EL side APIs aren't standardized right? Would all clients be adding a similar pending blob call? That would probably make debugging tons easier in the future",
+      "createdAt": "2023-05-08T07:28:35.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think the mechanism on EL side is, broadcast blob tx hash and then peer pulls the tx using the old mechanisms",
+      "createdAt": "2023-05-08T07:29:31.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me check in ethereumjs code",
+      "createdAt": "2023-05-08T07:29:42.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "eth/68, but have all clients implemented that already?",
+      "createdAt": "2023-05-08T07:30:17.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think ethereumjs implemented it afaik",
+      "createdAt": "2023-05-08T07:30:47.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "mdehoog/geth still broadcasts the blob transactions afaict, so they should arrive even if you have not implemented eth/68",
+      "createdAt": "2023-05-08T07:34:14.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@898563924440543283>",
+      "createdAt": "2023-05-08T07:34:40.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "we send  `NewPooledTransactionHashes` messages to peers on every `sendRawTransaction` call",
+      "createdAt": "2023-05-08T07:34:46.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "This would probably be the place to add a check that we're not distributing blob transactions: https://github.com/mdehoog/go-ethereum/blob/ac64c4400e35cf8c7e2d02f99e257534096d2ec9/eth/protocols/eth/broadcast.go#L83 <@898563924440543283>",
+      "createdAt": "2023-05-08T07:36:21.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Don't know if it makes sense to add that now, since the new blob txpool will have a different mechanism anyway",
+      "createdAt": "2023-05-08T07:36:55.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ethereumjs seems to be handling `Transactions` so should ideally get the txs or download from hashes, <@412614104222531604> i think its also worth checking if EL nodes are peered properly",
+      "createdAt": "2023-05-08T07:37:36.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> Are you sure the txs are not getting distributed correctly, or could it be that the transactions are actually invalid and thus are not included in a block?",
+      "createdAt": "2023-05-08T07:39:16.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://ethstats.4844-devnet-5.ethpandaops.io/\n\nYea looks like they're not peered too optimally, esp if different clients have different blob gossip concepts implimented",
+      "createdAt": "2023-05-08T07:39:20.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Could round robin submit a new blob to each node and see which one's make it on chain.",
+      "createdAt": "2023-05-08T07:40:03.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah peering is always a struggle.",
+      "createdAt": "2023-05-08T07:40:15.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Or just set up a new node and see if they get the transactions",
+      "createdAt": "2023-05-08T07:40:28.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I am in the process of doing that",
+      "createdAt": "2023-05-08T07:40:37.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "when you talk gossip its on EL side or CL side ?",
+      "createdAt": "2023-05-08T07:40:52.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "but then you'd just know that one node is peered well or badly right?",
+      "createdAt": "2023-05-08T07:40:58.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ethstats just shows the EL side of things 😄\nso i meant EL gossip",
+      "createdAt": "2023-05-08T07:41:10.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahh ok thanks, i was getting confused",
+      "createdAt": "2023-05-08T07:41:24.309000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "You see if transactions have the ability to travel around the network or if they are not passed at all",
+      "createdAt": "2023-05-08T07:41:54.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "nvm, the rpc endpoint is actually geth/prysm pair, that is not monitored by forkmon/ethstats",
+      "createdAt": "2023-05-08T07:45:02.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Will add the node to ethstats in a few mins",
+      "createdAt": "2023-05-08T07:45:10.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Trying to sync up a new lh node I get the following output: \n```\nMay 08 07:46:15.622 DEBG Connection established                  connection: Dialer, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\nMay 08 07:46:15.622 DEBG Sending Status Request                  fork_digest: [79, 101, 45, 11], finalized_epoch: 0, finalized_root: 0x0000…0000, head_slot: 0, head_root: 0x66c7…6f7b, peer: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: router\nMay 08 07:46:15.706 DEBG Obtained peer's metadata                new_seq_no: 0, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\nMay 08 07:46:15.793 DEBG Received Status Response                fork_digest: [61, 8, 154, 17], finalized_epoch: 2677, finalized_root: 0xa54d…5902, head_slot: 85728, head_root: 0x333c…5fcd, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: router\nMay 08 07:46:15.793 DEBG Handshake Failure                       reason: Incompatible forks Ours:4f652d0b Theirs:3d089a11, peer: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx\nMay 08 07:46:15.793 DEBG Sending goodbye to peer                 score: 0.00, reason: Irrelevant Network, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\nMay 08 07:46:15.793 DEBG Peer has been banned                    score: -100.00, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\nMay 08 07:46:15.793 DEBG Peer Manager disconnecting peer         reason: Irrelevant Network, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\nMay 08 07:46:15.815 DEBG Ignoring rpc message of disconnecting peer, peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, msg_kind: outbound_err, protocol: goodbye, service: libp2p\nMay 08 07:46:15.815 DEBG Peer disconnected                       peer_id: 16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx, service: libp2p\n```",
+      "createdAt": "2023-05-08T07:48:24.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can the CL not sync from a node that is on a further fork?",
+      "createdAt": "2023-05-08T07:50:14.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "use lodestar 😆",
+      "createdAt": "2023-05-08T07:51:04.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Do you have a guide for that?",
+      "createdAt": "2023-05-08T07:51:53.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "that peer was on an irrelevant network (atleast what the logs say), what bootnode are you using?",
+      "createdAt": "2023-05-08T07:52:06.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I used both the first and last enr in this list: https://config.4844-devnet-5.ethpandaops.io/enr.txt",
+      "createdAt": "2023-05-08T07:53:03.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "refreshing the list now",
+      "createdAt": "2023-05-08T07:53:19.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "may have been outdated.",
+      "createdAt": "2023-05-08T07:53:24.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "lool, first bootnode on the nw is Lodestar <@792822129019584562> 😝",
+      "createdAt": "2023-05-08T07:53:40.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "shouldn't have been all outdated",
+      "createdAt": "2023-05-08T07:53:41.162000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\nArgs\": [\n            \"./packages/cli/bin/lodestar\",\n            \"beacon\",\n            \"--dataDir=/data\",\n            \"--discv5\",\n            \"--listenAddress=0.0.0.0\",\n            \"--port=9000\",\n            \"--enr.ip=104.248.93.148\",\n            \"--enr.tcp=9000\",\n            \"--enr.udp=9000\",\n            \"--rest\",\n            \"--rest.address=0.0.0.0\",\n            \"--rest.port=5052\",\n            \"--jwt-secret=/execution-auth.jwt\",\n            \"--execution.urls=http://geth:8551\",\n            \"--metrics\",\n            \"--metrics.address=0.0.0.0\",\n            \"--metrics.port=5054\",\n            \"--paramsFile=/network-config/config.yaml\",\n            \"--genesisStateFile=/network-config/genesis.ssz\",\n            \"--bootnodes=enr:-Iq4QDaIjg-Io_OamJKGZEGPE8smXZwH3gBgo-gk6zmUhu7zTBvYQeY8kqT19ShPxH8NhnqvEghDT2AK5O1fONZoRl-GAYe88F5ngmlkgnY0gmlwhIbRx2aJc2VjcDI1NmsxoQPZLBX2rEiQ20AfN2f1SQLfnGMQd_t7Rq0-HNkYA9d4uoN1ZHCCIyk,enr:-MS4QDPpPzkDJ65iCq9dthJZ5p49OljTrtbHN_D3f97T-BKjNMdd2MQi4Vu7N--dmotiLZDgiw8BnrdDxkd_ICgvneIHh2F0dG5ldHOIAAAAAAAAAACEZXRoMpCzMmyVQEhEBQEAAAAAAAAAgmlkgnY0gmlwhIbRx2aJc2VjcDI1NmsxoQJoQoV-vbiuItOSCsczcQ9vvL_IoaNaslVeqUpnyxP0jYhzeW5jbmV0c4gAAAAAAAAAAIN0Y3CCIyiDdWRwgiMo\",\n            \"--network.connectToDiscv5Bootnodes\",\n            \"--nat=true\"\n        ],\n        \"State\": {\n\n```",
+      "createdAt": "2023-05-08T07:53:51.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "args from deployed lodestar<>geth of devnet5 (so just space separate them)",
+      "createdAt": "2023-05-08T07:53:59.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "the first ENR is valid for sure, just cross-checked via the API",
+      "createdAt": "2023-05-08T07:54:38.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "and the peer ID (`16Uiu2HAm2SfDH4t29TyUMwUzxGwqSfm2mvpXywwZ3tsb5EbyXCrx`) matches what one sees in marius's logs",
+      "createdAt": "2023-05-08T07:54:56.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "so lighthouse is banning that lodestar node for being on an irrelevant nw, which it shouldnt do",
+      "createdAt": "2023-05-08T07:55:13.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm on LH version: Lighthouse v4.1.0-b2ccc82 \nWhich is \n```\ncommit b2ccc822d8183068b6d2feee7fe81441841fbf80 (HEAD -> eip4844, origin/eip4844)\nAuthor: Pawan Dhananjay <pawandhananjay@gmail.com>\nDate:   Fri Apr 21 14:14:57 2023 -0700\n\n    Fix compiler issues\n\n```",
+      "createdAt": "2023-05-08T07:55:58.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "maybe the wrong branch?",
+      "createdAt": "2023-05-08T07:56:32.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "probably wrong branch, we're on `ethpandaops/lighthouse:realbigsean-devnetv5-fa9c263`",
+      "createdAt": "2023-05-08T07:56:48.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah just saw, okay will switch, sorry for the noise",
+      "createdAt": "2023-05-08T07:57:38.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "this branch 😄\nhttps://github.com/realbigsean/lighthouse/tree/devnetv5",
+      "createdAt": "2023-05-08T07:57:42.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "The rpc endpoint processed a faucet request without much issues.",
+      "createdAt": "2023-05-08T07:58:47.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "included the rpc endpoint now in forkmon/ethstats too",
+      "createdAt": "2023-05-08T07:58:57.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "txpool content of the rpc endpoint:",
+      "createdAt": "2023-05-08T08:03:05.943000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "8e9ef774741acf9740b65acb99f8554ae7ef8eae80ac846b05460ae4e9ae52aa"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Okay syncing",
+      "createdAt": "2023-05-08T08:03:06.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "Could you run the fuzzer again?",
+      "createdAt": "2023-05-08T11:27:36.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep, just send a handcrafted tx",
+      "createdAt": "2023-05-08T11:28:21.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "It's not being mined",
+      "createdAt": "2023-05-08T11:28:41.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "proposals are infrequent now 😦",
+      "createdAt": "2023-05-08T12:31:32.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have issues with multiple ELs proposing blocks",
+      "createdAt": "2023-05-08T12:31:43.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think its a gossiped issue",
+      "createdAt": "2023-05-08T12:43:43.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "rpc doesn't seem to gossip the blob txs to other nodes.",
+      "createdAt": "2023-05-08T12:43:53.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Bit of a heads up for anyone planning to participate/test anything on devnet-5 in the next couple of weeks. <@199561711278227457> and I are going on holiday for 2 weeks starting from Tuesday/Wednesday this week. Most stuff will be taken over by <@131476523050860545> for those couple weeks, so if you need help with getting something working, feel free to ping him.",
+      "createdAt": "2023-05-08T12:49:45.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "We seem to have had a fork at 62717 - 62719 all erigon nodes forked off to their own chain https://forkmon.4844-devnet-5.ethpandaops.io",
+      "createdAt": "2023-05-08T13:14:17.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm that might have been me",
+      "createdAt": "2023-05-08T13:19:40.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-05-08T13:20:11.883000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "4d57521e17a6b5dcdf9a9977e6955a6d86243b321f34d3456f2d1bed083176a4"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Transaction three is my handcrafted one",
+      "createdAt": "2023-05-08T13:20:22.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "and it does the following:\n```\n\n    // PUSH0, DATAHASH, PUSH0, DATAHASH, SSTORE\n    exec([]byte{0x5f, 0x49, 0x5f, 0x49, 0x55})\n```",
+      "createdAt": "2023-05-08T13:20:40.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "(with a random blob)",
+      "createdAt": "2023-05-08T13:21:02.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah erigon still can't get back to head",
+      "createdAt": "2023-05-08T13:24:34.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```[INFO] [05-08|13:10:40.025] [1/5 MiningCreateBlock] Start mine       block=62719 baseFee=7 gasLimit=30000000\n[INFO] [05-08|13:10:40.055] Built block                              hash=0x3862be4921d3ec82be7a9720d35154da3bb701b590e3924ca2db8cc0347b11d6 height=62719 txs=0 gas used %=0.000 time=44.316931ms\n[INFO] [05-08|13:10:48.095] Received GetPayloadV3                    payloadId=163\n[INFO] [05-08|13:10:48.146] [2/15 Headers] Handling new payload      height=62719 hash=0x3862be4921d3ec82be7a9720d35154da3bb701b590e3924ca2db8cc0347b11d6\n[INFO] [05-08|13:10:48.160] [2/15 Headers] DONE                      in=1m59.932070218s\n[INFO] [05-08|13:10:48.163] [2/15 Headers] Waiting for Consensus Layer...\n[INFO] [05-08|13:10:48.168] [2/15 Headers] Fork choice update: flushing in-memory state (built by previous newPayload)```",
+      "createdAt": "2023-05-08T13:25:48.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "```[WARN] [05-08|13:07:00.544] Could not validate block                 err=\"[5/7 Execution] mismatched receipt headers for block 62717 (0x239fa451f462fec2e4f77bad18f6016b013409dd3f88be821de250d32b5aab99 != 0xe0dabb4958b38ae35ea6a86dfb216bc4f0b57add10675f50d43cabbd1b893265)\"\n```",
+      "createdAt": "2023-05-08T13:27:20.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@360491619402776577> you think that means the datahash precompile is computing the wrong value?",
+      "createdAt": "2023-05-08T13:32:26.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "not entirely sure where to start looking 🙂",
+      "createdAt": "2023-05-08T13:33:03.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm not even triggering the datahash precompile, only the opcode. I think the easiest is to `debug.standardtracebadblocktofile`  on a node that rejected the canonical block",
+      "createdAt": "2023-05-08T13:34:39.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\n> debug.standardTraceBlockToFile(\"0x8479de330419e8acc597cda0fb467dcd1fdd4fb0f20f54970328df8c328a1f37\", {\"reexec\":100000})\nINFO [05-08|15:36:12.648] Wrote standard trace                     file=/tmp/block_0x8479de33-0-0xc1953f69-1298618860\nWARN [05-08|15:36:12.648] Served debug_standardTraceBlockToFile    reqid=35 duration=\"341.309µs\" err=\"data gas limit reached\"\nError: data gas limit reached\n    at web3.js:6365:9(39)\n    at send (web3.js:5099:62(29))\n    at <eval>:1:31(6)\n```\nUpps looks like the tracing is broken as well",
+      "createdAt": "2023-05-08T13:36:53.769000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "that error is from geth I assume?  I wonder if we forgot to load up datagas in tracing.",
+      "createdAt": "2023-05-08T13:42:36.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Erigon doesn't seem to support that RPC at least as we configured it?  I get method does not exist/is not available.",
+      "createdAt": "2023-05-08T13:43:09.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "It might not be enabled.",
+      "createdAt": "2023-05-08T13:43:18.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`http.api=eth,erigon,engine,web3,net,debug,trace,txpool,admin`",
+      "createdAt": "2023-05-08T13:43:30.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "these are enabled",
+      "createdAt": "2023-05-08T13:43:37.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "In geth you can only really use that api via console I think",
+      "createdAt": "2023-05-08T13:46:44.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't see DataGasLimit being set in TransactionToMessage but its being used to set the datagas limit.",
+      "createdAt": "2023-05-08T13:46:46.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "not even sure why DataGasLimit is a part of the \"Message\" struct.",
+      "createdAt": "2023-05-08T13:47:16.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "(in Geth -- so this is the tracer issue I think)",
+      "createdAt": "2023-05-08T13:48:12.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "62764 has another fork. geth-prysm and lodestar-ethereumjs",
+      "createdAt": "2023-05-08T13:48:18.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "geth-prysm is the rpc port",
+      "createdAt": "2023-05-08T13:49:04.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Are you using a local node to submit tx <@360491619402776577>",
+      "createdAt": "2023-05-08T13:49:24.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2023-05-08T13:49:29.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "can I track that node also with forkmon?",
+      "createdAt": "2023-05-08T13:49:39.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "There are no tx in the canonical chain for that block afaict",
+      "createdAt": "2023-05-08T13:50:25.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "fix for geth: https://github.com/mdehoog/go-ethereum/pull/127",
+      "createdAt": "2023-05-08T13:52:53.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "building img",
+      "createdAt": "2023-05-08T13:54:02.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "that's just a tracer fix so if Marius is running locally he can patch it in to his client don't think it needs to be rolled out everywhere.",
+      "createdAt": "2023-05-08T13:54:58.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can also patch one of the nodes",
+      "createdAt": "2023-05-08T13:56:03.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm unfortunately going to have iffy availability today so may not be able to debug the erigon issue right away.",
+      "createdAt": "2023-05-08T13:56:10.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-05-08T14:00:34.727000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "04ce6c479821d3da7f4f721589182441379c3aac9b868734015acb4667424ab4"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Both are from me",
+      "createdAt": "2023-05-08T14:00:46.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "and doing exactly the datahash opcode thingy",
+      "createdAt": "2023-05-08T14:00:58.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "The transaction:\n```\n eth.getTransaction(\"0x8e3b43edd589a7188dca9e7f151a8f4acba18dcf24e930809b32b6f763d01e74\")\n\n{\n  accessList: [],\n  blobVersionedHashes: [\"0x01d343d3cd62abd9c5754cbe5128c25ea90786a8ae75fb79c8cf95f4dcdd08ec\"],\n  blockHash: \"0x8479de330419e8acc597cda0fb467dcd1fdd4fb0f20f54970328df8c328a1f37\",\n  blockNumber: 62717,\n  chainId: \"0x120b996ed\",\n  from: \"0xb02a2eda1b317fbd16760128836b0ac59b560e9d\",\n  gas: 500000,\n  gasPrice: 2000000007,\n  hash: \"0x8e3b43edd589a7188dca9e7f151a8f4acba18dcf24e930809b32b6f763d01e74\",\n  input: \"0x5f495f4955\",\n  maxFeePerDataGas: \"0xb2d05e15\",\n  maxFeePerGas: 3000000021,\n  maxPriorityFeePerGas: 2000000000,\n  nonce: 240,\n  r: \"0x14103732b5a9789bbf5ea859ed904155398abbef343f8fd63007efb70795d382\",\n  s: \"0x7272e847382789a092eadf08e2b9002e727376f8466fff0e4d4639fd60a528f2\",\n  to: null,\n  transactionIndex: 1,\n  type: \"0x3\",\n  v: \"0x0\",\n  value: 1\n}\n```",
+      "createdAt": "2023-05-08T14:04:07.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ohhh could it be the leading zero?",
+      "createdAt": "2023-05-08T14:04:28.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm that might just be an artifact of the tracer though",
+      "createdAt": "2023-05-08T14:05:16.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "is the issue that both txs should end up with equivalent elements on the stack?",
+      "createdAt": "2023-05-08T14:09:07.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "No thats fine, both transactions have the exact same datahashes",
+      "createdAt": "2023-05-08T14:12:23.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is someone from <@&688101493978562687> here?",
+      "createdAt": "2023-05-08T14:13:09.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@814151075601973278> is from erigon",
+      "createdAt": "2023-05-08T14:14:55.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I've done the 4844 work though.",
+      "createdAt": "2023-05-08T14:15:07.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm but they maybe know how to get a trace out of erigon",
+      "createdAt": "2023-05-08T14:15:29.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "yup got it, I can ping them on our 4844 erigon telegram channel.",
+      "createdAt": "2023-05-08T14:15:52.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "would regular \"trace_block\" work? I guess we can't do it on the bad block.",
+      "createdAt": "2023-05-08T14:24:21.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "roberto.bayardo",
+      "category": "Testing",
+      "parent": "",
+      "content": "(that was their suggestion)",
+      "createdAt": "2023-05-08T14:24:27.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2023-05-08T14:24:34.614000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> how can I connect to lighthouse-geth-1",
+      "createdAt": "2023-05-08T14:25:51.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "(it has a bad block that I would like to look at)",
+      "createdAt": "2023-05-08T14:26:08.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`ssh devops@lighthouse-geth-1.srv.4844-devnet-5.ethpandaops.io`",
+      "createdAt": "2023-05-08T14:26:21.314000+00:00",
+      "attachments": []
+    }
+  ]
+}

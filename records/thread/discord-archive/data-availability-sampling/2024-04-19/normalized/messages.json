@@ -1,0 +1,398 @@
+{
+  "schemaVersion": 1,
+  "channel": "data-availability-sampling",
+  "date": "2024-04-19",
+  "messageCount": 47,
+  "sourceHash": "fc55b503c3a3d233f4a269acfcc6ef71c790165ae3148b152c84f021aa81a792",
+  "searchText": "Just wanted to reiterate on TG discussion. It was proposed to include unavailable (`is_data_available` false) blocks in FC. The current spec has two similar places - blocks with not yet validated payload are added to FC, such blocks are optimistic, however, if the head is optimistic - no validator duties are allowed. In this case, it's not possible to not add blocks with not yet validated payload, because CL FC needs to drive EL. But this problem is solved by refusing validator duties if the head is optimistic. The second place is where blocks are added to FC only when `is_data_available` is true. So this PeerDAS proposal to include unavailable blobs contradicts the current approach. My understanding always was that it's not secure to include unavailable blocks because those blocks can become permanently unavailable and votes of such blocks can't be counted. AFAIK all the implementations do not recalculate weights on `get_head` (it's very expensive in current implementations). So either all implementations need to start recalculating weights `get_head`, either unavailable blobs can't be included in FC if counting votes of unavailable blobs are considered insecure (that's how it is according to the current spec). If it's no longer considered unsecure, then we need to start to include unavailable blocks in Deneb. <fradamt> > if counting votes of unavailable blobs are considered insecure (that's how it is according to the current spec) I don't think it is insecure. An adversary gets no advantage because they could cast their own votes for an available block on the same fork, and honest participants never vote for unavailable blocks (in 4844 at least), so if there are honest votes for a block which *appears* to be unvailable, it is actually the case that it is available. > If it's no longer considered unsecure, then we need to start to include unavailable blocks in Deneb. That said, I don't see why we should change how things work in Deneb. I am only proposing that we change how things work once we get to PeerDAS. Both solutions are fine for Deneb as far as I know. We should change because now we have an artificial delay because block waits until the last blob arrives. It it's not considered unsecure, then I don't see why we can't use it in Deneb in order to further prove that this approach works. hmm... seems you raised some FC security concerns previously 🙂 https://ethresear.ch/t/from-4844-to-danksharding-a-path-to-scaling-ethereum-da/18046#possible-fork-choice-attack-vectors-9 I'm wondering was there a proper security analysis of this issue (counting votes of unavailable blocks). <fradamt> I think these issues are entirely solved by not having too low of a `CUSTODY_REQUIREMENT` though 😊 (re @DataAvailabilitySampling_bot: <sauliusgrigaitis> hmm... seems you raised some FC security concerns previously 🙂 https://ethresear.ch/t/from-4844-to-danksharding-a-path-to-scaling-ethereum-da/18046#possible-fork-choice-attack-vectors-9) I see, do you propose to do validator duties on a head that has unavailable children? <@520034910149410861> how are you planning on filtering branches in FC? I faced the same problem for ILs in ePBS where I'm allowing blocks to be inserted even without an available IL. The options were to filter them directly at filter block tree or later at get head. I understand that there are in theory situations where a block with an available IL/data can become head even with an unavailable one as parent but I ruled them out all with (block, slot) voting. Thus I found that the simplest is to just not filter anything and modify get_head to give you the latest ancestor with available data <fradamt> I think this is dangerous, because if somehow (e.g. asynchrony) an unavailable block gets more than one committee worth of weight advantage, as far as I can tell there will be a deadlock. If B is the last available ancestor of this unavailable block, each proposer will extend B and get everyone to vote for its block, but this won't be enough to close the gap with the unavailable block. Basically everyone will keep trying to fork out the unavailable block but fail, and the head of the chain will always go back to B. <fradamt> On the other hand, what I am proposing is that you would follow the heaviest available subtree extending B. As soon as someone attempts to fork out the unavailable block (which they will, because it is not output as the head of the chain, but B is), they succeed in doing so (unless the unavailable block is meanwhile made available, at which point this is just a kind of ex-ante reorg) Isn't this similar to yesterday discussed attack? <fradamt> Yes. This does not work with what I am proposing though, because it effectively ignores the red branch, *except for counting its votes on the available ancestors* (1,2,3) <fradamt> Another way to think about it is that it is equivalent to not importing (you completely ignore the red blocks) and counting votes for unavailable blocks as votes for their latest available ancestor <cskiraly> Those who have voted on those unavailable blocks have seen 1, 2, 3 as available, right? (and also the red ones, but this is not important now). So to me it makes sense to count their vote on them, just as <@520034910149410861> is suggesting. <fradamt> Yes, if they are honestly following the protocol. But anyway you only count those votes for 1,2,3 if you yourself see 1,2,3 as available <cskiraly> exactly. I need to think more, but in general, I don't like the fact that you are following not the actual heaviest subtree (in the picture it's the red chain, and the correct available chain would be only 1,2,3), but you decide to follow a different chain, which is not the heaviest. <fradamt> that's what you would also do if you didn't import the red blocks at all this example was a very basic this is also basic, but you can see how the fun starts I gues you can also do bouncing with unavailable blocks (at least a short bounding) <fradamt> (something worth pointing out is that we for sure will need to change how `is_data_available` is used, even though this might not be the chosen solution. Right now we just wouldn't handle the situation where `is_data_available` flips from true to false, because we would already have imported the block) <cskiraly> It is not that easy to make blocks unavailable and available at the same time. At least, in the 2D case with in-network repair, we are heavily amplifying availability. On flipping from true to false: I'm not even sure I know what that means. Is that based on the current definition of `is_data_available`? <fradamt> With a trailing fork-choice, you can initially see something as available and then after k slots require sampling to be completed, but it fails adversary will just vote on the unavailable blocks - that's easy, for the rest it will not be available <fradamt> that's quite different, because it's completely equivalent to a withheld block <fradamt> adding it to your fork-choice tree but ignoring it when running the fork-choice does not give the adversary any more power <fradamt> One way to think about it is that today we already have attacks with unavailable blocks, i.e., withheld blocks, and that what changes here is the introduction of partially unavailable ones, which are seen as available by some but not all. The comparison is: - Just like withheld blocks, they can be revealed (made fully available) after an honest proposal, with the goal of making honest attesters vote against it. E.g. B is unavailable/withheld, honest proposer fails to extend it, B is made available, honest attesters now vote for B instead of the honest proposal - Unlike withheld blocks, they can accrue some votes from honest validators (those which see them as available). Importantly, we want to set the custody requirement to bound these votes. - Unlike withheld blocks, the proposer can see them as available while others don't, though it should be rare unless the proposer is targeted. This is a bit more problematic <cskiraly> that's if the \"custody as sampling\" (you had a good name for this, which doesn't come to my mind now) part is too weak. If it is strong enough, with enough columns (large CUSTODY_REQUIREMENT), and fully randomized (enough bits used in the assignment function), you can only have a few nodes that are in true state if the block is actually not available. If instead it is actually available, I think a node should increase its sampling efforts to see it. The trailing fork-choice should give you time to do that. (re @fradamt: With a trailing fork-choice, you can initially see something as available and then after k slots require sampling to be completed, but it fails) <cskiraly> The sampling ReqResp we proposed with the initial timeout and then going after missing segments should give you plenty of time to find what's already out. The problem is that in the 1D case we don't have repair, so if you happen to sample columns that are actually not there, your sampling will fail. <fradamt> Sure (and that's why I keep saying we should have a reasonably high custody requirement), but it is still possible for a certain percentage of nodes (not even that low tbh, if the attack is targeted) to go from `is_data_available` being true to false. Even if it's not that many nodes, it still needs to be dealt with somehow. (re @cskiraly: that's if the \"custody as sampling\" (you had a good name for this, which doesn't come to my mind now) part is too weak. If it is strong enough, with enough columns (large CUSTODY_REQUIREMENT), and fully randomized (enough bits used in the assignment function), you can only have a few nodes that are in true state if the block is actually not available. If instead it is actually available, I think a node should increase its sampling efforts to see it. The trailing fork-choice should give you time to do that.) <cskiraly> yeah, agree. Those nodes should somehow live-on. Might be naive, but maybe there's a case where you should stop voting until you see a clearer picture. (re @fradamt: Sure (and that's why I keep saying we should have a reasonably high custody requirement), but it is still possible for a certain percentage of nodes (not even that low tbh, if the attack is targeted) to go from is_data_available being true to false. Even if it's not that many nodes, it still needs to be dealt with somehow.) <cskiraly> The underlying issue I see is that we try to compress the two types of sampling into one `is_data_available` function, at least if I understand it correctly. I don't think we can easily hide that detail <custody_ready:F/T, sampling finished:F/T> from the decision logic on top. <cskiraly> In the Deneb version, is_data_available does not have this \"compression aspect\". It gives a bool because it is actually a bool. all Blobs->T, otherwise->F. Here instead we are evaluating two dimensions, and to make it worse, we are pretending for some time that the sampling dimension is True, just to figure out later, in some cases, that it is actually False. Yeah I get it that filtering at the filter level is safer however 1) In my situation I already have (block, slot) in place so an unavailable block cannot get 1 committee advantage (I think for that to happen the attacker needs to split the view amongh contending available branches and concentrate his power on the unavailable one, and even there I couldn' t come up with an attack that gives > 1 committee to the unavailable one). 2) If I were to go with the filtering, the easiest would be in the loop for `get_head` in which you choose your children and get the heaviest weight. I can filter out in that loop to consider only available children. But in this case a validator that has an unavailable IL (I'm concentrated in ILs vs blobs for a little bit) will deadlock until it recovers the IL from somewhere. I suppose here is where ILs and Blobs are different: Are we OK to let the chain advance with gaps on ILs? (we have a guarantee that the I",
+  "excerpts": [
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Just wanted to reiterate on TG discussion. It was proposed to include unavailable (`is_data_available` false) blocks in FC. The current spec has two similar places - blocks with not yet validated payload are added to FC, such blocks are optimistic, however, if the head is optimistic - no validator duties are allowed. In this case, it's not possible to not add blocks with not yet validated payload, because CL FC needs to drive EL. But this problem is solved by refusing validator duties if the head is optimistic. The second place is where blocks are added to FC only when `is_data_available` is true. So this PeerDAS proposal to include unavailable blobs contradicts the current approach. My understanding always was that it's not secure to include unavailable blocks because those blocks can become permanently unavailable and votes of such blocks can't be counted. AFAIK all the implementations do not recalculate weights on `get_head` (it's very expensive in current implementations). So either all implementations need to start recalculating weights `get_head`, either unavailable blobs can't be included in FC if counting votes of unavailable blobs are considered insecure (that's how it is according to the current spec). If it's no longer considered unsecure, then we need to start to include unavailable blocks in Deneb.",
+      "createdAt": "2024-04-19T06:51:11.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> > if counting votes of unavailable blobs are considered insecure (that's how it is according to the current spec)\n\nI don't think it is insecure. An adversary gets no advantage because they could cast their own votes for an available block on the same fork, and honest participants never vote for unavailable blocks (in 4844 at least), so if there are honest votes for a block which *appears* to be unvailable, it is actually the case that it is available.\n\n> If it's no longer considered unsecure, then we need to start to include unavailable blocks in Deneb.\n\nThat said, I don't see why we should change how things work in Deneb. I am only proposing that we change how things work once we get to PeerDAS. Both solutions are fine for Deneb as far as I know.",
+      "createdAt": "2024-04-19T06:56:20.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "We should change because now we have an artificial delay because block waits until the last blob arrives. It it's not considered unsecure, then I don't see why we can't use it in Deneb in order to further prove that this approach works.",
+      "createdAt": "2024-04-19T07:00:42.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "hmm... seems you raised some FC security concerns previously 🙂 https://ethresear.ch/t/from-4844-to-danksharding-a-path-to-scaling-ethereum-da/18046#possible-fork-choice-attack-vectors-9",
+      "createdAt": "2024-04-19T07:11:33.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'm wondering was there a proper security analysis of this issue (counting votes of unavailable blocks).",
+      "createdAt": "2024-04-19T07:12:15.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> I think these issues are entirely solved by not having too low of a `CUSTODY_REQUIREMENT` though 😊 (re @DataAvailabilitySampling_bot: <sauliusgrigaitis> hmm... seems you raised some FC security concerns previously 🙂 https://ethresear.ch/t/from-4844-to-danksharding-a-path-to-scaling-ethereum-da/18046#possible-fork-choice-attack-vectors-9)",
+      "createdAt": "2024-04-19T07:24:41.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I see, do you propose to do validator duties on a head that has unavailable children?",
+      "createdAt": "2024-04-19T07:32:26.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@520034910149410861> how are you planning on filtering branches in FC? I faced the same problem for ILs in ePBS where I'm allowing blocks to be inserted even without an available IL. The options were to filter them directly at filter block tree or later at get head. I understand that there are in theory situations where a block with an available IL/data can become head even with an unavailable one as parent but I ruled them out all with (block, slot) voting. Thus I found that the simplest is to just not filter anything and modify get_head to give you the latest ancestor with available data",
+      "createdAt": "2024-04-19T09:12:01.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> I think this is dangerous, because if somehow (e.g. asynchrony) an unavailable block gets more than one committee worth of weight advantage, as far as I can tell there will be a deadlock. If B is the last available ancestor of this unavailable block, each proposer will extend B and get everyone to vote for its block, but this won't be enough to close the gap with the unavailable block. Basically everyone will keep trying to fork out the unavailable block but fail, and the head of the chain will always go back to B.",
+      "createdAt": "2024-04-19T12:56:24.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> On the other hand, what I am proposing is that you would follow the heaviest available subtree extending B. As soon as someone attempts to fork out the unavailable block (which they will, because it is not output as the head of the chain, but B is), they succeed in doing so (unless the unavailable block is meanwhile made available, at which point this is just a kind of ex-ante reorg)",
+      "createdAt": "2024-04-19T12:59:31.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Isn't this similar to yesterday discussed attack?",
+      "createdAt": "2024-04-19T12:59:50.225000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_from_2024-04-19_15-58-38.png",
+          "content": "70e19254594405aa6d23f9ff325de1559c696def239bee2b3eb742e857131869"
+        }
+      ]
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> Yes. This does not work with what I am proposing though, because it effectively ignores the red branch, *except for counting its votes on the available ancestors* (1,2,3)",
+      "createdAt": "2024-04-19T13:02:11.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> Another way to think about it is that it is equivalent to not importing (you completely ignore the red blocks) and counting votes for unavailable blocks as votes for their latest available ancestor",
+      "createdAt": "2024-04-19T13:03:43.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> Those who have voted on those unavailable blocks have seen 1, 2, 3 as available, right? (and also the red ones, but this is not important now). So to me it makes sense to count their vote on them, just as <@520034910149410861> is suggesting.",
+      "createdAt": "2024-04-19T13:05:44.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> Yes, if they are honestly following the protocol. But anyway you only count those votes for 1,2,3 if you yourself see 1,2,3 as available",
+      "createdAt": "2024-04-19T13:06:57.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> exactly.",
+      "createdAt": "2024-04-19T13:09:51.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I need to think more, but in general, I don't like the fact that you are following not the actual heaviest subtree (in the picture it's the red chain, and the correct available chain would be only 1,2,3), but you decide to follow a different chain, which is not the heaviest.",
+      "createdAt": "2024-04-19T13:10:38.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> that's what you would also do if you didn't import the red blocks at all",
+      "createdAt": "2024-04-19T13:11:04.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "this example was a very basic",
+      "createdAt": "2024-04-19T13:11:33.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2024-04-19T13:11:39.244000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_from_2024-04-19_16-11-21.png",
+          "content": "6c31034a7d2c34d95fd853b0fb5e65f37b87ccb60a26d3529d0d8621f171c800"
+        }
+      ]
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "this is also basic, but you can see how the fun starts",
+      "createdAt": "2024-04-19T13:11:53.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I gues you can also do bouncing with unavailable blocks",
+      "createdAt": "2024-04-19T13:12:09.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "(at least a short bounding)",
+      "createdAt": "2024-04-19T13:12:33.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> (something worth pointing out is that we for sure will need to change how `is_data_available` is used, even though this might not be the chosen solution. Right now we just wouldn't handle the situation where `is_data_available` flips from true to false, because we would already have imported the block)",
+      "createdAt": "2024-04-19T13:12:51.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> It is not that easy to make blocks unavailable and available at the same time. At least, in the 2D case with in-network repair, we are heavily amplifying availability.\nOn flipping from true to false: I'm not even sure I know what that means. Is that based on the current definition of  `is_data_available`?",
+      "createdAt": "2024-04-19T13:16:16.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> With a trailing fork-choice, you can initially see something as available and then after k slots require sampling to be completed, but it fails",
+      "createdAt": "2024-04-19T13:17:09.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "adversary will just vote on the unavailable blocks - that's easy, for the rest it will not be available",
+      "createdAt": "2024-04-19T13:17:31.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> that's quite different, because it's completely equivalent to a withheld block",
+      "createdAt": "2024-04-19T13:18:15.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> adding it to your fork-choice tree but ignoring it when running the fork-choice does not give the adversary any more power",
+      "createdAt": "2024-04-19T13:18:45.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> One way to think about it is that today we already have attacks with unavailable blocks, i.e., withheld blocks, and that what changes here is the introduction of partially unavailable ones, which are seen as available by some but not all. The comparison is:\n-  Just like withheld blocks, they can be revealed (made fully available) after an honest proposal, with the goal of making honest attesters vote against it. E.g. B is unavailable/withheld, honest proposer fails to extend it, B is made available, honest attesters now vote for B instead of the honest proposal\n- Unlike withheld blocks, they can accrue some votes from honest validators (those which see them as available). Importantly, we want to set the custody requirement to bound these votes. \n- Unlike withheld blocks, the proposer can see them as available while others don't, though it should be rare unless the proposer is targeted. This is a bit more problematic",
+      "createdAt": "2024-04-19T13:19:35.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> that's if the \"custody as sampling\" (you had a good name for this, which doesn't come to my mind now) part is too weak. If it is strong enough, with enough columns (large  CUSTODY_REQUIREMENT), and fully randomized (enough bits used in the assignment function), you can only have a few nodes that are in true state if the block is actually not available. If instead it is actually available, I think a node should increase its sampling efforts to see it. The trailing fork-choice should give you time to do that. (re @fradamt: With a trailing fork-choice, you can initially see something as available and then after k slots require sampling to be completed, but it fails)",
+      "createdAt": "2024-04-19T13:24:54.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> The sampling ReqResp we proposed with the initial timeout and then going after missing segments should give you plenty of time to find what's already out. The problem is that in the 1D case we don't have repair, so if you happen to sample columns that are actually not there, your sampling will fail.",
+      "createdAt": "2024-04-19T13:34:16.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<fradamt> Sure (and that's why I keep saying we should have a reasonably high custody requirement), but it is still possible for a certain percentage of nodes (not even that low tbh, if the attack is targeted) to go from `is_data_available` being true to false. Even if it's not that many nodes, it still needs to be dealt with somehow. (re @cskiraly: that's if the \"custody as sampling\" (you had a good name for this, which doesn't come to my mind now) part is too weak. If it is strong enough, with enough columns (large  CUSTODY_REQUIREMENT), and fully randomized (enough bits used in the assignment function), you can only have a few nodes that are in true state if the block is actually not available. If instead it is actually available, I think a node should increase its sampling efforts to see it. The trailing fork-choice should give you time to do that.)",
+      "createdAt": "2024-04-19T13:34:16.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> yeah, agree. Those nodes should somehow live-on. Might be naive, but maybe there's a case where you should stop voting until you see a clearer picture. (re @fradamt: Sure (and that's why I keep saying we should have a reasonably high custody requirement), but it is still possible for a certain percentage of nodes (not even that low tbh, if the attack is targeted) to go from is_data_available being true to false. Even if it's not that many nodes, it still needs to be dealt with somehow.)",
+      "createdAt": "2024-04-19T13:36:54.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> The underlying issue I see is that we try to compress the two types of sampling into one `is_data_available` function, at least if I understand it correctly. I don't think we can easily hide that detail <custody_ready:F/T, sampling finished:F/T> from the decision logic on top.",
+      "createdAt": "2024-04-19T13:46:53.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> In the Deneb version, is_data_available does not have this \"compression aspect\". It gives a bool because it is actually a bool. all Blobs->T, otherwise->F.\nHere instead we are evaluating two dimensions, and to make it worse, we are pretending for some time that the sampling dimension is True, just to figure out later, in some cases, that it is actually False.",
+      "createdAt": "2024-04-19T13:55:38.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yeah I get it that filtering at the filter level is safer however\n1) In my situation I already have (block, slot) in place so an unavailable block cannot get 1 committee advantage (I think for that to happen the attacker needs to split the view amongh contending available branches and concentrate his power on the unavailable one, and even there I couldn' t come up with an attack that gives > 1 committee to the unavailable one). \n2) If I were to go with the filtering, the easiest would be in the loop for `get_head`  in which you choose your children and get the heaviest weight. I can filter out in that loop to consider only available children. But in this case a validator that has an unavailable IL (I'm concentrated in ILs vs blobs for a little bit) will deadlock until it recovers the IL from somewhere. \n\nI suppose  here is where ILs and Blobs are different: Are we OK to let the chain advance with gaps on ILs? (we have a guarantee that the ILs are indeed available if payload passed validation) \n\nOn the other hand we are not OK to continue at all if a data blob is not available, so it's fine for this validator to be deadlocked until it finds the data somewhere. \n\nIf the two statements above are OK, then I think my solution for ILs is the right one (filtering at the loop in `get_head`  will deadlock a validator for no reason) and  I would instead only filter when getting the children in `get_head`  for DA, does this sound right?",
+      "createdAt": "2024-04-19T14:07:30.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<nashatyrev_a> BTW, don't we want to add a req/resp 'long polling' method like: \n```\npoll_data_column_sidecar_ids(slot: Slot, column_indices:List[ColumnIndex]) -> List[DataColumnIdentifier]```\n\nIt may help to avoid receiving duplicate samples while sampling",
+      "createdAt": "2024-04-19T15:16:33.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> Our proposal to avoid duplicates was to add an explicit timeout, and avoid requesting the same column many times in parallel , preferably requesting columns (later samples) one-by-one from different nodes. That mostly avoids duplicates, except when there are large network delays, or when you request it intentionally to intensify your search for some specific columns (re @nashatyrev_a: BTW, don't we want to add a req/resp 'long polling' method like: \npoll_data_column_sidecar_ids(slot: Slot, column_indices:List[ColumnIndex]) -> List[DataColumnIdentifier]\nIt may help to avoid receiving duplicate samples while sampling)",
+      "createdAt": "2024-04-19T15:39:55.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> What you do in code is basically to map required column ids to candidates, and pick one for each. (If you don't have candidates, you should search and connect, which is another topic). You then basically go through the candidates with appropriate timeouts, starting with a long (say 4s) one, and then speeding up (this can also be triggered by seeing some attestations, or by receiving custodied columns), thus avoiding duplicates.\nEventually, one can also make some parallel requests when desperately needing some column (sample).",
+      "createdAt": "2024-04-19T15:50:12.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<nashatyrev_a> IMHO polling several peers for IDs in parallel would be more reliable solution. \nIn a happy case your solution would have smaller latency (by 1 RRT), however if there are delays in a subnet then finding a sample by requesting peers one by one with timeout may result in significant sampling lags (re @cskiraly: What you do in code is basically to map required column ids to candidates, and pick one for each. (If you don't have candidates, you should search and connect, which is another topic). You then basically go through the candidates with appropriate timeouts, starting with a long (say 4s) one, and then speeding up (this can also be triggered by seeing some attestations, or by receiving custodied columns), thus avoiding duplicates.\nEventually, one can also make some parallel requests when desperately needing some column (sample).)",
+      "createdAt": "2024-04-19T16:12:30.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<nashatyrev_a> BTW one could utilize a combined approach: request a full sample from one peer and identifiers from others. \nThis looks pretty similar to what Gossip is doing (re @nashatyrev_a: IMHO polling several peers for IDs in parallel would be more reliable solution. \nIn a happy case your solution would have smaller latency (by 1 RRT), however if there are delays in a subnet then finding a sample by requesting peers one by one with timeout may result in significant sampling lags)",
+      "createdAt": "2024-04-19T16:14:56.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> Yeah, collecting HAVE information is important. In my version we do that with usual IHAVEs, plus by piggybacking HAVE information on Resp messages. Note that HAVEs are very cheap, in case of 1D they are just 128 bits for a specific block. Basically free to piggyback if there is some message anyway.\n\nWhen sampling columns, explicitly requesting HAVE info in advance might make sense because of the huge difference in size between data and the HAVE info. I see your point on that. I'm always starting with the 2D segment level sampling in mind. \nWhat is not clear to me is the timing of requesting the identifiers (the HAVE info). We do the timeout based request explicitly to free ourselves from having to decide a timing on receiver side without info on the state of others, reaching almost minimum delay on the happy path in most cases. This is because most of your peers will receive close in time to each other due to the exponential nature of the GS distribution. At the same time, we add the sequential logic to bound duplicates and still stay in delay bounds if we are not on the happy path.\n\nFor columns, the combined approach you mention might worth doing. Although it is not clear to me when would you send out the request for IDs, and what's the response logic on that. Do I respond immediately with what I have? Do I wait for at least one to be received, and then respond? etc.",
+      "createdAt": "2024-04-19T16:44:44.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> Obviously, you would follow the sequential logic only until you are blind. Once you have HAVE info from peers, you can Req from nodes that claimed have the column (hoping to receive a response, so still setting some receiver-side timeout).",
+      "createdAt": "2024-04-19T16:52:12.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> The delay advantage in the happy case comes from the reactive nature of the Req with a timeout. It is not the round trip time, but the fact that we don't have to time the request. I think you can also do something similar with the ID request, but it becomes a bit more convoluted. Since columns are large, you can do it e.g. in a \"keep me up to date\" fashion, sending a Resp every time a new column was received from the requested IDs. Might make sense since columns are large. This is kind of a subscribe to notification.\n\nThe basic assumption in our method is that you are OK with a bounded delay on the unhappy path, which allows you to cycle through many peers that are supposed to have the sample anyway. You can spend a few seconds before escalating your search, and even then, you don't want to overreact, because the block might actually be unavailable and become irrelevant. (re @nashatyrev_a: IMHO polling several peers for IDs in parallel would be more reliable solution. \nIn a happy case your solution would have smaller latency (by 1 RRT), however if there are delays in a subnet then finding a sample by requesting peers one by one with timeout may result in significant sampling lags)",
+      "createdAt": "2024-04-19T17:09:30.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> You could also base your effort on your needs.\n- Do I have to attest on it? spend more effort upfront, risking duplicates.\n- Do I only need its availability for attestations in later slots? allow more delay.\n- Am I just a full node with no attestation duties? allow more delay.\netc.",
+      "createdAt": "2024-04-19T17:21:53.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<cskiraly> A few more things:\n- in our version, we also wanted to avoid sending the explicit list to limit exposure of your sample to a single node (would simplify attacks). Hence, the decision to prefer asking for individual columns(segments). \n- if you were thinking of a request with an instant reply, since the whole info is anyway just 128 bits (one bit per column), you can also avoid sending the interest list. Just ask for the bitmap, without exposing the list of columns you are really interested in.",
+      "createdAt": "2024-04-19T18:29:19.303000+00:00",
+      "attachments": []
+    }
+  ]
+}

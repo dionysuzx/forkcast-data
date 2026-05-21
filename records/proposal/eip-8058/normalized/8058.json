@@ -1,0 +1,78 @@
+{
+  "id": 8058,
+  "title": "EIP-8058: Contract Bytecode Deduplication Discount",
+  "status": "Draft",
+  "description": "Reduces gas costs for deploying duplicate contract bytecode via access-list based mechanism",
+  "laymanDescription": "If you deploy a contract that's exactly the same as one that already exists and you include that existing contract's address in your transaction's access list, you don't pay the per-byte code deposit again—the new contract just points to the already-stored code.",
+  "author": "Carlos Perez (@CPerezz), Wei Han Ng (@weiihann), Guillaume Ballet (@gballet)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-10-22",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-8058-contract-bytecode-deduplication-discount/25933",
+  "requires": [
+    "2930"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/227",
+          "date": "2026-01-05"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Carlos Perez",
+          "discord": "CPerezz.eth"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Cheaper deployments for apps that spin up many identical contracts (e.g., factory wallets or clones); no change to how transactions are sent."
+    },
+    "appDevs": {
+      "description": "Can cut deployment costs for factory/clone patterns by adding a reference contract address to the access list; update builders and deploy scripts to include access lists and handle cases without a discount."
+    },
+    "walletDevs": {
+      "description": "Update gas estimation and access-list generation to surface potential deduplication discounts and clearly indicate when the discount will or won't apply."
+    },
+    "toolingInfra": {
+      "description": "Estimators, simulators, and tracers should build the CodeHash Access-Set from the access list at tx start and report when deduplication triggers; consider dual estimates (with/without discount)."
+    },
+    "layer2s": {
+      "description": "Rollups mirroring L1 gas semantics may adopt this to lower duplicate deployment costs; coordinate with any increased GAS_CODE_DEPOSIT (e.g., per EIP-8037) and access-list handling in sequencers."
+    },
+    "stakersNodes": {
+      "description": "Minimal runtime overhead; implement building the CodeHash Access-Set and conditional charging; no trie/schema changes. Same-block ordering effects are deterministic."
+    },
+    "clClients": {
+      "description": "No consensus changes on the CL—standard fork coordination only."
+    },
+    "elClients": {
+      "description": "Implement access-list–based set W, hash check on successful CREATE/CREATE2, and conditional code-deposit charging per EIP-2930/2929. Also, consider implementing a code -> address reverse index to avoid complexity to users on finding the required address."
+    }
+  },
+  "benefits": [
+    "Aligns gas costs with actual storage usage for duplicate deployments.",
+    "Deterministic and consensus-safe: depends on access lists and current state, not local databases.",
+    "No new transaction format or reverse indexes; reuses EIP-2930 infrastructure.",
+    "Can yield major savings when GAS_CODE_DEPOSIT is high (e.g., under EIP-8037).",
+    "Encourages bytecode reuse and efficient factory/clone patterns."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This proposal introduces a gas discount for contract deployments when the bytecode being deployed already exists in the state. By leveraging EIP-2930 access lists, any contract address included in the access list automatically contributes its code hash to a deduplication check. When the deployed bytecode matches an existing code hash from the access list, the deployment avoids paying `GAS_CODE_DEPOSIT * L` costs since clients already store the bytecode and only need to link the new account to the existing code hash. This EIP becomes particularly relevant with the adoption of EIP-8037, which increases `GAS_CODE_DEPOSIT` from 200 to 1,900 gas per byte. Under EIP-8037, deploying a 24kB contract would cost approximately 46.6M gas for code deposit alone, making the deduplication discount economically significant for applications that deploy identical bytecode multiple times. ## Motivation Currently, deploying duplicate bytecode costs the same as deploying new bytecode, even though execution clients don't store duplicated code in their databases. When the same bytecode is deployed multiple times, clients store only one copy and have multiple accounts point to the same code hash. Under EIP-8037's proposed gas costs, deploying a 24kB contract costs approximately 46.6M gas for code deposit alone (`1,900 × 24,576`). This charge is unfair for duplicate deployments where no additional storage is consumed. A naive \"check if code exists in database\" approach would break consensus because different nodes have different database contents due to mostly Sync-mode differences: - Full-sync nodes: Retain all historical code, including from reverted/reorged transactions - Snap-sync nodes: initially, only store code referenced in the pivot state tries, and those accumulated past the start of the sync Empirical analysis reveals that approximately 27,869 bytecodes existed in full-synced node databases with no live account pointing to them (as of the Cancun fork). A database lookup `CodeExists(hash)` would yield different results on different nodes, causing different gas costs and breaking consensus. This proposal solves the problem by making deduplication checks implicit and deterministic through access lists, ensuring all nodes compute identical gas costs regardless of their database state. (Notice here that even if fully-synced clients have more codes, there are no accounts whose codeHash actually is referencing them. Thus, users can't profit from such discounts which keeps consensus safe). ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in RFC 2119 and RFC 8174. ### Implicit Deduplication via Access Lists This proposal leverages the existing EIP-2930 access list structure without any modifications. No new fields or protocol changes are required. ### CodeHash Access-Set Construction Before transaction execution begins, build a set `W` (the \"CodeHash Access-Set\") as follows: ``` W = { codeHash(a) | a ∈ accessList, a exists in state, a has code } ``` Where: - `W` is built from state at the **start** of transaction execution (before any state changes) - **All** addresses in the access list are checked - if they exist in state and have deployed code, their code hash is added to `W` - Empty accounts or accounts with no code do not contribute to `W` ### Contract Creation Gas Accounting When a contract creation transaction or opcode (`CREATE`/`CREATE2`) successfully completes and returns bytecode `B` of length `L`, compute `H = keccak256(B)` and apply the following gas charges: **Deduplication check:** - If `H ∉ W`: Bytecode is new - Charge `GAS_CODE_DEPOSIT * L` - Persist bytecode `B` under hash `H` - Link the new account's `codeHash` to `H` - Otherwise, link the new account's `codeHash` to the existing code hash `H` **Gas costs:** - The cost of reading `codeHash` for access-listed addresses is already covered by EIP-2929/2930 access costs (intrinsic access-list cost and cold→warm state access charges). - No additional gas cost is introduced for the deduplication check itself. ### Implementation Pseudocode ```python # Before transaction execution: W = set() for tuple in tx.access_list: warm(tuple.address) # per EIP-2930/EIP-2929 rules acc = load_account(tuple.address) if acc exists and acc.code is not empty: W.add(acc.codeHash) # On successful CREATE/CREATE2: H = keccak256(B) if H in W: # Duplicate: no deposit gas link_codehash(new_account, H) else: # New bytecode: charge and persist charge(GAS_CODE_DEPOSIT * len(B)) persist_code(H, B) link_codehash(new_account, H) ``` ### Same-Block Deployments Sequential transaction execution ensures that a deployment storing new code makes it visible to later transactions in the same block: 1. Transaction `T_A` deploys bytecode `B` at address `X` - Pays full `GAS_CODE_DEPOSIT * L` (no prior contract has this bytecode) - Code is stored under hash `H = keccak256(B)` 2. Later transaction `T_B` in the same block deploys the same bytecode `B`: - `T_B` includes address `X` in its access list - When `T_B` executes, `W` is built from the current state (including `T_A`'s changes) - Since `X` now exists and is in the access list, `W` contains `H` - `T_B`'s deployment gets the discount > While this only tries to formalize the behavior, it's important to remark that this kind of behavior is complex. As it requires control over tx ordering in order to abuse. Builders can't modify the access list as it is already signed with the transaction. Nevertheless, this could happen, thus is formalized here. ### Edge Case: Simultaneous New Deployments If two transactions in the same block both deploy identical new bytecode and neither references an existing contract with that bytecode in their access lists, both will pay full `GAS_CODE_DEPOSIT * L`. **Example:** - Transaction `T_A` deploys bytecode `B` producing code hash `0x"
+}

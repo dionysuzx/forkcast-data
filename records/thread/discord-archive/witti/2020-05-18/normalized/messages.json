@@ -1,0 +1,994 @@
+{
+  "schemaVersion": 1,
+  "channel": "witti",
+  "date": "2020-05-18",
+  "messageCount": 257,
+  "sourceHash": "c8b679241eed01c42598088cfd66cb9310b298a8c96ac58727a99c416ae442dc",
+  "searchText": "I'm struggling to find a reason why this fork started. Teku considers every bock on the chain lighthouse views as canonical as valid and seems to be consistently converging on it. Now that there is a very long period of non-finalization some known limitations are causing lots of trouble (mostly that Teku requires a lot of memory and a few other smaller things). If it was a fork choice bug, then Teku should have had both sets of blocks but be selecting the wrong one but the teku instances don't appear to have any blocks from the other fork at all. ok, found one of my nodes that does have both sides of the fork and Sunday night was picking the wrong one. Today though, without connecting to any other peers, it's picking the right one. So that brings us back to a fork choice bug - just not going to be particularly easy to find it... So I'm going back through the logs to see when things first went wrong, and the odd thing is that even at slot 141298, my Teku node is agreeing on the same block as Lighthouse (this is as the slots actually happen, it may have reorg'd later). That's in epoch 4415 but we still have only finalized epoch 4410 - it should have finalized up to 4413 by now. In fact even in epoch 4420 we're still agreeing. The first suspicious thing I can see is that Teku rejects an attestation as invalid around slot 141457 by which time we've got 8 epochs that have failed to finalize. Given Teku was following the chain correctly up until that point and lighthouse and prysm seem to agree, why didn't it finalize? Even after that rejection, in real time Teku reported an empty slot at 141457 when it should have had a block. It caught up again though because it's in sync at 141495. What eventually takes Teku out is that it currently has to hold all hot blocks & states in memory so runs out of memory and GC consumes most of the CPU so things fall behind with lots of empty slots. But all of that is because the chain wasn't finalizing, and at least this teku node didn't cause the lack of finalization so I'm still very unclear what originally triggered the issue. If anyone has Teku logs between May 17 1100->1300 I'd love to get a copy please. How is Schlesi doing? Still no finality? <@!476250636548308992> - On the schlesi testnet I've noticed that we request blocks in some ranges.. then may skip to a future range, and in a block of 50 or so, prysm sends blocks back that are not in order/linear. Any ideas on this? hmm it should be sorted, afaik. are all the blocks your received unsorted, or is it only a portion of the batch ? <@!118185622543269890> Still no finality. I still don't know why finality stopped either (potentially just had that many validators go offline?). Getting the Teku validators back online now will need a lot of ram (I've got one tracking head again but threw 20Gb at it - it's using 6-8 Gb of that but it definitely needs more than a 4Gb VM). That memory usage is a known limitation - we hold all non-finalised states in memory so when finalization is delayed memory usage goes up. Always planned to change it, now it's higher priority. 🙂 Ahh yeah finality delays really stress test a lot Good morning. I can move the teku validators to lighthouse to fix finality. Did you identify the consensus issue? <@!340345049063882753> here are all the logs that i have, they seem to include that interval but are normal logs. which log mode should i be running? > hmm it should be sorted, afaik. are all the blocks your received unsorted, or is it only a portion of the batch ? <@!476250636548308992> assume its just a portion of a batch. I can investigate if you need. We throw the batch out if its not sequential and kick the peer. Might be old nodes on the network? interesting how often do you see it ? is it for every prysm peer pretty often on schlesi... not for every peer i'm not really following which peers, some I can't identify.. but it happens occasionally, I'd expect it to happen more often if it were every prysm peer But its only prysm nodes doing it ah k interesting thanks for reporting it <@!498009160982724610> how do you identify peer? Currently, just using the `Identify` protocol that prysm, nimbus and teku are supporting atm https://github.com/libp2p/specs/tree/master/identify ? yeap that is the one <@!557201004060213248> Yes I'd recommend moving the Teku nodes to something else for now. If you happen to have logs for your Teku validator node that would be very useful too. From the logs I have, Teku didn't have a consensus split but something cause finality to be delayed long enough that Teku instances started running out of memory and either dropping out or running very slowly which often caused blocks to fail to import (and would have also been similar to the clock running out of sync). <@!386151184869752834> Thanks for the logs. Info level logs are very useful - I can check if it had the right blocks at different slots from that. ok, I can confirm the memory issue My nodes are consitently getting killed I'll try to dig up my debug logs of Teku. Restarted since, but should have them still around We had around 61-66% votes on the correct chain before the explorer popped So there is not much missing to regain finality. I'll check that all my validators are operational <@!498009160982724610> https://github.com/prysmaticlabs/prysm/pull/5894 We now enforce the check more strictly, so you should only be seeing sorted blocks from prysm awesome. Thanks! did everyone shut down their validators? I barely see blocks on schlesi I'm still running two validators But I'm seeing a lot of invalid signatures seeing a lot of invalid blocks right now with state root errors What do we want to do? Keep this around to investigate these issues or create a new testnet? Are all of teku's validators running on lighthouse ? No, but I don't see many valid blocks So moving the teku validators seems pointless It appears we've broken the network beyond the possibility of repair I'm not sure why though. The clients should be resistant to competing forks and low finality. Lighthouse seems to be doing fine, both beacon node and validator are running. Prysm might be doing fine, but my logs are red all over the place, so it's hard to follow what's going on. Teku keeps crashing due to memory issues, I might just need better hardware for that. It seems like I'm only seeing blocks from Lighthouse Not certain, but it looks like it. If <@!476250636548308992> is seeing state root mismatches then we might have a consensus split between Prysm and Lighthouse ok. that explains why I'm seeing so many empty slots I was seeing some invalid signatures, which would indicate an issue with shuffling > It seems like I'm only seeing blocks from Lighthouse <@!361447803194441738> 152001 was just created by my prysm node ``` May 18 14:40:06.002 INFO Synced slot: 152000, block: … empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier May 18 14:40:18.002 INFO Synced slot: 152001, block: … empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier May 18 14:40:30.002 INFO Synced slot: 152002, block: … empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier ``` > <@!361447803194441738> 152001 was just created by my prysm node <@!219523277163331586> Can't see this in my chain lighthouse does not see a block yeah same It's not there in the API either what is the current head in lighthouse ? slot: 152023, block: 0x90d2…6780,slot: 152023, block: 0x90d2…6780 ```json { \"slot\": 152023, \"block_root\": \"0x90d2be627f5c3a76f01ad95a6b9fb959e3e2f9e674c8e9a2fbb533692f366780\", \"state_root\": \"0xeb89d60faca694fbc30ce2e627b3283301b9588c66afb49b5583e513ad94ffdd\", \"finalized_slot\": 141120, \"finalized_block_root\": \"0xb0a6cdf0af8cdbd28defefebfdf9a005476254e6025775186f4397e113003e26\", \"justified_slot\": 141152, \"justified_block_root\": \"0xc8f907af703e377692020b8b8a4931c41cdec40d92636a09f8b4fa45211b51ce\", \"previous_justified_slot\": 141152, \"previous_justified_block_root\": \"0xc8f907af703e377692020b8b8a4931c41cdec40d92636a09f8b4fa45211b51ce\" } ``` It has sigp graffiti This is what I see I am not sure the invalid blocks we see are from lighthouse or teku <@!361447803194441738> doesn't lighthouse log anything if it gets a block ? it should be seeing at least prysm blocks from gossip we do log if we get a block hmm not who from though i think there might be a PR to add that.. not sure that is very odd, you should be still seeing our blocks even if we are forked > It has sigp graffiti <@!361447803194441738> I see this for slot 152023 oh so is that a prysm block in lighthouse? Not sure where proposer 218 comes from. <@!557201004060213248> ? That \"Happy...\" this is Prysm, I'm pretty sure We don't expose the flag to change the grafitti https://schlesi.beaconcha.in/validator/218 hmm teku ? i think maybe the block explorer is wrong this seems like a prysm validator I'm about to roll into my 17th hour now, so might call it a night lets just restart i dont think much can be done now it would be a shame to wipe it before <@!203220829473996800> can get all up in it sure, that sounds good. Although I think proto already has it all saved up side by side Did you manage to find out who was giving you the bad state root? If you can give me a peer ID i might have them in my table can you get the block root <@!219523277163331586> that is my prysm node, but you are also using pryms, right? give me a sec, its going to be difficult in the middle of all the logs. But i can search through it no pressure 🙂 > that is my prysm node, but you are also using pryms, right? <@!557201004060213248> yes, I only have prysm nodes running.. Pretty sure the earliest Teku validator is no. 248 I will prepare a new testnet with 3 clients at genesis but keep the old testnet bootnodes and validators running <@!361447803194441738> can you check if you have this block in your chain ? ``` [2020-05-18 12:33:05] ERROR sync: Could not process block from slot 150496: could not process block: could not execute state transition: validate state root failed, wanted: 0xe4b796ac0ab03575da6be008eb3d0e4f857758024fd4b78e9cfbcc4ac40cb88d, received: 0xd8ec43fc96abbfd6824475fb32e47ef959bb317a3ae273a7ee8af153fa762d61 ``` this has been giving my node trouble Yep we have that one ah `0xd8ec43fc96abbfd6824475fb32e47ef959bb317a3ae273a7ee8af153fa762d61` thats our root ok so thats where the chain split for us we cant seem to process it i will look into this tomorrow, will try and compare prysm's and lighthouse post state do we know where the chains diverged? yeap at the block i posted above ^ zcli seems to agree with lighthouse The west coast folks are getting up now ☀️ We'll help with looking into that invalid state transition. Will ping you on the side <@!476250636548308992> for more info i'll send through a zip Sweet. Thanks actually not certain about that from what i can tell LH, zcli and prysm disagree Awesome, just finished dinner. Looking at this now actually ignore the `zcli_post.ssz` in there delete it and generate your own that ones using lighthouse to do skips, so not accurate state roots: - lighthouse `0xd8ec43fc96abbfd6824475fb32e47ef959bb317a3ae273a7ee8af153fa762d61` - prysm `0xe4b796ac0ab03575da6be008eb3d0e4f857758024fd4b78e9cfbcc4ac40cb88d` - zcli `0x7e8bce7bfa8f58159f1e9de6308d921c56a883c15bc851b08adc8d8ceacb4293` ok interesting ``` [2020-05-18 21:46:07] ERROR Derived state differs from provided post state: modified: .Balances[17] = 0x7e8d2cabf ``` https://gist.github.com/protolambda/e038a2b85d125d53e69d71370b2cada6 Diff between zcli and lighthouse. I'll check pyspec right now the difference is in validator index 17 at least for lighthouse and prysm will try zcli now validator index 17 is a LH validator ok seems like validator 17 is the offending one again, let me log the balances for all the clients out now Pyspec post root: `d2e0f469565e14d2eaa331d6d359062ce916",
+  "excerpts": [
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm struggling to find a reason why this fork started.  Teku considers every bock on the chain lighthouse views as canonical as valid and seems to be consistently converging on it.  Now that there is a very long period of non-finalization some known limitations are causing lots of trouble (mostly that Teku requires a lot of memory and a few other smaller things).",
+      "createdAt": "2020-05-18T00:59:10.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If it was a fork choice bug, then Teku should have had both sets of blocks but be selecting the wrong one but the teku instances don't appear to have any blocks from the other fork at all.",
+      "createdAt": "2020-05-18T01:01:03.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok, found one of my nodes that does have both sides of the fork and Sunday night was picking the wrong one.  Today though, without connecting to any other peers, it's picking the right one.  So that brings us back to a fork choice bug - just not going to be particularly easy to find it...",
+      "createdAt": "2020-05-18T02:43:35.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So I'm going back through the logs to see when things first went wrong, and the odd thing is that even at slot 141298, my Teku node is agreeing on the same block as Lighthouse (this is as the slots actually happen, it may have reorg'd later).  That's in epoch 4415 but we still have only finalized epoch 4410 - it should have finalized up to 4413 by now.  In fact even in epoch 4420 we're still agreeing.  The first suspicious thing I can see is that Teku rejects an attestation as invalid around slot 141457 by which time we've got 8 epochs that have failed to finalize.",
+      "createdAt": "2020-05-18T04:14:26.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Given Teku was following the chain correctly up until that point and lighthouse and prysm seem to agree, why didn't it finalize?",
+      "createdAt": "2020-05-18T04:16:30.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Even after that rejection, in real time Teku reported an empty slot at 141457 when it should have had a block. It caught up again though because it's in sync at 141495.",
+      "createdAt": "2020-05-18T04:18:30.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What eventually takes Teku out is that it currently has to hold all hot blocks & states in memory so runs out of memory and GC consumes most of the CPU so things fall behind with lots of empty slots.",
+      "createdAt": "2020-05-18T04:29:47.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But all of that is because the chain wasn't finalizing, and at least this teku node didn't cause the lack of finalization so I'm still very unclear what originally triggered the issue.",
+      "createdAt": "2020-05-18T04:31:16.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If anyone has Teku logs between May 17 1100->1300 I'd love to get a copy please.",
+      "createdAt": "2020-05-18T04:46:27.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kiwi.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How is Schlesi doing? Still no finality?",
+      "createdAt": "2020-05-18T06:18:58.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!476250636548308992> - On the schlesi testnet I've noticed that we request blocks in some ranges.. then may skip to a future range, and in a block of 50 or so, prysm sends blocks back that are not in order/linear. Any ideas on this?",
+      "createdAt": "2020-05-18T06:47:10.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm it should be sorted, afaik. are all the blocks your received unsorted, or is it only a portion of the batch ?",
+      "createdAt": "2020-05-18T06:48:44.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!118185622543269890> Still no finality.  I still don't know why finality stopped either (potentially just had that many validators go offline?).  Getting the Teku validators back online now will need a lot of ram (I've got one tracking head again but threw 20Gb at it - it's using 6-8 Gb of that but it definitely needs more than a 4Gb VM).",
+      "createdAt": "2020-05-18T07:05:36.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That memory usage is a known limitation - we hold all non-finalised states in memory so when finalization is delayed memory usage goes up.  Always planned to change it, now it's higher priority. 🙂",
+      "createdAt": "2020-05-18T07:06:39.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kiwi.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ahh yeah finality delays really stress test a lot",
+      "createdAt": "2020-05-18T07:08:27.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Good morning.",
+      "createdAt": "2020-05-18T07:18:10.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I can move the teku validators to lighthouse to fix finality.",
+      "createdAt": "2020-05-18T07:18:40.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Did you identify the consensus issue?",
+      "createdAt": "2020-05-18T07:19:05.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!340345049063882753> here are all the logs that i have, they seem to include that interval but are normal logs. which log mode should i be running?",
+      "createdAt": "2020-05-18T07:23:05.358000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "teku-logs.txt",
+          "content": "02dd7f2a8ff1a0cdfa41e2ac6c1b0ee4a7d6cf2967f7c687184d88923aa1e01d"
+        }
+      ]
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> hmm it should be sorted, afaik. are all the blocks your received unsorted, or is it only a portion of the batch ?\n<@!476250636548308992> assume its just a portion of a batch. I can investigate if you need. We throw the batch out if its not sequential and kick the peer.",
+      "createdAt": "2020-05-18T07:50:08.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Might be old nodes on the network?",
+      "createdAt": "2020-05-18T07:50:19.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "interesting",
+      "createdAt": "2020-05-18T07:51:46.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "how often do you see it ?",
+      "createdAt": "2020-05-18T07:51:55.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is it for every prysm peer",
+      "createdAt": "2020-05-18T07:52:02.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "pretty often on schlesi... not for every peer",
+      "createdAt": "2020-05-18T07:52:12.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i'm not really following which peers, some I can't identify.. but it happens occasionally, I'd expect it to happen more often if it were every prysm peer",
+      "createdAt": "2020-05-18T07:52:48.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But its only prysm nodes doing it",
+      "createdAt": "2020-05-18T07:53:00.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah k interesting thanks for reporting it",
+      "createdAt": "2020-05-18T07:53:08.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!498009160982724610> how do you identify peer?",
+      "createdAt": "2020-05-18T07:53:21.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, just using the `Identify` protocol that prysm, nimbus and teku are supporting atm",
+      "createdAt": "2020-05-18T07:53:49.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/libp2p/specs/tree/master/identify ?",
+      "createdAt": "2020-05-18T07:55:32.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeap that is the one",
+      "createdAt": "2020-05-18T07:56:04.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!557201004060213248> Yes I'd recommend moving the Teku nodes to something else for now.  If you happen to have logs for your Teku validator node that would be very useful too.",
+      "createdAt": "2020-05-18T08:05:32.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "From the logs I have, Teku didn't have a consensus split but something cause finality to be delayed long enough that Teku instances started running out of memory and either dropping out or running very slowly which often caused blocks to fail to import (and would have also been similar to the clock running out of sync).",
+      "createdAt": "2020-05-18T08:06:55.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!386151184869752834> Thanks for the logs. Info level logs are very useful - I can check if it had the right blocks at different slots from that.",
+      "createdAt": "2020-05-18T08:07:41.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok, I can confirm the memory issue",
+      "createdAt": "2020-05-18T08:15:36.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My nodes are consitently getting killed",
+      "createdAt": "2020-05-18T08:15:43.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll try to dig up my debug logs of Teku. Restarted since, but should have them still around",
+      "createdAt": "2020-05-18T09:48:47.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We had around 61-66% votes on the correct chain before the explorer popped",
+      "createdAt": "2020-05-18T10:44:41.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So there is not much missing to regain finality.",
+      "createdAt": "2020-05-18T10:44:51.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll check that all my validators are operational",
+      "createdAt": "2020-05-18T10:45:01.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!498009160982724610> \nhttps://github.com/prysmaticlabs/prysm/pull/5894\nWe now enforce the check more strictly, so you should only be seeing sorted blocks from prysm",
+      "createdAt": "2020-05-18T11:32:38.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agemanning",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "awesome. Thanks!",
+      "createdAt": "2020-05-18T12:02:26.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "did everyone shut down their validators?",
+      "createdAt": "2020-05-18T12:17:45.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I barely see blocks on schlesi",
+      "createdAt": "2020-05-18T12:17:52.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm still running two validators",
+      "createdAt": "2020-05-18T12:18:37.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But I'm seeing a lot of invalid signatures",
+      "createdAt": "2020-05-18T12:18:44.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "seeing a lot of invalid blocks right now",
+      "createdAt": "2020-05-18T12:19:51.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "with state root errors",
+      "createdAt": "2020-05-18T12:19:55.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What do we want to do? Keep this around to investigate these issues or create a new testnet?",
+      "createdAt": "2020-05-18T12:21:58.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Are all of teku's validators running on lighthouse ?",
+      "createdAt": "2020-05-18T12:22:52.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No, but I don't see many valid blocks",
+      "createdAt": "2020-05-18T12:38:13.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So moving the teku validators seems pointless",
+      "createdAt": "2020-05-18T12:38:25.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It appears we've broken the network beyond the possibility of repair",
+      "createdAt": "2020-05-18T12:38:43.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not sure why though. The clients should be resistant to competing forks and low finality.",
+      "createdAt": "2020-05-18T12:39:23.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Lighthouse seems to be doing fine, both beacon node and validator are running. Prysm might be doing fine, but my logs are red all over the place, so it's hard to follow what's going on. Teku keeps crashing due to memory issues, I might just need better hardware for that.",
+      "createdAt": "2020-05-18T12:41:03.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It seems like I'm only seeing blocks from Lighthouse",
+      "createdAt": "2020-05-18T12:41:11.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not certain, but it looks like it.",
+      "createdAt": "2020-05-18T12:41:25.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If <@!476250636548308992> is seeing state root mismatches then we might have a consensus split between Prysm and Lighthouse",
+      "createdAt": "2020-05-18T12:41:46.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok.",
+      "createdAt": "2020-05-18T12:42:44.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that explains why I'm seeing so many empty slots",
+      "createdAt": "2020-05-18T12:42:57.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I was seeing some invalid signatures, which would indicate an issue with shuffling",
+      "createdAt": "2020-05-18T12:43:15.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> It seems like I'm only seeing blocks from Lighthouse\n<@!361447803194441738> 152001 was just created by my prysm node",
+      "createdAt": "2020-05-18T12:43:16.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\n                        \nMay 18 14:40:06.002 INFO Synced                                  slot: 152000, block:    …  empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier                            \nMay 18 14:40:18.002 INFO Synced                                  slot: 152001, block:    …  empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier                            \nMay 18 14:40:30.002 INFO Synced                                  slot: 152002, block:    …  empty, epoch: 4750, finalized_epoch: 4410, finalized_root: 0xb0a6…3e26, peers: 20, service: slot_notifier  \n```",
+      "createdAt": "2020-05-18T12:44:34.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> <@!361447803194441738> 152001 was just created by my prysm node\n<@!219523277163331586> Can't see this in my chain",
+      "createdAt": "2020-05-18T12:44:37.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "lighthouse does not see a block",
+      "createdAt": "2020-05-18T12:44:39.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah same",
+      "createdAt": "2020-05-18T12:44:44.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's not there in the API either",
+      "createdAt": "2020-05-18T12:44:51.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what is the current head in lighthouse ?",
+      "createdAt": "2020-05-18T12:45:09.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "slot: 152023, block: 0x90d2…6780,slot: 152023, block: 0x90d2…6780",
+      "createdAt": "2020-05-18T12:45:29.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```json\n{\n    \"slot\": 152023,\n    \"block_root\": \"0x90d2be627f5c3a76f01ad95a6b9fb959e3e2f9e674c8e9a2fbb533692f366780\",\n    \"state_root\": \"0xeb89d60faca694fbc30ce2e627b3283301b9588c66afb49b5583e513ad94ffdd\",\n    \"finalized_slot\": 141120,\n    \"finalized_block_root\": \"0xb0a6cdf0af8cdbd28defefebfdf9a005476254e6025775186f4397e113003e26\",\n    \"justified_slot\": 141152,\n    \"justified_block_root\": \"0xc8f907af703e377692020b8b8a4931c41cdec40d92636a09f8b4fa45211b51ce\",\n    \"previous_justified_slot\": 141152,\n    \"previous_justified_block_root\": \"0xc8f907af703e377692020b8b8a4931c41cdec40d92636a09f8b4fa45211b51ce\"\n}\n```",
+      "createdAt": "2020-05-18T12:45:29.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It has sigp graffiti",
+      "createdAt": "2020-05-18T12:46:02.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is what I see",
+      "createdAt": "2020-05-18T12:47:14.591000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "2020-05-18_14-46-06.png",
+          "content": "7a89cfa501c1ea4d52cf7306234887bb010b0ba561cc8c4e88a9d5c091304965"
+        }
+      ]
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am not sure the invalid blocks we see are from lighthouse or teku",
+      "createdAt": "2020-05-18T12:48:24.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!361447803194441738> doesn't lighthouse log anything if it gets a block ?",
+      "createdAt": "2020-05-18T12:48:46.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it should be seeing at least prysm blocks from gossip",
+      "createdAt": "2020-05-18T12:48:58.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we do log if we get a block",
+      "createdAt": "2020-05-18T12:49:14.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm",
+      "createdAt": "2020-05-18T12:49:21.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "not who from though",
+      "createdAt": "2020-05-18T12:49:24.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think there might be a PR to add that.. not sure",
+      "createdAt": "2020-05-18T12:49:31.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that is very odd, you should be still seeing our blocks",
+      "createdAt": "2020-05-18T12:49:38.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "even if we are forked",
+      "createdAt": "2020-05-18T12:49:42.244000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> It has sigp graffiti\r\n<@!361447803194441738> I see this for slot 152023",
+      "createdAt": "2020-05-18T12:51:19.254000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "2020-05-18_14-49-20.png",
+          "content": "9fa5471d771b7edea59becc2995181cb1c14372b95ba5e05da2032962be10b9d"
+        }
+      ]
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh so is that a prysm block in lighthouse?",
+      "createdAt": "2020-05-18T12:51:48.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not sure  where proposer 218 comes from. <@!557201004060213248> ?",
+      "createdAt": "2020-05-18T12:54:14.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That \"Happy...\" this is Prysm, I'm pretty sure",
+      "createdAt": "2020-05-18T12:54:36.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We don't expose the flag to change the grafitti",
+      "createdAt": "2020-05-18T12:54:44.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://schlesi.beaconcha.in/validator/218",
+      "createdAt": "2020-05-18T12:55:08.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm teku ?",
+      "createdAt": "2020-05-18T12:55:13.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think maybe the block explorer is wrong",
+      "createdAt": "2020-05-18T12:55:31.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this seems like a prysm validator",
+      "createdAt": "2020-05-18T12:55:53.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm about to roll into my 17th hour now, so might call it a night",
+      "createdAt": "2020-05-18T12:56:49.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "lets just restart",
+      "createdAt": "2020-05-18T12:57:06.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i dont think much can be done now",
+      "createdAt": "2020-05-18T12:57:16.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it would be a shame to wipe it before <@!203220829473996800> can get all up in it",
+      "createdAt": "2020-05-18T12:57:36.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "sure, that sounds good. Although I think proto already has it all saved up",
+      "createdAt": "2020-05-18T12:58:09.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "side by side",
+      "createdAt": "2020-05-18T12:58:25.147000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "2020-05-18_14-49-20.png",
+          "content": "957b2c988488cc67b50e5b5e3b55f729f82595ca682080fac872fe5299f27e79"
+        }
+      ]
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Did you manage to find out who was giving you the bad state root?",
+      "createdAt": "2020-05-18T12:58:28.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If you can give me a peer ID i might have them in my table",
+      "createdAt": "2020-05-18T12:58:39.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "can you get the block root <@!219523277163331586>",
+      "createdAt": "2020-05-18T12:59:04.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that is my prysm node, but you are also using pryms, right?",
+      "createdAt": "2020-05-18T12:59:18.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "give me a sec, its going to be difficult in the middle of all the logs. But i can search through it",
+      "createdAt": "2020-05-18T12:59:35.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "no pressure 🙂",
+      "createdAt": "2020-05-18T12:59:43.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "handelaar2",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> that is my prysm node, but you are also using pryms, right?\n<@!557201004060213248> yes, I only have prysm nodes running..",
+      "createdAt": "2020-05-18T12:59:54.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "benjaminion",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Pretty sure the earliest Teku validator is no. 248",
+      "createdAt": "2020-05-18T12:59:59.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will prepare a new testnet with 3 clients at genesis but keep the old testnet bootnodes and validators running",
+      "createdAt": "2020-05-18T13:02:24.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!361447803194441738> can you check if you have this block in your chain ? \n```\n[2020-05-18 12:33:05] ERROR sync: Could not process block from slot 150496: could not process block: could not execute state transition: validate state root failed, wanted: 0xe4b796ac0ab03575da6be008eb3d0e4f857758024fd4b78e9cfbcc4ac40cb88d, received: 0xd8ec43fc96abbfd6824475fb32e47ef959bb317a3ae273a7ee8af153fa762d61\n```",
+      "createdAt": "2020-05-18T13:02:43.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this has been giving my node trouble",
+      "createdAt": "2020-05-18T13:02:50.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep we have that one",
+      "createdAt": "2020-05-18T13:03:26.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah",
+      "createdAt": "2020-05-18T13:03:30.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`0xd8ec43fc96abbfd6824475fb32e47ef959bb317a3ae273a7ee8af153fa762d61` thats our root",
+      "createdAt": "2020-05-18T13:03:31.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok so thats where the chain split for us",
+      "createdAt": "2020-05-18T13:03:41.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we cant seem to process it",
+      "createdAt": "2020-05-18T13:03:47.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i will look into this tomorrow, will try and compare prysm's and lighthouse post state",
+      "createdAt": "2020-05-18T13:09:20.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "do we know where the chains diverged?",
+      "createdAt": "2020-05-18T13:11:25.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeap at the block i posted above ^",
+      "createdAt": "2020-05-18T13:11:36.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "zcli seems to agree with lighthouse",
+      "createdAt": "2020-05-18T13:30:22.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terence0083",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The west coast folks are getting up now ☀️  We'll help with looking into that invalid state transition. Will ping you on the side <@!476250636548308992> for more info",
+      "createdAt": "2020-05-18T13:30:35.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i'll send through a zip",
+      "createdAt": "2020-05-18T13:30:43.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terence0083",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sweet. Thanks",
+      "createdAt": "2020-05-18T13:31:14.912000+00:00",
+      "attachments": []
+    }
+  ]
+}

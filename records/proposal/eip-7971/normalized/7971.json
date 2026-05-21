@@ -1,0 +1,77 @@
+{
+  "id": 7971,
+  "title": "EIP-7971: Hard Limits for Transient Storage",
+  "status": "Draft",
+  "description": "Decrease costs for TLOAD and TSTORE with a transaction-global limit",
+  "laymanDescription": "Makes transient storage cheaper and sets a hard cap on how much can be used per transaction. This reduces gas for common patterns while protecting nodes from excessive memory use.",
+  "author": "Charles Cooper (@charles-cooper), Ben Adams (@benaadams), Maria Silva (@misilva73), Jochem Brouwer (@jochem-brouwer)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-06-12",
+  "discussionLink": "https://ethereum-magicians.org/t/add-eip-hard-limit-and-cost-reduction-for-transient-storage-allocation/24542",
+  "requires": [
+    "1153"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/228",
+          "date": "2026-01-15"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Maria Silva",
+          "discord": "misilva73"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "May lower fees in apps using transient storage; otherwise no behavior change. Possible failures if the global cap is reached."
+    },
+    "appDevs": {
+      "description": "Cheaper transient storage enables guards and metadata patterns; must handle transaction-wide slot cap and update gas assumptions in code."
+    },
+    "walletDevs": {
+      "description": "Adjust fee estimation and warnings for potential cap-exceeded reverts; otherwise no signing or serialization changes."
+    },
+    "toolingInfra": {
+      "description": "Profilers, tracers, and simulators must incorporate constant TLOAD/TSTORE pricing and track per-transaction transient slot usage."
+    },
+    "layer2s": {
+      "description": "Rollups adjusting EVM gas must mirror pricing and enforce slot cap; evaluate shared-bundle DoS implications in sequencer pipelines."
+    },
+    "stakersNodes": {
+      "description": "Resource profile mostly unchanged; adopt fork including new gas schedule and per-transaction slot-accounting rules."
+    },
+    "clClients": {
+      "description": "Consensus layer changes are limited to fork activation metadata and versioning; low code complexity, mostly configuration and coordination."
+    },
+    "elClients": {
+      "description": "Implement constant costs for TLOAD/TSTORE, enforce a transaction-global slot cap, update gas accounting and tests; moderate code changes."
+    }
+  },
+  "benefits": [
+    "Lower gas for transient storage operations",
+    "Per-transaction cap prevents excessive transient memory use",
+    "Encourages transient-storage patterns without persistent writes",
+    "Simplifies cost reasoning for compilers and tooling"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP proposes to reduce the gas costs for transient storage operations (`TLOAD` and `TSTORE`) by implementing constant pricing. To prevent denial-of-service attacks through excessive memory allocation, a transaction-global limit on transient storage slots is introduced. This approach provides lower costs for common use cases while maintaining security against resource exhaustion attacks. ## Motivation [EIP-1153](./eip-1153.md) introduced transient storage with gas costs equivalent to warm storage operations (100 gas). The current pricing model presents several limitations: 1. Reentrancy Protection Cost: At 100 gas per operation, implementing reentrancy locks by default remains expensive enough to discourage universal adoption at the language level, leaving contracts vulnerable to one of the most common attack vectors. 2. Underutilization: The high cost is still punishing to developers who wish to use transient storage for other legitimate use cases such as temporary approvals, callback metadata, and cross-frame communication within transactions. 3. Pricing Inconsistency: Transient storage fundamentally requires fewer resources than persistent storage (no disk I/O, no state root updates), yet is priced identically to warm storage operations. This EIP addresses these issues by implementing constant, lower pricing for transient storage operations while introducing a transaction-global limit to prevent denial-of-service attacks. It also makes the cost of warm storage cheaper. This provides lower costs and enables broader adoption of transient storage, while also providing hard resource limits for clients. ## Specification ### Parameters This EIP introduces the following parameters: | Constant | Value | Description | | :--- | :--- | :--- | | `GAS_TLOAD` | 5 | Gas cost of `TLOAD` | | `GAS_TSTORE` | 12 | Gas cost of `TSTORE` | | `MAX_TRANSIENT_SLOTS` | 131072 | The maximum number of transient slots allowed in a single transaction | | `GAS_TSTORE_ALLOCATE` | 24 | Cost of additional allocated slots | ### Gas Cost Changes 1. The gas cost for `TLOAD` (opcode `0x5c`) is reduced from `GAS_WARM_ACCESS` (100) to `GAS_TLOAD`. 2. The base gas cost for `TSTORE` (opcode `0x5d`) is reduced from `GAS_WARM_ACCESS` (100) to `GAS_TSTORE`. ### Transaction-Global Transient Storage Limit A transaction-global counter tracks the number of unique transient storage slots written across all contracts during transaction execution: 1. At the beginning of each transaction, initialize a counter `transient_slots_used` to 0. 2. When `TSTORE` is executed: - If the slot has not been written to during this transaction (across any contract), increment `transient_slots_used`. - If `transient_slots_used` exceeds `MAX_TRANSIENT_SLOTS`, the transaction MUST exceptionally halt. 3. The counter persists across all message calls in the transaction. 4. The counter is reset to 0 at the end of the transaction. ### Implementation Note Implementations MUST track transient storage allocated across all contracts. A slot is considered unique based on the tuple `(contract_address, storage_key)`. Writing to the same slot multiple times within a transaction does not generally increment the counter after the first write (unless the slot gets deallocated with a revert). ## Rationale ### Constant Pricing with Hard Limit This EIP implements constant pricing with a hard limit for several reasons: 1. A hard limit provides guarantees on the total resource consumption which are easier to reason about for clients, rather than needing to perform a calculation as a function of current gas limits to find out what total memory consumption could be. 2. Common use cases (e.g., reentrancy locks using 1-2 slots) are not penalized for worst case resource usage (like in DOS attacks). 3. Clients can safely pre-reserve all memory which could be used by transient storage up-front at the beginning of a transaction. ### Gas Cost Selection - `GAS_TLOAD` (5 gas): Transient storage reads require only memory access without disk I/O. - `GAS_TSTORE` (12 gas): Transient storage writes require memory allocation and journaling for revert support. - `GAS_TSTORE_ALLOCATE` (24 gas): Writes to fresh slots require memory allocation, which is more expensive than writing to an existing slot. `TSTORE` currently has a fixed cost. However, writing to fresh slots requires memory allocation, which is more expensive than writing to an existing slot. Therefore, we may consider introducing charging more for the first slot allocation through the parameter `GAS_TSTORE_ALLOCATE`. However, we would also need to introduce a mechanism to check for the first slot allocation versus subsequent allocations. #### Benchmarking This proposal does not yet have finalized numbers. To achieve this, we require benchmarks on the transient memory operations, which are currently in development. Once we collect that data, we will set the final numbers. We will also use this to understand whether the difference in performance justifies pricing new slot allocations differently. We should note that warm storage loads from cache are expected to have similar performance characteristics to transient storage reads. Therefore, the final parameters should be consistent with [EIP-8038](eip-8038.md). <– TODO –> ### Hard Limit Selection `MAX_TRANSIENT_SLOTS` of 131072 allows: - Sufficient slots for typical user applications - Memory usage bounded to approximately 8 MB per transaction (131072 slots * 64 bytes), which prevents OOM-based denial-of-service attacks ### Design Alternatives Considered 1. Per-Contract Limits: Increased complexity in reasoning about resource consumption based on the shape of the call stack. 2. Superlinear Pricing: Adds complexity, and still punishes \"common\" (non-DOS) use cases. 3. No Limit: May allow memory-based DOS attack if transaction-level gas limits change, or if pricing changes in the future. The benefit of a hard limit is that the resource consumption is bounded predictably even"
+}

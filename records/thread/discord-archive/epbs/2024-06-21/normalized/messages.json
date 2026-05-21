@@ -1,0 +1,552 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2024-06-21",
+  "messageCount": 67,
+  "sourceHash": "a1a42d5e2ed4f7d3baec0811d6648be6825a9fb94a0935615baa5a0759ab82c5",
+  "searchText": "<@725415098331430932> I forgot to mention during the talk: the vanilla design also has the same contention with ePBS: the proposer has plenty of time to include the aggregate inclusion list so that's not the problem. But the issue is with the attesters, the attesters need to validate these aggregates and in particular execute with the EL something in order to attest for the block. This is an inherent contention with ePBS. If this processing could be taken out of the beacon block, and moved to the payload reveal for example, or something that gives more time to attesters (for example the builder needs to include the aggregate in their payload and the next slot attesters will not apply the builder's boost if they don't agree with the aggregates) then that would make it compatible with ePBS. If you find these comments valid I can add a note to the ethresear.ch topic thanks for the comments! ah I think I understand the issue. The problem with attesters not applying the builder's boost if they don't agree with the IL aggregate included by the builder is that it would be a weaker form of enforcing the IL right? Is conditioning the block validity \"stronger\" than not giving builder boost? You can condition the payload validity if you want as well, at any rate, what I would want is to decouple execution from consensus validation, and having to execute at CL time is what's pretty bad. Anyway, the payload is more valuable, thus making the payload invalid is actually just as strong as making the CL block invalid, there would be very minor technical differences moving things away from the CL validation hot path is very valuable, because that's the only one that is 1/2 seconds, the rest is 9-10 great, then yeah I see no problem in having the IL validity conditions (that depend on execution) being kept out of the CL validation path Here is another problem: first a general issue with committee sizes: if the committee is small enough then you can not aggregate it and keep it in a global topic, if the committee is large then you need to make it into a subtopic that only some validators would listen and so forth. After saying that, there's the issue of when the list is sent: in ePBS the payload for slot N is revealed at 6 seconds, and it needs to be broadcast and fully validated *before* this committee can actually produce the ILs. This gives them very little time to do so, you could in principle overload the PTC for example, but that really breaks the benefit of PTC only voting for timeliness. I am sorry that I am only now noticing this, but this problem seems to be more fundamental I do not know currently how to fix this. 7547 is much simpler in this sense since the proposer anyway has 6 seconds for this and anyway has to have executed the block. \"in ePBS the payload for slot N is revealed at 6 seconds, and it needs to be broadcast and fully validated before this committee can actually produce the ILs\" why does the payload broadcast + validation have to happen before the IL committee makes ILs? Ideally, the IL committee makes ILs at the same time (in parrallel), during block building. The IL aggregate is released before the deadline for the payload, so the builder has time to modify its payload according to the IL constraints, before broadcasting it about the general comment on committee size, do you have min/max in mind? > But the issue is with the attesters, the attesters need to validate these aggregates and in particular execute with the EL something in order to attest for the block. This is an inherent contention with ePBS. If this processing could be taken out of the beacon block, and moved to the payload reveal for example I think it's important for FOCIL and EPBS that the validity of aggregated ILs is verified by the beacon attester of the subsequent slot and not by the PTC. This is similar to the current 9-second delayed execution validation time. When the builder reveals the payload, the attester has until the next slot to verify it. This variant should remain the same for FOCIL: - Slot `n-1`, 8s in: IL committee broadcasts their local view of the IL. - Slot `n-1`, 10s in: beacon attestation committee of subsequent slot (+2) finalizes their view on the aggregated IL. - Slot `n`, proposer selects a header and releases the consensus block as usual. - Slot `n`, 6s in: Builder releases the payload, which should satisfy the aggregated IL constraint. - Slot `n`, 9s in: PTC should only vote on the timeliness of the payload, not on whether the aggregated ILs are satisfied. - Slot `n+1`, 3s in: If the payload is at the head, it implies the aggregated IL is satisfied. Oh in your original design the committee at slot N sends the IL after seeing and validated block N. The analog of this in ePBS is what I mentioned. The block N is only broadcast at 6, Right. I think IL committee will pick their local IL at 8s or 9s after the payload reveal I think Terence's version doesn't work because of this This imposes strong requirements in the IL committee Ah great you edited the part I was going to ask about, also agree about the importance of having the entire set of the beacon attestation committee (not PTC) btw. Yeah I'm not sure about the IL committee and what requirements we need for that committee. How much effort do we expect them to pick the best IL? And what hapepns if the builder delay their reveal at the 8s mark instead of 6s I think the only way this is doable is if the IL committee is allowed to send txs that may be invalidated by the Payload of N, just like 7547, that works fine so in FOCIL the IL aggregate for slot N is constructed before the payload for slot N is broadcast IL committee's task is very straight forward just include txns you see in the mempool in your local inclusion list, ordered by priority fees basically damn i really hoped we could avoid that, that's one nice property of FOCIL to not having to do that.... I'm talking about the IL committee that sends the IL attestations at N, they need to have validated N Yeah. I dont think there's enough time if builder delays payload reveal on purpose. Or just not enough time in general ah so the beacon attesters? yes they need to build their own IL aggregate to validate N It doesn't matter if it's revealed on time or not, the problem is the need to have validated it Not the beacon committee, the IL committee The new committee that needs to send their IL transactions they need to have a current view of the EL In your design they do so at 6 seconds after validating the block This gives them about 4 seconds total. In ePBS this is impossible IMO ah ok, yeah got it If you relax the condition of being valid after N just like in 7547, life is easier in ePBS how much time would IL committee members have between seeing N and broadcasting their lists? Would 10 or 11ss be more feasible? Builder reveal at 6s IL committee sends their IL at 10s Assume builder is heavily peered with the il committee, it shouldnt take long to add last min IL txs But you lose the properties of focil ePBS brings a huge advantage in that all validators except the proposer have 9 seconds to validate the Payload. The proposer has 6. If you make it less than that it weakens the best property of ePBS also, what's the best/latest ePBS design doc I should look at? will take some time to think about it more My design notes in hackmd are comprehensive In this case, only the IL committee has to validate the payload in 4-5s Can we pin them here? You could in principle make it at 12s That's not the worst 4-5 seconds seems like plently of time Yeah exaclty https://hackmd.io/@potuz/rJ9GCnT1C It's not so trivial: cause these need to propagate now and there's a contention between those new messages and the time they take to generate Ya. I know nothing on how big the IL, how big the committee.. etc. Lots of tradeoffs at play imo yeah, all these tradeoffs (IL size/committee size) can (should) also be chosen and fine tuned based on implementation requirements so good to keep conversations going 🙂 I'll take a deeper look at the specification notes as well Sorry for the delay. Got sidetracked because FOCIL is very interesting 🙂 Notes for today: https://hackmd.io/@ttsao/epbs-breakout3 quick diagram q (in the purple rectangles) For the darker purple, are you assuming slot auction? The consensus block will have to commit to the exeuction header at the time of the reveal right? I agree slot auction will be nicer for this tbh I wasn't but slot auction does sound like it makes it easier The constraint is the following: the builder of `n` can't start building until the execution block of `n-1` is revealed and verified. The same applies to the IL committee: the IL committee can't build the inclusion list for `n` until the execution block of `n-1` is verified. The question is when we can set the inclusion list reveal time for `n` at `n-1` such that there's sufficient time for the IL committee to verify the execution block, build, and broadcast the inclusion for `n`. tbh guys, ePBS (without IL) is how merge should have originally happened We didn't have the forkchoice analysis IMO No, the darker part starts after the Payload reveal (that is at 6 of the previous slot) and you have to deal with tons of edge cases about reorgs of different forms. The most important point is the end of the dark part and not the beginning. I think 0 seconds of the slot is the best option perhaps As long as the builder includes the aggregate and not the proposer Notice that slot auctions or block auctions do not change this at all Why not? In slot auction, IL committee has more time to build. IL committee doesnt need to broadcast at the 11s or 0s mark. (Start of the slot). It can broadcast before the 6s mark no? The IL can only be constructed after seeing a Payload and validating it, it's irrelevant how that Payload was auctioned Agree. I'm saying in slot auction, there's more time to validate the payload and construct the IL. In block auction, the due time has to be before second 0 of the slot In slot auction, the due time can be before second 6 of the slot But I think I'm wrong. That's not how the builder bid for the slot. The builders want to validate the payload before bidding for the slot regardless <@755590043632140352> <@792822129019584562> This has been stuck on my mind since the call and is probably under specified in the current spec. If a proposer of `n+1` sees 50% over `withheld` but has a valid execution payload instead. What is the honest behavior? 1. Build on `n, full` 2. Build on `n, empty` 3. Build on `n-1, empty/full doesnt matter here` I always thought `n, full` is the honest even it's not a rational behavior it should be n,full as missing payloads will bring down blockchain throughput As I said there's no good attack by builder equivocating. In this case the proposer would build on full since the PTC is irrelevant to him I agree there's no builder equivocation here. But I do worry that proposer could potentially build on a weaker header then can get reorg by the beacon committee. Keep in mind withhold boost is twice more powerful than the proposer boost. Assume `x` is seen and `1-x` is not seen. Proposer gets reorg if `wb + 1-x > pb + x` Your threshold for `x` is 60% > I agree there's no builder equivocation here There is an equivocation, otherwise the PTC is malicious",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@725415098331430932> I forgot to mention during the talk: the vanilla design also has the same contention with ePBS: the proposer has plenty of time to include the aggregate inclusion list so that's not the problem. But the issue is with the attesters, the attesters need to validate these aggregates and in particular execute with the EL something in order to attest for the block. This is an inherent contention with ePBS. If this processing could be taken out of the beacon block, and moved to the payload reveal for example, or something that gives more time to attesters (for example the builder needs to include the aggregate in their payload and the next slot attesters will not apply the builder's boost if they don't agree with the aggregates) then that would make it compatible with ePBS.",
+      "createdAt": "2024-06-21T15:04:29.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If you find these comments valid I can add a note to the ethresear.ch topic",
+      "createdAt": "2024-06-21T15:04:55.309000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thanks for the comments!\n\nah I think I understand the issue. The problem with attesters not applying the builder's boost if they don't agree with the IL aggregate included by the builder is that it would be a weaker form of enforcing the IL right? Is conditioning the block validity \"stronger\" than not giving builder boost?",
+      "createdAt": "2024-06-21T15:20:20.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You can condition the payload validity if you want as well, at any rate, what I would want is to decouple execution from consensus validation, and having to execute at CL time is what's pretty bad. Anyway, the payload is more valuable, thus making the payload invalid is actually just as strong as making the CL block invalid, there would be very minor technical differences",
+      "createdAt": "2024-06-21T15:31:09.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "moving things away from the CL validation hot path is very valuable, because that's the only one that is 1/2 seconds, the rest is 9-10",
+      "createdAt": "2024-06-21T15:32:07.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "great, then yeah I see no problem in having the IL validity conditions (that depend on execution) being kept out of the CL validation path",
+      "createdAt": "2024-06-21T15:35:31.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Here is another problem: first a general issue with committee sizes: if the committee is small enough then you can not aggregate it and keep it in a global topic, if the committee is large then you need to make it into a subtopic that only some validators would listen and so forth.\n\nAfter saying that, there's the issue of when the list is sent: in ePBS the payload for slot N is revealed at 6 seconds, and it needs to be broadcast and fully validated *before* this committee can actually produce the ILs. This gives them very little time to do so, you could in principle overload the PTC for example, but that really breaks the benefit of PTC only voting for timeliness. I am sorry that I am only now noticing this, but this problem seems to be more fundamental",
+      "createdAt": "2024-06-21T15:39:53.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do not know currently how to fix this.",
+      "createdAt": "2024-06-21T15:40:01.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "7547 is much simpler in this sense since the proposer anyway has 6 seconds for this and anyway has to have executed the block.",
+      "createdAt": "2024-06-21T15:41:27.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "\"in ePBS the payload for slot N is revealed at 6 seconds, and it needs to be broadcast and fully validated before this committee can actually produce the ILs\" \n\nwhy does the payload broadcast + validation have to happen before the IL committee makes ILs? \n\nIdeally, the IL committee makes ILs at the same time (in parrallel), during block building. The IL aggregate is released before the deadline for the payload, so the builder has time to modify its payload according to the IL constraints, before broadcasting it",
+      "createdAt": "2024-06-21T15:45:16.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "about the general comment on committee size, do you have min/max in mind?",
+      "createdAt": "2024-06-21T15:48:26.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> But the issue is with the attesters, the attesters need to validate these aggregates and in particular execute with the EL something in order to attest for the block. This is an inherent contention with ePBS. If this processing could be taken out of the beacon block, and moved to the payload reveal for example\n\nI think it's important for FOCIL and EPBS that the validity of aggregated ILs is verified by the beacon attester of the subsequent slot and not by the PTC. This is similar to the current 9-second delayed execution validation time. When the builder reveals the payload, the attester has until the next slot to verify it. This variant should remain the same for FOCIL:\n\n- Slot `n-1`, 8s in: IL committee broadcasts their local view of the IL.\n- Slot `n-1`, 10s in: beacon attestation committee of subsequent slot (+2) finalizes their view on the aggregated IL.\n- Slot `n`, proposer selects a header and releases the consensus block as usual.\n- Slot `n`, 6s in: Builder releases the payload, which should satisfy the aggregated IL constraint.\n- Slot `n`, 9s in: PTC should only vote on the timeliness of the payload, not on whether the aggregated ILs are satisfied.\n- Slot `n+1`, 3s in: If the payload is at the head, it implies the aggregated IL is satisfied.",
+      "createdAt": "2024-06-21T15:55:57.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh in your original design the committee at slot N sends the IL after seeing and validated block N. The analog of this in ePBS is what I mentioned. The block N is only broadcast at 6,",
+      "createdAt": "2024-06-21T15:59:09.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Right. I think IL committee will pick their local IL at 8s or 9s after the payload reveal",
+      "createdAt": "2024-06-21T15:59:59.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think Terence's version doesn't work because of this",
+      "createdAt": "2024-06-21T16:00:12.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This imposes strong requirements in the IL committee",
+      "createdAt": "2024-06-21T16:00:26.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah great you edited the part I was going to ask about, also agree about the importance of having the entire set of the beacon attestation committee (not PTC) btw.",
+      "createdAt": "2024-06-21T16:01:27.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I'm not sure about the IL committee and what requirements we need for that committee. How much effort do we expect them to pick the best IL?",
+      "createdAt": "2024-06-21T16:02:12.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And what hapepns if the builder delay their reveal at the 8s mark instead of 6s",
+      "createdAt": "2024-06-21T16:03:03.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the only way this is doable is if the IL committee is allowed to send txs that may be invalidated by the Payload of N, just like 7547, that works fine",
+      "createdAt": "2024-06-21T16:03:13.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so in FOCIL the IL aggregate for slot N is constructed before the payload for slot N is broadcast \n\nIL committee's task is very straight forward just include txns you see in the mempool in your local inclusion list, ordered by priority fees basically",
+      "createdAt": "2024-06-21T16:03:55.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "damn i really hoped we could avoid that, that's one nice property of FOCIL to not having to do that....",
+      "createdAt": "2024-06-21T16:04:00.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm talking about the IL committee that sends the IL attestations at N, they need to have validated N",
+      "createdAt": "2024-06-21T16:04:40.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah. I dont think there's enough time if builder delays payload reveal on purpose. Or just not enough time in general",
+      "createdAt": "2024-06-21T16:05:38.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah so the beacon attesters? \n\nyes they need to build their own IL aggregate to validate N",
+      "createdAt": "2024-06-21T16:06:07.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It doesn't matter if it's revealed on time or not, the problem is the need to have validated it",
+      "createdAt": "2024-06-21T16:06:11.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Not the beacon committee, the IL committee",
+      "createdAt": "2024-06-21T16:06:37.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The new committee that needs to send their IL transactions they need to have a current view of the EL",
+      "createdAt": "2024-06-21T16:07:01.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In your design they do so at 6 seconds after validating the block",
+      "createdAt": "2024-06-21T16:07:21.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This gives them about 4 seconds total. In ePBS this is impossible IMO",
+      "createdAt": "2024-06-21T16:07:51.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah ok, yeah got it",
+      "createdAt": "2024-06-21T16:08:37.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If you relax the condition of being valid after N just like in 7547, life is easier",
+      "createdAt": "2024-06-21T16:09:06.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in ePBS how much time would IL committee members have between seeing N and broadcasting their lists?",
+      "createdAt": "2024-06-21T16:09:25.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Would 10 or 11ss be more feasible?\nBuilder reveal at 6s\nIL committee sends their IL at 10s\nAssume builder is heavily peered with the il committee, it shouldnt take long to add last min IL txs",
+      "createdAt": "2024-06-21T16:09:29.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But you lose the properties of focil",
+      "createdAt": "2024-06-21T16:09:30.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ePBS brings a huge advantage in that all validators except the proposer have 9 seconds to validate the Payload. The proposer has 6. If you make it less than that it weakens the best property of ePBS",
+      "createdAt": "2024-06-21T16:10:49.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also, what's the best/latest ePBS design doc I should look at? will take some time to think about it more",
+      "createdAt": "2024-06-21T16:11:20.694000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My design notes in hackmd are comprehensive",
+      "createdAt": "2024-06-21T16:11:39.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In this case, only the IL committee has to validate the payload in 4-5s",
+      "createdAt": "2024-06-21T16:11:41.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Can we pin them here?",
+      "createdAt": "2024-06-21T16:12:03.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You could in principle make it at 12s",
+      "createdAt": "2024-06-21T16:12:31.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's not the worst",
+      "createdAt": "2024-06-21T16:12:38.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "4-5 seconds seems like plently of time",
+      "createdAt": "2024-06-21T16:12:41.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah exaclty",
+      "createdAt": "2024-06-21T16:12:43.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://hackmd.io/@potuz/rJ9GCnT1C",
+      "createdAt": "2024-06-21T16:12:49.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's not so trivial: cause these need to propagate now and there's a contention between those new messages and the time they take to generate",
+      "createdAt": "2024-06-21T16:13:29.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ya. I know nothing on how big the IL, how big the committee.. etc. Lots of tradeoffs at play imo",
+      "createdAt": "2024-06-21T16:14:12.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, all these tradeoffs (IL size/committee size) can (should) also be chosen and fine tuned based on implementation requirements so good to keep conversations going 🙂 \n\nI'll take a deeper look at the specification notes as well",
+      "createdAt": "2024-06-21T16:16:12.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry for the delay. Got sidetracked because FOCIL is very interesting 🙂 \n\nNotes for today: https://hackmd.io/@ttsao/epbs-breakout3",
+      "createdAt": "2024-06-21T16:25:00.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "quick diagram q (in the purple rectangles)",
+      "createdAt": "2024-06-21T16:41:59.976000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-06-21_at_17.41.20.png",
+          "content": "b06eb43e5181d552bd3a6e2c14c97655b8b6f3a46cffe579a19bdaad9c436ddf"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For the darker purple, are you assuming slot auction? The consensus block will have to commit to the exeuction header at the time of the reveal right? I agree slot auction will be nicer for this",
+      "createdAt": "2024-06-21T16:43:52.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "tbh I wasn't but slot auction does sound like it makes it easier",
+      "createdAt": "2024-06-21T16:48:21.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The constraint is the following: the builder of `n` can't start building until the execution block of `n-1` is revealed and verified. The same applies to the IL committee: the IL committee can't build the inclusion list for `n` until the execution block of `n-1` is verified. The question is when we can set the inclusion list reveal time for `n` at `n-1` such that there's sufficient time for the IL committee to verify the execution block, build, and broadcast the inclusion for `n`.",
+      "createdAt": "2024-06-21T16:58:39.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "tbh guys, ePBS (without IL) is how merge should have originally happened",
+      "createdAt": "2024-06-21T17:39:41.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We didn't have the forkchoice analysis IMO",
+      "createdAt": "2024-06-21T17:50:32.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, the darker part starts after the Payload reveal (that is at 6 of the previous slot) and you have to deal with tons of edge cases about reorgs of different forms. The most important point is the end of the dark part and not the beginning. I think  0 seconds of the slot is the best option perhaps",
+      "createdAt": "2024-06-21T17:55:09.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As long as the builder includes the aggregate and not the proposer",
+      "createdAt": "2024-06-21T17:55:57.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Notice that slot auctions or block auctions do not change this at all",
+      "createdAt": "2024-06-21T17:57:05.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why not? In slot auction, IL committee has more time to build. IL committee doesnt need to broadcast at the 11s or 0s mark. (Start of the slot). It can broadcast before the 6s mark no?",
+      "createdAt": "2024-06-21T18:00:02.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The IL can only be constructed after seeing a Payload and validating it, it's irrelevant how that Payload was auctioned",
+      "createdAt": "2024-06-21T18:04:13.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Agree. I'm saying in slot auction, there's more time to validate the payload and construct the IL.\nIn block auction, the due time has to be before second 0 of the slot\nIn slot auction, the due time can be before second 6 of the slot",
+      "createdAt": "2024-06-21T18:11:47.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I think I'm wrong. That's not how the builder bid for the slot. The builders want to validate the payload before bidding for the slot regardless",
+      "createdAt": "2024-06-21T18:12:47.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> <@792822129019584562> This has been stuck on my mind since the call and is probably under specified in the current spec. If a proposer of `n+1` sees 50% over `withheld` but has a valid execution payload instead. What is the honest behavior?\n1. Build on `n, full`\n2. Build on `n, empty`\n3. Build on `n-1, empty/full doesnt matter here`\n\nI always thought `n, full` is the honest even it's not a rational behavior",
+      "createdAt": "2024-06-21T19:19:35.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it should be n,full as missing payloads will bring down blockchain throughput",
+      "createdAt": "2024-06-21T19:24:11.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As I said there's no good attack by builder equivocating. In this case the proposer would build on full since the PTC is irrelevant to him",
+      "createdAt": "2024-06-21T19:33:59.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree there's no builder equivocation here. But I do worry that proposer could potentially build on a weaker header then can get reorg by the beacon committee. Keep in mind withhold boost is twice more powerful than the proposer boost.\n\nAssume `x` is seen and `1-x` is not seen. Proposer gets reorg if `wb + 1-x > pb + x` Your threshold for `x` is 60%",
+      "createdAt": "2024-06-21T20:41:11.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> I agree there's no builder equivocation here\n\nThere is an equivocation, otherwise the PTC is malicious",
+      "createdAt": "2024-06-21T23:59:18.122000+00:00",
+      "attachments": []
+    }
+  ]
+}

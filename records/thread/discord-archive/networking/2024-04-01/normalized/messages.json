@@ -1,0 +1,418 @@
+{
+  "schemaVersion": 1,
+  "channel": "networking",
+  "date": "2024-04-01",
+  "messageCount": 51,
+  "sourceHash": "b521bd2805a36a70dfb564d4bd457192368a55156dfa08ed63c786df0cedb21f",
+  "searchText": "There is no changes in the aggregation strategy, at least at this moment -- the final aggregator is the proposer who packs network aggregates (the aggregates we know today) into a more tight on chain aggregate. <@363800010518822915> suggested that if a validator is selected to be an aggregator in several subnets it could pack all aggregates into one before dissemination, but this optimisation should be cheap in terms of engineering and computation as the same selection proof is shared across subnets Yeah what I was hoping/assuming is that this optimization would be what leads to lower attestation bandwidth, but in fact it won't unless aggregators are all connected to all subnets but that's not a possible requirement to all home stakers. <@687974325072035882> just came up with one approach to actually reduce attestation bandwidth, we should be trying to solve that We should be considering allowing validators to roadcast aggregates themselves, staking services are often generating and broadcasting tens or even hundreds of separate attestations per slot, where they could be sending a single aggregated attestation and reducing bandwidth required for everyone. Fyi https://ethresear.ch/t/reduced-attestation-format-for-gossiping-attestations/19157 but I just realized that there is probably a better solution which might be simpler to implement Perhaps, as an alternative: `AttestationData`s can be gossipped separately from `Attestation`s. attestations and aggregateAndProofs only contains the data root I think this would halve attestation's related traffic because you do not repeat attestation data in every single message CC. <@476250636548308992> <@498009160982724610> As of my little knowledge of pubsub this should work is there any data on the traffic distribution? which topics are more traffic intensive? this is problematic without additional primitives like aggregation clusters as it can open up a DoS vector. I'd be in favour of such a change but obviously the end solution will require more engineering Attestations are the most intensive, also it is bottleneck for higher blob count and single slot finality Sorry, I meant `beacon_aggregates_and_proof` vs `beacon_attestation_subnet_*` Subnets Aggregates are a compression of subnets If you mean single subnet vs aggregate, i **think** single subnet is more traffic intensive There is another proposal by <@449019668296892420> to introduce a `SingleAttestation`, https://github.com/ethereum/consensus-specs/pull/3559#discussion_r1537395827 which cuts off the bitfield for a single bit attestation. I don't know for sure but I can imagine that snappy gives quite poor compression rate for the bitfield, even though it is full of zeroes except for 1 byte Yeah this is useless At least for reducing traffic The issue are the crypted fields why do you think it is useless? Perhaps, i should extend on this This is a better idea than what my post explains Snappy removes it i am not sure tbh Also snappy optimizes it with the zeros in the uint64s too I think nonetheless that it would give a low rate of improvement This is a 50% reduction, EIP7549 would give 5ish% of improvement without snappy. I think it would not be worth it https://hackmd.io/@n0ble/eip7549_onchain_aggregates#Compressed-validator-indices In this doc there are following numbers which are relevant to uint64: Expected compression rate when you simply remove zero bytes is roughly two times lower than what snappy gives on practice. I didn't make such computations on the bitfield Individually snappy wont perform well like any compression algos Its many uint64s where compression algos makes sense i am curious how many 10 Like completely made up but it would make sense So I can give you something less made up: if you concatenate 16 attestations. Snappy it. Compression ratio is 50% I made this calculations very recently in the computation above there was 62.5k validator indexes in an indexed attestation encoded in SSZ Oh not sure then, maybe attestation has common repeating roots But it is surprising then the thing is that if you just threw away 5 bytes of zeroes from each index the size you get will be twice less comparing to what snappy results into mh yes In the case of attestation however 80% of it is roots So would not help much imo If you did that on top of something like this, it would make more sense, you would scale significantly the bandwidth wouldn't it be a DA issue then? How would slasher work in this case where it may not see attestation data which are the source of slashable offences checks? Slashings would still have the attestation data, this is only a change to aggregate and proof and attestations, it is a frank raw optimization to the gossip formats of the most trafficked messages Ignore my post on ethresearch, look at the alternative i put below how do you implement this? You create a separate gossip topic that process and divulgate AttestationDatas only and apply gossip rules there. Then, when you receive an attestation you need to match it with a previously seen attestation data (attestation have the data root). This require to keep track of recent attestation data in a bounded cache So it adds complexity that is a downside Problem here is 1- Need a DA layer for the signed messages (need to wait for the data part, and you can't through them cause probably they'll arrive earlier than the data) 2- Need some anti-dos mechanism on the data side if you don't have a signature to verify, and if you do have a signature then you have multiple signatures per attestation which is also a problem. 3- Definitely more complex on a critical time path. The slot has plenty of idle time, but not before 4 seconds, and to even submit these attestations we'd have to be subscribed to different topics and broadcast multiple objects. I think the path forward would be indeed to allow for in-client aggregation and somehow avoid the data duplication, but having a DA layer for this does not seem to be a solution How would in-client aggregation work? 1 - can be scheduled for later, 2- i think that we already have checks against malicious attestation datas before signature verification. 3 - attestation_data would be a global topic but yes, definetely more complex",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "There is no changes in the aggregation strategy, at least at this moment -- the final aggregator is the proposer who packs network aggregates (the aggregates we know today) into a more tight on chain aggregate. <@363800010518822915> suggested that if a validator is selected to be an aggregator in several subnets it could pack all aggregates into one before dissemination, but this optimisation should be cheap in terms of engineering and computation as the same selection proof is shared across subnets",
+      "createdAt": "2024-04-01T08:04:02.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Yeah what I was hoping/assuming is that this optimization would be what leads to lower attestation bandwidth, but in fact it won't unless aggregators are all connected to all subnets but that's not a possible requirement to all home stakers. <@687974325072035882> just came up with one approach to actually reduce attestation bandwidth, we should be trying to solve that",
+      "createdAt": "2024-04-01T09:04:18.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "We should be considering allowing validators to roadcast aggregates themselves, staking services are often generating and broadcasting tens or even hundreds of separate attestations per slot, where they could be sending a single aggregated attestation and reducing bandwidth required for everyone.",
+      "createdAt": "2024-04-01T10:33:17.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Fyi https://ethresear.ch/t/reduced-attestation-format-for-gossiping-attestations/19157 but I just realized that there is probably a better solution which might be simpler to implement",
+      "createdAt": "2024-04-01T12:53:33.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Perhaps, as an alternative: `AttestationData`s can be gossipped separately from `Attestation`s. attestations and aggregateAndProofs only contains the data root",
+      "createdAt": "2024-04-01T13:14:39.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think this would halve attestation's related traffic because you do not repeat attestation data in every single message CC. <@476250636548308992> <@498009160982724610>",
+      "createdAt": "2024-04-01T13:15:34.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "As of my little knowledge of pubsub this should work",
+      "createdAt": "2024-04-01T13:20:39.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "is there any data on the traffic distribution? which topics are more traffic intensive?",
+      "createdAt": "2024-04-01T13:42:05.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "this is problematic without additional primitives like aggregation clusters as it can open up a DoS vector. I'd be in favour of such a change but obviously the end solution will require more engineering",
+      "createdAt": "2024-04-01T13:43:15.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Attestations are the most intensive, also it is bottleneck for higher blob count and single slot finality",
+      "createdAt": "2024-04-01T13:44:26.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Sorry, I meant `beacon_aggregates_and_proof` vs `beacon_attestation_subnet_*`",
+      "createdAt": "2024-04-01T13:45:01.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Subnets",
+      "createdAt": "2024-04-01T13:45:21.188000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Aggregates are a compression of subnets",
+      "createdAt": "2024-04-01T13:45:37.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "If you mean single subnet vs aggregate, i **think** single subnet is more traffic intensive",
+      "createdAt": "2024-04-01T13:46:55.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "There is another proposal by <@449019668296892420> to introduce a `SingleAttestation`, https://github.com/ethereum/consensus-specs/pull/3559#discussion_r1537395827 which cuts off the bitfield for a single bit attestation. I don't know for sure but I can imagine that snappy gives quite poor compression rate for the bitfield, even though it is full of zeroes except for 1 byte",
+      "createdAt": "2024-04-01T13:49:15.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Yeah this is useless",
+      "createdAt": "2024-04-01T13:49:35.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "At least for reducing traffic",
+      "createdAt": "2024-04-01T13:49:47.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The issue are the crypted fields",
+      "createdAt": "2024-04-01T13:49:56.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "why do you think it is useless?",
+      "createdAt": "2024-04-01T13:50:10.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Perhaps, i should extend on this",
+      "createdAt": "2024-04-01T13:50:19.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "This is a better idea than what my post explains",
+      "createdAt": "2024-04-01T13:50:35.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Snappy removes it",
+      "createdAt": "2024-04-01T13:50:46.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "i am not sure tbh",
+      "createdAt": "2024-04-01T13:51:19.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Also snappy optimizes it with the zeros in the uint64s too",
+      "createdAt": "2024-04-01T13:51:20.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think nonetheless that it would give a low rate of improvement",
+      "createdAt": "2024-04-01T13:51:48.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "This is a 50% reduction, EIP7549 would give 5ish% of improvement without snappy. I think it would not be worth it",
+      "createdAt": "2024-04-01T13:52:02.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "https://hackmd.io/@n0ble/eip7549_onchain_aggregates#Compressed-validator-indices\n\nIn this doc there are following numbers which are relevant to uint64:\nExpected compression rate when you simply remove zero bytes is roughly two times lower than what snappy gives on practice. I didn't make such computations on the bitfield",
+      "createdAt": "2024-04-01T13:56:18.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Individually snappy wont perform well like any compression algos",
+      "createdAt": "2024-04-01T13:57:35.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Its many uint64s where compression algos makes sense",
+      "createdAt": "2024-04-01T13:58:04.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "i am curious how many",
+      "createdAt": "2024-04-01T13:58:17.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "10",
+      "createdAt": "2024-04-01T13:58:33.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Like completely made up but it would make sense",
+      "createdAt": "2024-04-01T13:58:44.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So I can give you something less made up: if you concatenate 16 attestations. Snappy it. Compression ratio is 50%",
+      "createdAt": "2024-04-01T13:59:40.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I made this calculations very recently",
+      "createdAt": "2024-04-01T13:59:54.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "in the computation above there was 62.5k validator indexes in an indexed attestation encoded in SSZ",
+      "createdAt": "2024-04-01T14:00:20.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Oh not sure then, maybe attestation has common repeating roots",
+      "createdAt": "2024-04-01T14:01:43.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But it is surprising then",
+      "createdAt": "2024-04-01T14:01:53.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "the thing is that if you just threw away 5 bytes of zeroes from each index the size you get will be twice less comparing to what snappy results into",
+      "createdAt": "2024-04-01T14:03:51.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "mh yes",
+      "createdAt": "2024-04-01T14:04:37.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "In the case of attestation however 80% of it is roots",
+      "createdAt": "2024-04-01T14:04:52.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So would not help much imo",
+      "createdAt": "2024-04-01T14:05:07.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "If you did that on top of something like this, it would make more sense, you would scale significantly the bandwidth",
+      "createdAt": "2024-04-01T14:05:39.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "wouldn't it be a DA issue then? How would slasher work in this case where it may not see attestation data which are the source of slashable offences checks?",
+      "createdAt": "2024-04-01T14:08:20.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Slashings would still have  the attestation  data, this is only a change to aggregate and proof and attestations, it is a frank raw optimization to the gossip formats of the most trafficked messages",
+      "createdAt": "2024-04-01T14:09:12.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Ignore my post on ethresearch, look at the alternative i put below",
+      "createdAt": "2024-04-01T14:09:42.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "how do you implement this?",
+      "createdAt": "2024-04-01T14:17:57.778000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "You create a separate gossip topic that process and divulgate AttestationDatas only and apply gossip rules there. Then, when you receive an attestation you need to match it with a previously seen attestation data (attestation have the data root). This require to keep track of recent attestation data in a bounded cache",
+      "createdAt": "2024-04-01T14:20:14.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So it adds complexity that is a downside",
+      "createdAt": "2024-04-01T14:20:27.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Problem here is \n1- Need a DA layer for the signed messages (need to wait for the data part, and you can't through them cause probably they'll arrive earlier than the data)\n2- Need some anti-dos mechanism on the data side if you don't have a signature to verify, and if you do have a signature then you have multiple signatures per attestation which is also a problem. \n3- Definitely more complex on a critical time path. The slot has plenty of idle time, but not before 4 seconds, and to even submit these attestations we'd have to be subscribed to different topics and broadcast multiple objects. \n\nI think the path forward would be indeed to allow for in-client aggregation and somehow avoid the data duplication, but having a DA layer for this does not seem to be a solution",
+      "createdAt": "2024-04-01T14:25:51.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "How would in-client aggregation work?",
+      "createdAt": "2024-04-01T14:28:12.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "1 - can be scheduled for later, 2- i think that we already have checks against malicious attestation datas before signature verification. 3 - attestation_data would be a global topic but yes, definetely more complex",
+      "createdAt": "2024-04-01T14:30:32.089000+00:00",
+      "attachments": []
+    }
+  ]
+}

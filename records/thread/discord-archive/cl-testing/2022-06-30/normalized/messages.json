@@ -1,0 +1,470 @@
+{
+  "schemaVersion": 1,
+  "channel": "cl-testing",
+  "date": "2022-06-30",
+  "messageCount": 56,
+  "sourceHash": "3e51858a7d3c2ee57d14b5126bab83efab1b93d5318a4f343b09f2b750cc16fd",
+  "searchText": "I ran the test again with TTD==498 on both the CL and EL and the beacon node seems to be still importing block on slot 79 with an execution payload that has a parent terminal block with a total difficulty that doesn't match the configured value, I'm not sure if there is something that could still be wrong with the test setup, here's the beacon node logs and the simulator log... Can you retry with geths current master? It should fix that problem I'm running with geth on `5e252282`, and both clients with bad TTD, and they still re-org to clients with correct TTD it seems, it looks like the `ForkchoiceUpdated` is sent to the EL and geth simply compels and re-orgs CL: ``` time=\"2022-06-30 14:22:33\" level=info msg=\"Called new payload with optimistic block\" chainServiceProcessedTime=71.021996ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... payloadBlockHash=0x8a270256f8cf prefix=blockchain sinceSlotStartTime=317.306216ms slot=79 slotInEpoch=14 version=bellatrix time=\"2022-06-30 14:22:33\" level=info msg=\"Called fork choice updated with optimistic block\" chainServiceProcessedTime=71.021996ms finalizedPayloadBlockHash=0x000000000000 headPayloadBlockHash=0x8a270256f8cf headSlot=79 justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... prefix=blockchain sinceSlotStartTime=317.306216ms slot=78 slotInEpoch=14 version=bellatrix time=\"2022-06-30 14:22:33\" level=info msg=\"Synced new block\" block=0xc06dd0ce... chainServiceProcessedTime=53.674162ms epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0xc1c7f0e3... prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 version=bellatrix time=\"2022-06-30 14:22:33\" level=debug msg=\"Synced new payload\" blockHash=0x8a270256f8cf blockNumber=251 chainServiceProcessedTime=53.674162ms gasUtilized=0.00 justifiedEpoch=0 justifiedRoot=0x00000000... parentHash=0x94acbe0a39f2 parentRoot=0xc1c7f0e3... prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 version=bellatrix time=\"2022-06-30 14:22:33\" level=info msg=\"Finished applying state transition\" attestations=1 chainServiceProcessedTime=53.674162ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0xc1c7f0e3... payloadHash=0x8a270256f8cf prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 syncBitsCount=504 txCount=0 version=bellatrix time=\"2022-06-30 14:22:33\" level=debug msg=\"PoS transition is complete, no longer checking for configuration changes\" prefix=powchain ``` Geth: ``` TRACE[06-30|14:22:33.260] Engine API request received method=ExecutePayload number=251 hash=8a2702..8b0575 TRACE[06-30|14:22:33.260] New skeleton head announced number=251 hash=8a2702..8b0575 force=false WARN [06-30|14:22:33.260] Ignoring payload with missing parent number=251 hash=8a2702..8b0575 parent=94acbe..72601e DEBUG[06-30|14:22:33.260] Served engine_newPayloadV1 conn=172.17.0.2:54502 reqid=611 duration=\"455.106µs\" TRACE[06-30|14:22:33.281] Engine API request received method=ForkchoiceUpdated head=8a2702..8b0575 finalized=000000..000000 safe=000000..000000 INFO [06-30|14:22:33.281] Left PoW stage ``` the bad block hash here is `8a2702..8b0575`, we do get a `BAD BLOCK` with `Error: invalid terminal block` later from geth though... Hmm so the newPayload does not verify the ttd condition correctly? It seems to be ignoring the payload, but then receives the `fcU` and starts sync, and then we get the `BAD BLOCK, invalid terminal block`, but by this time for some reason the beacon block was already imported... So we are reviewing spec, and we see the following function ```python def is_valid_terminal_pow_block(block: PowBlock, parent: PowBlock) -> bool: is_total_difficulty_reached = block.total_difficulty >= TERMINAL_TOTAL_DIFFICULTY is_parent_total_difficulty_valid = parent.total_difficulty < TERMINAL_TOTAL_DIFFICULTY return is_total_difficulty_reached and is_parent_total_difficulty_valid ``` If the parent.total_difficulty is 498 and the defined `TERMINAL_TOTAL_DIFFICULTY=498` then the client should not reject the block at slot 79 as invalid when the parent is 498. But here transition payload (`0x8a2702`) has parent.TD==500, and parent.parent.TD==498, so the parent of the terminal block is the one that reached TTD hmm, there is a block with 500 TD? i was seeing every block increase by 10 difficulty Wait but this is the expected thing, no? We ignore the newPayload and on fcu we start the sync which fails. Can you add some more logs` I see this in the sim logs > INFO: CorrectTTD=500, BadTTD=498, TerminalBlockTotalDifficulty=500, TerminalBlockParentTotalDifficulty=498 Also, could you log this in a human readable format? ``` FAIL: Node with bad TTD included beacon block with correct TTD &{{79 50 0x32ffa836fba2b6f6499a3741911fb597a1a9b791ffbe5a37e0708b091b3b897a ... ``` not sure what the fields are So the correct TTD (500) is the TTD that was set on the clients validating the chain, these are building the transition block (`0x8a2702`) on top of PoW block 250 with a TD=500, this should be invalid to the client with bad TTD (498), because block 249 is the one that reached TTD with a TD of 498.. Let me share full logs of the clients with bad TTD... actually, spec says we can allow it this is a valid block according to spec, as far as i can tell oh nvm i am mistaken this part is not satisfied: `parent.total_difficulty < TERMINAL_TOTAL_DIFFICULTY` yes thank you sir, digging in further let me share the full logs 👍 contains EL and CL logs for bad TTD nodes, I have the logs for nodes with correct TTD too if necessary btw, there is a consensus unit test that covers the check when parent has reached TTD yep we pass those. I added this specific scenario to our validation unit tests and it behaves as expected The log shows 79 as optimistic I think one issue here is prysm doesn't retrospectively validate ttd post-transition under optimistic mode and other clients do that <@892053833121923094> could you tell me a little about the test setup? the logs show 4 syncing regularly, does this mean that when it was importing block 79 there was still no block 80? We should not have been optimistically importing this block I think what potentially happened is that geth discarded PoW block 250 because 249 had already reached TTD with the bad configuration, so when it got newPayload(251) which had parent 250 it went into `SYNCING` the setup has 4 nodes, 3 nodes validating with TTD=500, and one node without validators that has CL and EL TTD=498, so the ones with TTD=500 produce payload 251 with parent PoW block 250, but to TTD=498 this should be invalid because PoW block 249 reaches TTD... <@892053833121923094> can you please send me the logs of the Teku or LightHouse test? I don't see anything wrong in the logs you send me. First, block 79 is based on top of block 77, not 78, so it's forking off 78. The EL returns that it's ACCEPTED/SYNCING the payload and we go into optimistic mode. This block is pre-merge therefore we sync it. We can't sync any other block until we pass `SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY` cc <@363800010518822915> <@399309815517544451> So I'd say that prysm behavior is following the Spec. Oh crap disregard the fork, It seems that I'm reading that log wrong, 79 is indeed based on 78 still, the EL returns SYNCING and we take this block because is pre-merged Also notice that for prysm the head is still 78: ``` time=\"2022-06-30 14:22:33\" level=info msg=\"Called new payload with optimistic block\" chainServiceProcessedTime=71.02199 6ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... payloadBlockHash=0x8a270256f8cf prefix=blockc hain sinceSlotStartTime=317.306216ms slot=79 slotInEpoch=14 version=bellatrix time=\"2022-06-30 14:22:33\" level=info msg=\"Called fork choice updated with optimistic block\" chainServiceProcessedTime=71.021996ms finalizedPayloadBlockHash=0x000000000000 headPayloadBlockHash=0x8a270256f8cf headSlot=79 justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... prefix=blockchain sinceSlotStartTime=317.306216ms slot=78 slotInEpoch=14 version=bellatrix ``` This means that it imports the block optimistically (that's the `newPayload` call there) but it still calls FCU with the slot in 78 Yes, give me a couple of minutes to re-run with lighthouse/teku, I need to update the config these clients, because the test was running with `EL TTD != CL TTD`, but somehow still passing... From the logs you sent me I don't see anything wrong with our syncing of that block, keeping 78 as head, and get stuck there waiting for the next blocks post merge If you want to test Prysm's behavior post this issue you can let the chain advance more than `SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY` and we can see if prysm accepts it During the test we are specifically querying for `/eth/v2/beacon/blocks/79`, and this is where the test gets the block, compares the execution payload hash and fails the test Could it be possible that the node is serving block 79 even when head is 78 ? this also returns `\"execution_optimistic\": \"true\"`? yep, very possible Ah, interesting, I have not checked `execution_optimisic` yeah, i think that is part of the block response json <@892053833121923094> which commit are you using? the logs for forkchoice update are different than my current ones Prysm/v2.1.3-rc.4/8510743406e08661957f6e0232d129dacaaa36aa. Built at: 2022-06-28 14:01:18+00:00 Thanks will swicth to that lol because of this I found a bug in our logging 🙂 <@892053833121923094> sorry to continue bugging with this, but could you tell me what are the configs you are using? what is the value of `SafeSlotsToImportOptimistically`? no problem 😀 I don't think this is set anywhere on the test, is it a parameter or part of config.yaml ? if it's not passed then it would default to 128. Most of the logs that you have unfortunately have a bug that makes them hard to read, half of the message has bogus information, I have an open PR to ask you to rerun this test with actual good logs. That's why I confused a fork up there, but even distilling the actual info in those logs, it seems that prysm continued importing the chain optimistically, and this is unacceptable",
+  "excerpts": [
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I ran the test again with TTD==498 on both the CL and EL and the beacon node seems to be still importing block on slot 79 with an execution payload that has a parent terminal block with a total difficulty that doesn't match the configured value, I'm not sure if there is something that could still be wrong with the test setup, here's the beacon node logs and the simulator log...",
+      "createdAt": "2022-06-30T05:14:51.120000+00:00",
+      "attachments": [
+        {
+          "type": "application/zip",
+          "origin_name": "prysm-bad-terminal-block-2.zip",
+          "content": "d137fc36057e616d951ffc184630202c3eaf302704218506af3cd55631e2b594"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can you retry with geths current master? It should fix that problem",
+      "createdAt": "2022-06-30T05:55:24.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm running with geth on `5e252282`, and both clients with bad TTD, and they still re-org to clients with correct TTD it seems, it looks like the `ForkchoiceUpdated` is sent to the EL and geth simply compels and re-orgs",
+      "createdAt": "2022-06-30T14:46:31.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "CL:\n```\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Called new payload with optimistic block\" chainServiceProcessedTime=71.021996ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... payloadBlockHash=0x8a270256f8cf prefix=blockchain sinceSlotStartTime=317.306216ms slot=79 slotInEpoch=14 version=bellatrix\n\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Called fork choice updated with optimistic block\" chainServiceProcessedTime=71.021996ms finalizedPayloadBlockHash=0x000000000000 headPayloadBlockHash=0x8a270256f8cf headSlot=79 justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... prefix=blockchain sinceSlotStartTime=317.306216ms slot=78 slotInEpoch=14 version=bellatrix\n\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Synced new block\" block=0xc06dd0ce... chainServiceProcessedTime=53.674162ms epoch=2 finalizedEpoch=0 finalizedRoot=0x00000000... justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0xc1c7f0e3... prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 version=bellatrix\n\ntime=\"2022-06-30 14:22:33\" level=debug msg=\"Synced new payload\" blockHash=0x8a270256f8cf blockNumber=251 chainServiceProcessedTime=53.674162ms gasUtilized=0.00 justifiedEpoch=0 justifiedRoot=0x00000000... parentHash=0x94acbe0a39f2 parentRoot=0xc1c7f0e3... prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 version=bellatrix\n\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Finished applying state transition\" attestations=1 chainServiceProcessedTime=53.674162ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0xc1c7f0e3... payloadHash=0x8a270256f8cf prefix=blockchain sinceSlotStartTime=298.864586ms slot=79 slotInEpoch=15 syncBitsCount=504 txCount=0 version=bellatrix\n\ntime=\"2022-06-30 14:22:33\" level=debug msg=\"PoS transition is complete, no longer checking for configuration changes\" prefix=powchain\n```",
+      "createdAt": "2022-06-30T14:46:34.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Geth:\n```\nTRACE[06-30|14:22:33.260] Engine API request received              method=ExecutePayload number=251 hash=8a2702..8b0575\nTRACE[06-30|14:22:33.260] New skeleton head announced              number=251 hash=8a2702..8b0575 force=false\nWARN [06-30|14:22:33.260] Ignoring payload with missing parent     number=251 hash=8a2702..8b0575 parent=94acbe..72601e\nDEBUG[06-30|14:22:33.260] Served engine_newPayloadV1               conn=172.17.0.2:54502 reqid=611                       duration=\"455.106µs\"\nTRACE[06-30|14:22:33.281] Engine API request received              method=ForkchoiceUpdated head=8a2702..8b0575 finalized=000000..000000 safe=000000..000000\nINFO [06-30|14:22:33.281] Left PoW stage \n```",
+      "createdAt": "2022-06-30T14:49:09.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "the bad block hash here is `8a2702..8b0575`, we do get a `BAD BLOCK` with `Error: invalid terminal block` later from geth though...",
+      "createdAt": "2022-06-30T14:49:40.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm so the newPayload does not verify the ttd condition correctly?",
+      "createdAt": "2022-06-30T14:51:37.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It seems to be ignoring the payload, but then receives the `fcU` and starts sync, and then we get the `BAD BLOCK, invalid terminal block`, but by this time for some reason the beacon block was already imported...",
+      "createdAt": "2022-06-30T14:56:47.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "So we are reviewing spec, and we see the following function\n```python\ndef is_valid_terminal_pow_block(block: PowBlock, parent: PowBlock) -> bool:\n    is_total_difficulty_reached = block.total_difficulty >= TERMINAL_TOTAL_DIFFICULTY\n    is_parent_total_difficulty_valid = parent.total_difficulty < TERMINAL_TOTAL_DIFFICULTY\n    return is_total_difficulty_reached and is_parent_total_difficulty_valid\n```\n\nIf the parent.total_difficulty is 498 and the defined `TERMINAL_TOTAL_DIFFICULTY=498` then the client should not reject the block at slot 79 as invalid when the parent is 498.",
+      "createdAt": "2022-06-30T14:58:07.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "But here transition payload (`0x8a2702`) has parent.TD==500, and parent.parent.TD==498, so the parent of the terminal block is the one that reached TTD",
+      "createdAt": "2022-06-30T15:00:26.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm, there is a block with 500 TD? i was seeing every block increase by 10 difficulty",
+      "createdAt": "2022-06-30T15:01:31.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Wait but this is the expected thing, no? We ignore the newPayload and on fcu we start the sync which fails. Can you add some more logs`",
+      "createdAt": "2022-06-30T15:01:32.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see this in the sim logs\n> INFO: CorrectTTD=500, BadTTD=498, TerminalBlockTotalDifficulty=500, TerminalBlockParentTotalDifficulty=498",
+      "createdAt": "2022-06-30T15:02:01.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also, could you log this in a human readable format?\n```\nFAIL: Node with bad TTD included beacon block with correct TTD &{{79 50 0x32ffa836fba2b6f6499a3741911fb597a1a9b791ffbe5a37e0708b091b3b897a ...\n```",
+      "createdAt": "2022-06-30T15:03:53.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "not sure what the fields are",
+      "createdAt": "2022-06-30T15:03:57.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "So the correct TTD (500) is the TTD that was set on the clients validating the chain, these are building the transition block (`0x8a2702`) on top of PoW block 250 with a TD=500, this should be invalid to the client with bad TTD (498), because block 249 is the one that reached TTD with a TD of 498..",
+      "createdAt": "2022-06-30T15:05:21.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let me share full logs of the clients with bad TTD...",
+      "createdAt": "2022-06-30T15:05:39.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "actually, spec says we can allow it",
+      "createdAt": "2022-06-30T15:05:42.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is a valid block according to spec, as far as i can tell",
+      "createdAt": "2022-06-30T15:06:10.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh nvm i am mistaken",
+      "createdAt": "2022-06-30T15:06:33.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "this part is not satisfied: `parent.total_difficulty < TERMINAL_TOTAL_DIFFICULTY`",
+      "createdAt": "2022-06-30T15:06:34.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2022-06-30T15:06:37.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "thank you sir, digging in further",
+      "createdAt": "2022-06-30T15:07:12.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me share the full logs 👍",
+      "createdAt": "2022-06-30T15:08:10.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-06-30T15:10:09.701000+00:00",
+      "attachments": [
+        {
+          "type": "application/zip",
+          "origin_name": "prysm-bad-terminal-block-3.zip",
+          "content": "a1459730690290e7953dc2c7ca8752fc82fc7beea50c0d0996e11964a2421629"
+        }
+      ]
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "contains EL and CL logs for bad TTD nodes, I have the logs for nodes with correct TTD too if necessary",
+      "createdAt": "2022-06-30T15:10:39.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Testing",
+      "parent": "",
+      "content": "btw, there is a consensus unit test that covers the check when parent has reached TTD",
+      "createdAt": "2022-06-30T15:11:19.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "yep we pass those. I added this specific scenario to our validation unit tests and it behaves as expected",
+      "createdAt": "2022-06-30T15:13:35.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "The log shows 79 as optimistic",
+      "createdAt": "2022-06-30T15:19:47.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think one issue here is prysm doesn't retrospectively validate ttd post-transition under optimistic mode and other clients do that",
+      "createdAt": "2022-06-30T15:32:28.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> could you tell me a little about the test setup? the logs show 4 syncing regularly, does this mean that when it was importing block 79 there was still no block 80?",
+      "createdAt": "2022-06-30T16:01:28.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "We should not have been optimistically importing this block",
+      "createdAt": "2022-06-30T16:01:37.766000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think what potentially happened is that geth discarded PoW block 250 because 249 had already reached TTD with the bad configuration, so when it got newPayload(251) which had parent 250 it went into `SYNCING`",
+      "createdAt": "2022-06-30T16:15:32.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "the setup has 4 nodes, 3 nodes validating with TTD=500, and one node without validators that has CL and EL TTD=498, so the ones with TTD=500 produce payload 251 with parent PoW block 250, but to TTD=498 this should be invalid because PoW block 249 reaches TTD...",
+      "createdAt": "2022-06-30T16:17:31.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> can you please send me the logs of the Teku or LightHouse test? I don't see anything wrong in the logs you send me. First, block 79 is based on top of block 77, not 78, so it's forking off 78. The EL returns that it's ACCEPTED/SYNCING the payload  and we go into optimistic mode. This block is pre-merge therefore we sync it. We can't sync any other block until we pass `SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY`",
+      "createdAt": "2022-06-30T17:17:43.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@363800010518822915> <@399309815517544451>",
+      "createdAt": "2022-06-30T17:17:48.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "So I'd say that prysm behavior is following the Spec.",
+      "createdAt": "2022-06-30T17:18:13.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh crap disregard the fork, It seems that I'm reading that log wrong, 79 is indeed based on 78",
+      "createdAt": "2022-06-30T17:20:19.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "still, the EL returns SYNCING and we take this block because is pre-merged",
+      "createdAt": "2022-06-30T17:20:36.487000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also notice that for prysm the head is still 78: \n```\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Called new payload with optimistic block\" chainServiceProcessedTime=71.02199\n6ms justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... payloadBlockHash=0x8a270256f8cf prefix=blockc\nhain sinceSlotStartTime=317.306216ms slot=79 slotInEpoch=14 version=bellatrix\ntime=\"2022-06-30 14:22:33\" level=info msg=\"Called fork choice updated with optimistic block\" chainServiceProcessedTime=71.021996ms finalizedPayloadBlockHash=0x000000000000 headPayloadBlockHash=0x8a270256f8cf headSlot=79 justifiedEpoch=0 justifiedRoot=0x00000000... parentRoot=0x1f7bfc91... prefix=blockchain sinceSlotStartTime=317.306216ms slot=78 slotInEpoch=14 version=bellatrix\n```\nThis means that it imports the block optimistically (that's the `newPayload` call there) but it still calls FCU with the slot in 78",
+      "createdAt": "2022-06-30T17:23:59.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes, give me a couple of minutes to re-run with lighthouse/teku, I need to update the config these clients, because the test was running with `EL TTD != CL TTD`, but somehow still passing...",
+      "createdAt": "2022-06-30T17:30:48.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "From the logs you sent me I don't see anything wrong with our syncing of that block, keeping 78 as head, and get stuck there waiting for the next blocks post merge",
+      "createdAt": "2022-06-30T17:33:33.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "If you want to test Prysm's behavior post this issue you can let the chain advance more than `SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY` and we can see if prysm accepts it",
+      "createdAt": "2022-06-30T17:34:55.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "During the test we are specifically querying for `/eth/v2/beacon/blocks/79`, and this is where the test gets the block, compares the execution payload hash and fails the test",
+      "createdAt": "2022-06-30T17:36:29.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Could it be possible that the node is serving block 79 even when head is 78 ?",
+      "createdAt": "2022-06-30T17:37:01.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "this also returns `\"execution_optimistic\": \"true\"`?",
+      "createdAt": "2022-06-30T17:37:14.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "yep, very possible",
+      "createdAt": "2022-06-30T17:37:27.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, interesting, I have not checked `execution_optimisic`",
+      "createdAt": "2022-06-30T17:37:43.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, i think that is part of the block response json",
+      "createdAt": "2022-06-30T17:38:14.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> which commit are you using? the logs for forkchoice update are different than my current ones",
+      "createdAt": "2022-06-30T17:41:49.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Prysm/v2.1.3-rc.4/8510743406e08661957f6e0232d129dacaaa36aa. Built at: 2022-06-28 14:01:18+00:00",
+      "createdAt": "2022-06-30T17:43:15.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks will swicth to that",
+      "createdAt": "2022-06-30T17:43:25.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "lol because of this I found a bug in our logging 🙂",
+      "createdAt": "2022-06-30T17:46:10.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> sorry to continue bugging with this, but could you tell me what are the configs you are using? what is the value of `SafeSlotsToImportOptimistically`?",
+      "createdAt": "2022-06-30T18:48:14.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "no problem 😀  I don't think this is set anywhere on the test, is it a parameter or part of config.yaml ?",
+      "createdAt": "2022-06-30T18:51:00.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "if it's not passed then it would default to 128.  Most of the logs that you have unfortunately have a bug that makes them hard to read, half of the message has bogus information, I have an open PR to ask you to rerun this test with actual good logs. That's why I confused a fork up there, but even distilling the actual info in those logs, it seems that prysm continued importing the chain optimistically, and this is unacceptable",
+      "createdAt": "2022-06-30T18:53:28.780000+00:00",
+      "attachments": []
+    }
+  ]
+}

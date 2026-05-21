@@ -1,0 +1,336 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2024-09-26",
+  "messageCount": 37,
+  "sourceHash": "225670ccfddbcbc4423b66f214bea8ea9ab87c000850376886ef44f91729a00b",
+  "searchText": "Building on this , a question for the other clients. Do you guys validate data columns in gossip before propagating them on ? From what we saw non-existent data columns(no commitments in block) was marked as valid and gossiped on. Its the main reason prysm started kicking out all its peers you are right, grandine publish data column sidecar even there is no blobs, particularly on a few first slot before blobs spamming. working on it now this should be fixed with recent commit: https://github.com/hangleang/grandine/tree/feature/das rolling out new grandine img <@792822129019584562> can lodestar sync? woah We particularly saw the invalid data columns gossip message when no blob in block originated by grandine re-transmitted by Teku in Lodestar: Teku <@425907307621122049> ``` time=\"2024-09-24 17:45:06.01\" level=debug msg=\"Gossip message was rejected\" agent=\"teku/teku/vUNKNOWN+g458f7e7/linux-x86_64/-eclipseadoptium-openjdk64bitservervm-java-21\" error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/159.223.224.54/tcp/9000\" peerID=16Uiu2HAkvg3E4eRhkWH24XnYvsd5LmqBtKUBZdiu5mS18Ewo1ZBX prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_22/ssz_snappy\" ``` Lodestart <@792822129019584562> ``` time=\"2024-09-24 17:45:05.63\" level=debug msg=\"Gossip message was rejected\" agent=\"lodestar/v1.21.0\" error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/161.35.81.105/tcp/50450\" peerID=16Uiu2HAmBy8FRaKNai2b6ZSqnR6Yi84VaAZgL4ieGHTtRwFa3TWq prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_78/ssz_snappy\" ``` also on nimbus: ``` time=\"2024-09-24 17:45:05.80\" level=debug msg=\"Gossip message was rejected\" agent=nimbus error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/206.189.89.154/tcp/38072\" peerID=16Uiu2HAkvYU6AeLUWqT8WZYxD2ay4AJvxrMxfEdZrnAFoJnK3jb2 prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_50/ssz_snappy\" ``` grandine is not yet implement reconstruction ok i thought the new grandine has been rolled out It explain why we disconnect Teku, Nimbus and Lodestar. If a prysm super node receives 128 messages like that, the gossip score of the peer will be negative, and the peer disconnected. just fix the no blobs issue sure sure take your time <@466006586477772831> Just to confirm, does lighthouse downscore/ban peers propagating bad data columns currently ? More precisely, we reject the message based on this rule: > [REJECT] The sidecar's kzg_commitments field inclusion proof is valid as verified by verify_data_column_sidecar_inclusion_proof(sidecar). <@498331483732312075> any image I can test? (No pressure, just please let me know when you have one.) try this one please `ethpandaops/grandine:hangleang-feature-das` thats the img that has been rolled out to devnet 2 `ethpandaops/grandine:hangleang-feature-das-2c2f74b` <- with explicit hash <@412614104222531604> is it possible to roll out Prysm nodes with the latest `peerDAS` commit? (`e45a13096e70e1581e41260b506fc2ffcaf7053c`) (Prysm can sync.) img build in progress will check Rolled <@531934490826768418> With tty, amazing thanks! Logs are so much easier to read now: Gossip data columns yes and you would ban those peers rather than just downscore them ? I am trying to resync lodestar (range sync) but however lighthouse keeps reponding with datacolumns for slot=3 which for e.g. shouldnt have any as no blob side cars <@466006586477772831> <@466006586477772831> can you add some extra logging for lh so we would know which subnet it requests at a specific time? Currently the only logs I see: ``` Sep 26 11:49:47.543 WARN Blocks and blobs request for range received invalid data, error: No column for block 0x0bdebc4ccda9243ef506b181ffcf3da88e72c2b37095fbfe7d0c25ad6bf74633 index 7, sender_id: RangeSync { chain_id: 7495089797446027463, batch_id: Epoch(415) }, peer_id: 16Uiu2HAmMUiz28Wkg718yeDeDZV6upzqe9TgcpCym6zyX4GrMTjU, service: sync ``` This warn message says that no colums for block [0x0bdebc4ccda9243ef506b181ffcf3da88e72c2b37095fbfe7d0c25ad6bf74633](https://dora.peerdas-devnet-2.ethpandaops.io/slot/13281) from teku-geth-2, which is responsible for ``` \"peer_das\": { \"custody_columns\": [ 26, 30, 86, 87 ], \"custody_column_subnets\": [ 26, 30, 86, 87 ], ``` <@466006586477772831> trying to find why Prysm is banning LH. It seems LH, when requesting 4 data columns by root for the same root, does 4 requests with 1 data column in the requests, instead of 1 request with 4 columns in the request. Example of what LH does: But also sometimes, LH does request multiple coluns at once like: <@466006586477772831>, what is the maximum tolerated amount of data columns in data columns by range request for LH? [Specification](https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7594/p2p-interface.md#datacolumnsidecarsbyrange-v1) states the response content is the following: ``` ( List[DataColumnSidecar, MAX_REQUEST_DATA_COLUMN_SIDECARS] ) ``` With `MAX_REQUEST_DATA_COLUMN_SIDECARS = MAX_REQUEST_BLOCKS_DENEB*NUMBER_OF_COLUMNS = 128*128 = 18_384` Prysm requests `64 * 128 = 8_192` and receives this response from LH: ``` [2024-09-26 14:58:09.91] DEBUG sync: Error reading chunked data column sidecar error=Rate limited. Request too large: failed to read stream of chunk-encoded blobs peer=16Uiu2HAmM1dyjaACfAJ5c1rQQV2jBtMuu1z2jLsWdmh97fgEJARq ``` we downscore them, but if it's invalid column, they get penalised quite harshly, and ~5 occurrences will get the peer banned Interesting, I'll take a look at this. Thanks! hmm that looks wrong, it's requesting index 7, which this teku peer doesn't have. I'll look into this as well good observation - we do batching but looks like something isn't working here",
+  "excerpts": [
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Building on this , a question for the other clients. Do you guys validate data columns in gossip before propagating them on ? From what we saw non-existent data columns(no commitments in block)  was marked as valid and gossiped on. Its the main reason prysm started kicking out all its peers",
+      "createdAt": "2024-09-26T02:00:37.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "you are right, grandine publish data column sidecar even there is no blobs, particularly on a few first slot before blobs spamming. working on it now",
+      "createdAt": "2024-09-26T02:10:37.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "this should be fixed with recent commit: https://github.com/hangleang/grandine/tree/feature/das",
+      "createdAt": "2024-09-26T05:29:37.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "rolling out new grandine img",
+      "createdAt": "2024-09-26T07:38:01.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562> can lodestar sync?",
+      "createdAt": "2024-09-26T07:43:06.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "woah",
+      "createdAt": "2024-09-26T07:45:59.439000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "2a540506fb1de6ed6630de9fdda4f7e9af8d7fca98c9ee57bfdb4cbc8ce0a12c"
+        }
+      ]
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "We particularly saw the invalid data columns gossip message when no blob in block originated by grandine re-transmitted by Teku in Lodestar:\n\nTeku <@425907307621122049> \n```\ntime=\"2024-09-24 17:45:06.01\" level=debug msg=\"Gossip message was rejected\" agent=\"teku/teku/vUNKNOWN+g458f7e7/linux-x86_64/-eclipseadoptium-openjdk64bitservervm-java-21\" error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/159.223.224.54/tcp/9000\" peerID=16Uiu2HAkvg3E4eRhkWH24XnYvsd5LmqBtKUBZdiu5mS18Ewo1ZBX prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_22/ssz_snappy\"\n```\n\nLodestart <@792822129019584562> \n\n```\ntime=\"2024-09-24 17:45:05.63\" level=debug msg=\"Gossip message was rejected\" agent=\"lodestar/v1.21.0\" error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/161.35.81.105/tcp/50450\" peerID=16Uiu2HAmBy8FRaKNai2b6ZSqnR6Yi84VaAZgL4ieGHTtRwFa3TWq prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_78/ssz_snappy\"\n```",
+      "createdAt": "2024-09-26T07:49:12.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "also on nimbus:\n```\ntime=\"2024-09-24 17:45:05.80\" level=debug msg=\"Gossip message was rejected\" agent=nimbus error=\"data column failed verification: sidecar inclusion proof verification failed\" gossipScore=32.72 multiaddress=\"/ip4/206.189.89.154/tcp/38072\" peerID=16Uiu2HAkvYU6AeLUWqT8WZYxD2ay4AJvxrMxfEdZrnAFoJnK3jb2 prefix=sync topic=\"/eth2/0c3df301/data_column_sidecar_50/ssz_snappy\"\n```",
+      "createdAt": "2024-09-26T07:50:33.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "grandine is not yet implement reconstruction",
+      "createdAt": "2024-09-26T07:51:28.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok i thought the new grandine has been rolled out",
+      "createdAt": "2024-09-26T07:52:11.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "It explain why we disconnect Teku, Nimbus and Lodestar. If a prysm super node receives 128 messages like that, the gossip score of the peer will be negative, and the peer disconnected.",
+      "createdAt": "2024-09-26T07:52:28.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "just fix the no blobs issue",
+      "createdAt": "2024-09-26T07:53:07.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "sure sure take your time",
+      "createdAt": "2024-09-26T07:53:21.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> Just to confirm, does lighthouse downscore/ban peers propagating bad data columns currently ?",
+      "createdAt": "2024-09-26T07:54:24.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "More precisely, we reject the message based on this rule:\n\n> [REJECT] The sidecar's kzg_commitments field inclusion proof is valid as verified by verify_data_column_sidecar_inclusion_proof(sidecar).",
+      "createdAt": "2024-09-26T07:55:50.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@498331483732312075> any image I can test?",
+      "createdAt": "2024-09-26T08:17:39.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "(No pressure, just please let me know when you have one.)",
+      "createdAt": "2024-09-26T08:17:55.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "try this one please `ethpandaops/grandine:hangleang-feature-das`",
+      "createdAt": "2024-09-26T08:21:11.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "thats the img that has been rolled out to devnet 2",
+      "createdAt": "2024-09-26T08:25:42.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`ethpandaops/grandine:hangleang-feature-das-2c2f74b` <- with explicit hash",
+      "createdAt": "2024-09-26T08:25:54.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> is it possible to roll out Prysm nodes with the latest `peerDAS` commit? (`e45a13096e70e1581e41260b506fc2ffcaf7053c`)",
+      "createdAt": "2024-09-26T08:52:20.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "(Prysm can sync.)",
+      "createdAt": "2024-09-26T08:52:32.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "img build in progress",
+      "createdAt": "2024-09-26T08:52:39.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "will check",
+      "createdAt": "2024-09-26T09:05:16.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Rolled <@531934490826768418>",
+      "createdAt": "2024-09-26T09:07:56.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "With tty, amazing thanks! Logs are so much easier to read now:",
+      "createdAt": "2024-09-26T09:09:37.808000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "04521b43b89146e27b907fc6bd6c3cb42b1fc0fbdeb03a9b5f731b8a508cf823"
+        }
+      ]
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Gossip data columns yes",
+      "createdAt": "2024-09-26T09:21:33.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "and you would ban those peers rather than just downscore them ?",
+      "createdAt": "2024-09-26T09:27:27.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "I am trying to resync lodestar (range sync) but however lighthouse keeps reponding with datacolumns for slot=3 which for e.g. shouldnt have any as no blob side cars <@466006586477772831>",
+      "createdAt": "2024-09-26T11:35:59.649000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "174d37d07fb621271ebeb1995d38ebf799c23d8513d976f850cc8a2d629109fb"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> can you add some extra logging for lh so we would know which subnet it requests at a specific time? Currently the only logs I see: \n```\nSep 26 11:49:47.543 WARN Blocks and blobs request for range received invalid data, error: No column for block 0x0bdebc4ccda9243ef506b181ffcf3da88e72c2b37095fbfe7d0c25ad6bf74633 index 7, sender_id: RangeSync { chain_id: 7495089797446027463, batch_id: Epoch(415) }, peer_id: 16Uiu2HAmMUiz28Wkg718yeDeDZV6upzqe9TgcpCym6zyX4GrMTjU, service: sync\n```\nThis warn message says that no colums for block [0x0bdebc4ccda9243ef506b181ffcf3da88e72c2b37095fbfe7d0c25ad6bf74633](https://dora.peerdas-devnet-2.ethpandaops.io/slot/13281) from teku-geth-2, which is responsible for ```\n \"peer_das\": {\n    \"custody_columns\": [\n      26,\n      30,\n      86,\n      87\n    ],\n    \"custody_column_subnets\": [\n      26,\n      30,\n      86,\n      87\n    ],\n```",
+      "createdAt": "2024-09-26T11:54:25.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> trying to find why Prysm is banning LH.\nIt seems LH, when requesting 4 data columns by root for the same root, does 4 requests with 1 data column in the requests, instead of 1 request with 4 columns in the request.\n\nExample of what LH does:",
+      "createdAt": "2024-09-26T12:55:42.047000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "e44a4bddca0c35ef635ecad648df358dfc935f73950364381cda6035a90861d3"
+        }
+      ]
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "But also sometimes, LH does request multiple coluns at once like:",
+      "createdAt": "2024-09-26T12:58:27.691000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "8d1d42a374f0fbf0448a4b5bde18261ff586eb26890c4b2d6bbeea6a5e7480c8"
+        }
+      ]
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831>, what is the maximum tolerated amount of data columns in data columns by range request for LH?\n\n[Specification](https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7594/p2p-interface.md#datacolumnsidecarsbyrange-v1) states the response content is the following:\n\n```\n(\n  List[DataColumnSidecar, MAX_REQUEST_DATA_COLUMN_SIDECARS]\n)\n```\n\nWith `MAX_REQUEST_DATA_COLUMN_SIDECARS = MAX_REQUEST_BLOCKS_DENEB*NUMBER_OF_COLUMNS = 128*128 = 18_384`\n\nPrysm requests `64 * 128 = 8_192` and receives this response from LH:\n```\n[2024-09-26 14:58:09.91]  DEBUG sync: Error reading chunked data column sidecar error=Rate limited. Request too large: failed to read stream of chunk-encoded blobs peer=16Uiu2HAmM1dyjaACfAJ5c1rQQV2jBtMuu1z2jLsWdmh97fgEJARq\n```",
+      "createdAt": "2024-09-26T15:00:26.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "we downscore them, but if it's invalid column, they get penalised quite harshly, and ~5 occurrences will get the peer banned",
+      "createdAt": "2024-09-26T23:40:45.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Interesting, I'll take a look at this. Thanks!",
+      "createdAt": "2024-09-26T23:42:17.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm that looks wrong, it's requesting index 7, which this teku peer doesn't have. I'll look into this as well",
+      "createdAt": "2024-09-26T23:54:23.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "good observation - we do batching but looks like something isn't working here",
+      "createdAt": "2024-09-26T23:58:20.706000+00:00",
+      "attachments": []
+    }
+  ]
+}

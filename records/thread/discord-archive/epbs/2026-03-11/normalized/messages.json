@@ -1,0 +1,758 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-03-11",
+  "messageCount": 90,
+  "sourceHash": "05895955c8d3342e13d5f38c5a587141c2b8d51a22cf475e58e69ac6e85fa31c",
+  "searchText": "just fyi we do have a bug in serving envelopes by range where we might serve non canonical envelopes. we need to load the blocks when serving payloads to check that the envelopes being served match our view of the chain. in the case of serving finalized data, we can skip this check because non canonical data will have already been pruned. but we need this check when serving non-finalized data. on devnet-0 we need this check for finalized and non finalized data because were not doing any pruning atm any update <@641548687813902336> <@822741226088169479> ? ### nimbus-geth-1 ``` INF 2026-03-11 08:51:34.998+00:00 Slot start topics=\"beacnde\" slot=48698 epoch=1521 sync=\"--h--m (9.35%) 0.0000slots/s (UwQQQQQQQw:4553)/opt\" peers=8 head=1e084448:4554 .. INF 2026-03-11 08:51:34.998+00:00 Beacon node not in sync; skipping validator duties for now topics=\"beacval\" slot=48698 headSlot=4554 .. DBG 2026-03-11 08:50:11.770+00:00 Failed to get block data topics=\"overseer\" reason=\"Failed to receive envelopes on request, reason: (kind: ReceivedErrorResponse, responseCode: ServerError, errorMsg: \"Unexpected error\")\" ``` ### teku-geth-1 ``` 2026-03-11 08:51:53.717 ERROR - Internal error while importing execution payload: 7330 (block root: ca5c31163a311ac61d33ecb76e5a7f482e501b2beede1ad6d489f21b1b566fa4, builder index: 18446744073709551615) ... Caused by: tech.pegasys.teku.spec.logic.common.statetransition.exceptions.BlockProcessingException: Bid is not for the right parent block ... 2026-03-11 08:51:47.001 INFO - Syncing *** Slot: 48699, Head slot: 9804, Remaining slots: 38895, Target chain: 08cc7a..9fcf (48608) with 1 peers, Connected peers: 4 ``` Working on an update will push later today <@358120958726373381> <@737658693331714159> Lighthouse is still the odd one out. It has latest_block_hash = bid.block_hash (payload already applied), while both Prysm and Lodestar agree on latest_block_hash = bid.parent_block_hash (payload not yet applied). Lodestar is now working still debugging, getting somewhere, hopefully today I push a fix do you need watchtower to be enabled on the host? so it could auto roll the changes Yeah, can do it for consensys/master, we already merged my previous PR rolling and enabling watchtower Yeah I imagine so, we need to keep an issue of downscoring this behavior eventually before we forget 🙂 added lodestar now to the checkpointz server in the upstreams tab you can see which nodes are currently configured yeah well have a fix for this soon. Issue is we still don’t have checkpoint sync so we can’t update our nodes worst case we’ll have the fix for devnet 1 I think focusing on able to do checkpoint sync > serving checkpoint should be the prio we have someone on it 🫡 https://github.com/ethereum/beacon-APIs/pull/586 related to this, in case anyone looked at serving PTC duties already would love to get some feedback on this API https://github.com/ethereum/beacon-APIs/pull/584 this is to allow external builders to construct the `ExecutionPayloadEnvelope` given the signed beacon block, execution payload and execution requests My PR already has this removal it'll cause conflicts ahh you mean from the Beacon API yeah, crap I don' t even have those repos in mind 🙂 left a comment, didn't think much about this but I guess it's too much overhead to pass the full block? why is it needed? what beacon api am I supposed to hit to exit a 0x03 builder? `POST /eth/v1/beacon/pool/voluntary_exits` yeah thats what I thought any of the clients supposed to support the builder flag already on this endpoint? keep getting `VOLUNTARY_EXIT_ERROR_INVALID_SIGNATURE` Lighthouse: ValidatorUnknown - doesn't recognize the builder index flag Lodestar: Gets to signature verification but the API validation layer (validateApiVoluntaryExit) doesn't have builder-aware code - it uses getVoluntaryExitSignatureSet which only looks up validator pubkeys, not builder pubkeys Prysm: index out of bounds - treats it as a regular validator index can confirm, this code path is not updated yet, we can process them though You can process, but I can't submit 😂 you can gossip them yourself 🤷‍♂️ local kurtosis tests confirm that 0x00,0x01,0x02,0x03 deposits don't break the chain deposits, withdrawals most probably so exits should as well 🙂 yup, exits don't break either do not send them even if you can 🙂 been trying to exit the builder https://klipy.com/gifs/soft-kobe-bryant Deposits ✅ Exits ❌ Withdrawals ✅ Exit of 0x03 and testing recycling of builder index ❌ you're too hopeful, need to try withdrawals with empty blocks both missing and empty not related to builders actually, the exits just got processed `[2026-03-11 15:19:52.54] ERROR blockchain: received an undefined execution engine error error=invalid forkchoice state` I spoke too soon that it was working prysm right away started missing blocks when it had to include an exit ``` Mar-11 15:20:36.128[rest] error: Req req-2p getStateFinalityCheckpoints error - REGEN_ERROR_NO_SEED_STATE Error: REGEN_ERROR_NO_SEED_STATE at StateRegenerator.getState (file:///usr/app/packages/beacon-node/src/chain/regen/regen.ts:210:13) at JobItemQueue.jobQueueProcessor [as itemProcessor] (file:///usr/app/packages/beacon-node/src/chain/regen/queued.ts:320:35) at Timeout.runJob [as _onTimeout] (file:///usr/app/packages/beacon-node/src/util/queue/itemQueue.ts:149:33) at listOnTimeout (node:internal/timers:605:17) at processTimers (node:internal/timers:541:7) ``` lodestar also having issues thats only on the api, shouldn't be critical yeah that I was expecting, I don't think we even checked any of it yet. The invalid forkchoice state comes from the engine and Prysm will continue having this until we update the geth branch to accept an FCU to an older head and until clients stop voting for empty ~~looks like we are recovering tho~~ lodestar: ``` Mar-11 15:22:45.043[] error: Error signing SyncCommitteeContribution slot=604, index=3, validatorIndex=143 - produceSyncCommitteeContribution failed with status 404: Block not in forkChoice, beaconBlockRoot=0xa74262ce35ee6f693e9293648fd7d7f7c9f4f2b980366b7415029aa0fab27a8d Error: produceSyncCommitteeContribution failed with status 404: Block not in forkChoice, beaconBlockRoot=0xa74262ce35ee6f693e9293648fd7d7f7c9f4f2b980366b7415029aa0fab27a8d at ApiResponse.error (file:///usr/app/packages/api/src/utils/client/response.ts:165:12) at ApiResponse.assertOk (file:///usr/app/packages/api/src/utils/client/response.ts:156:18) at ApiResponse.value (file:///usr/app/packages/api/src/utils/client/response.ts:105:10) at file:///usr/app/packages/validator/src/services/syncCommittee.ts:221:92 at Array.map (<anonymous>) at SyncCommitteeService.produceAndPublishAggregates (file:///usr/app/packages/validator/src/services/syncCommittee.ts:215:14) at processTicksAndRejections (node:internal/process/task_queues:104:5) at file:///usr/app/packages/validator/src/services/syncCommittee.ts:105:11 at async Promise.all (index 3) at runSyncCommitteeTasks (file:///usr/app/packages/validator/src/services/syncCommittee.ts:100:7) ``` Yeah exits seem to mess up lodestar and prysm completely lighthouse trying to still producing blocks tho thinking more, I think we can just submit the beacon block root. Because it looks like constructing the envelope for a given beacon block requires the node to have received the beacon block. Because `process_execution_payload` fetches the latest bid from the beacon state rather than from a beacon block. In the envelope, we also need to fill up the `slot` and`builder_index`. The CL would have to fetch the beacon block by root and fill the fields from the beacon block. I think the API would work like the following then: 1. Construct the envelope with the payload and execution requests sent with the API. Set the beacon block root in the envelope to the root passed to the API. 2. Fetch the beacon block by the root and set the slot and builder index in the envelope corresponding to the one in the beacon block. 3. Run `process_execution_payload(state, signed_execution_payload_envelope, execution_engine, verify=False)` 4. Return the output `ExecutionPayloadEnvelope` to the builder with the state root set to the post state root after `process_execution_payload` epbs-devnet-1 scope just dropped: https://notes.ethereum.org/@ethpandaops/epbs-devnet-1 We should aim to have https://github.com/ethereum/consensus-specs/pull/4992 merged in the next day or two, have new cl spec release by EOW and launch devnet 1 next wed on the 18th of March. Lets try to hit these deadlines! I don't see anything there, what are we testing in that devnet? can't we continue using this one until it doesn't give more? we can test existing structures on this one until we have them fixed, what' s the point of launching a new devnet when we can still use this one for unresolved issues, it's not like we have a hardfork. The only one would be the PTC attestations packing issue, which yes, we should launch a new devnet if this one breaks pretty sure there are a few consensus breaking changes in the new devnet that would make devnet 0 break there's the PTC lookbehind is the only one I can think of https://github.com/ethereum/consensus-specs/pull/4948 oh Justin just told me that this would be forkchoice change not consensus change soz but again I think my original plan in https://discord.com/channels/595666850260713488/1480581540655399095/1480582319541715197 is much more cost-effective and we can iterate over this it does not make sense to launch a new devnet when Teku and Nimbus can't even sync yet lets continue testing on devnet-0 all the failing current structures (withdrawals, exits, etc). When we fix those lets try PTC attestations until we split and then we can just scrape this one off Can we do both? Keep devnet-0 & start working on devnet-1 for clients that are ready for that? the main reason I wanna actually push for devnet 1 is to make sure that the change set between devnet 0 and devnet 1 won't get too big we can keep acknowledge the limitations, and keep testing everyting on devnet 1. also ideally all these should be ironed out by next tuesday but no client is ready for devnet-0 yet, we fail in Kurtosis with the current branches so we can focus on the new changeset from wed on also in general supporting multiple specs at once is a hard-to-justify cost ok, whatever you guys say, I'll continue my testing on this devnet so please keep it up, this devnet is useful and I can' t even think of having separate branches with different specs to be testing on separate devnets jinx Okay so no to doing both. That's fine. What do clients prefer? * Continue working on devnet-0. * Bail on devnet-0 & start devnet-1 with new changes. when do you guys want to add bal? This should happen after the standalone epbs devnets, in glamsterdam-devnet-0. Depends on how long you think it will take for epbs to stabilize. Hopefully before the interop. that's fine with me, but ya my main question was when glamsterdam-devnet-0 I agree its good to have a stable epbs devnet first.. so will have to be after devnet1 (at least) Yes. Your guess is as good as mine 😅 i’d aim for interop - 1 week for glam-dev-0 not that certain about 2., can't the builder submit the beacon block beforehand, or most likely the node has already seen it on p2p from the proposer gossiping it, we can still trigger by root if it doesn't have it but it's likely the beacon node also has the post block state cached at that point Fairly doable. Could we be nasty and try -2 so that we get there with a somewhat stable testing environment? What I would love for Interop is to be in a place in which we can run benchmarking tests during that week those will necessarily have to be interlocked with BALs. out of Private communications with <@917367578966523934> I realized there's something we could be testing right now on ePBS devnet 0 and is related to the EL more than the CL. We should check the behavior of BLOCKROOT, if it's the parent blockroot or the bloc",
+  "excerpts": [
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "just fyi we do have a bug in serving envelopes by range where we might serve non canonical envelopes. we need to load the blocks when serving payloads to check that the envelopes being served match our view of the chain. in the case of serving finalized data, we can skip this check because non canonical data will have already been pruned. but we need this check when serving non-finalized data. on devnet-0 we need this check for finalized and non finalized data because were not doing any pruning atm",
+      "createdAt": "2026-03-11T04:16:27.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "any update <@641548687813902336> <@822741226088169479> ?",
+      "createdAt": "2026-03-11T09:23:28.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "### nimbus-geth-1\n\n```\nINF 2026-03-11 08:51:34.998+00:00 Slot start topics=\"beacnde\" slot=48698 epoch=1521\n    sync=\"--h--m (9.35%) 0.0000slots/s (UwQQQQQQQw:4553)/opt\" peers=8 head=1e084448:4554\n..\nINF 2026-03-11 08:51:34.998+00:00 Beacon node not in sync; skipping validator duties for now\n    topics=\"beacval\" slot=48698 headSlot=4554\n..\nDBG 2026-03-11 08:50:11.770+00:00 Failed to get block data topics=\"overseer\"\n    reason=\"Failed to receive envelopes on request, reason: (kind: ReceivedErrorResponse,\n    responseCode: ServerError, errorMsg: \"Unexpected error\")\"\n```\n\n### teku-geth-1\n\n```\n2026-03-11 08:51:53.717 ERROR - Internal error while importing execution payload: 7330\n    (block root: ca5c31163a311ac61d33ecb76e5a7f482e501b2beede1ad6d489f21b1b566fa4,\n     builder index: 18446744073709551615)\n...\nCaused by: tech.pegasys.teku.spec.logic.common.statetransition.exceptions.BlockProcessingException:\n    Bid is not for the right parent block\n...\n2026-03-11 08:51:47.001 INFO - Syncing *** Slot: 48699, Head slot: 9804, Remaining slots: 38895,\n    Target chain: 08cc7a..9fcf (48608) with 1 peers, Connected peers: 4\n```",
+      "createdAt": "2026-03-11T09:24:08.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Working on an update will push later today",
+      "createdAt": "2026-03-11T09:24:52.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@358120958726373381> <@737658693331714159> Lighthouse is still the odd one out. It has latest_block_hash = bid.block_hash (payload already applied), while both Prysm and Lodestar agree on latest_block_hash = bid.parent_block_hash (payload not yet applied).",
+      "createdAt": "2026-03-11T09:41:35.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Lodestar is now working",
+      "createdAt": "2026-03-11T09:41:53.531000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-11_at_10.41.44.png",
+          "content": "c7973c27c82f1a9508418812907104f00986f1ebbcd46ab05f35146fa61fca78"
+        }
+      ]
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "still debugging, getting somewhere, hopefully today I push a fix",
+      "createdAt": "2026-03-11T10:04:11.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "do you need watchtower to be enabled on the host?",
+      "createdAt": "2026-03-11T10:04:32.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it could auto roll the changes",
+      "createdAt": "2026-03-11T10:04:41.769000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, can do it for consensys/master, we already merged my previous PR",
+      "createdAt": "2026-03-11T10:38:03.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "rolling and enabling watchtower",
+      "createdAt": "2026-03-11T10:38:43.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I imagine so, we need to keep an issue of downscoring this behavior eventually before we forget 🙂",
+      "createdAt": "2026-03-11T10:57:10.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "added lodestar now to the checkpointz server",
+      "createdAt": "2026-03-11T11:07:59.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in the upstreams tab you can see which nodes are currently configured",
+      "createdAt": "2026-03-11T11:08:34.886000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-11_at_12.08.06.png",
+          "content": "64f8c4c07a19c73a3d384d8afb74ab01433c92a98c9601ce7c9c0e4b3ceb4ad5"
+        }
+      ]
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah well have a fix for this soon. Issue is we still don’t have checkpoint sync so we can’t update our nodes",
+      "createdAt": "2026-03-11T11:23:42.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "worst case we’ll have the fix for devnet 1",
+      "createdAt": "2026-03-11T11:23:59.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think focusing on able to do checkpoint sync > serving checkpoint should be the prio",
+      "createdAt": "2026-03-11T11:27:36.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have someone on it 🫡",
+      "createdAt": "2026-03-11T11:29:53.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/586 related to this, in case anyone looked at serving PTC duties already",
+      "createdAt": "2026-03-11T12:45:04.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would love to get some feedback on this API https://github.com/ethereum/beacon-APIs/pull/584\nthis is to allow external builders to construct the `ExecutionPayloadEnvelope` given the signed beacon block, execution payload and execution requests",
+      "createdAt": "2026-03-11T12:57:21.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My PR already has this removal it'll cause conflicts",
+      "createdAt": "2026-03-11T13:58:46.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ahh you mean from the Beacon API",
+      "createdAt": "2026-03-11T13:58:58.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, crap I don' t even have those repos in mind 🙂",
+      "createdAt": "2026-03-11T13:59:07.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "left a comment, didn't think much about this but I guess it's too much overhead to pass the full block? why is it needed?",
+      "createdAt": "2026-03-11T14:01:54.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what beacon api am I supposed to hit to exit a 0x03 builder?",
+      "createdAt": "2026-03-11T15:02:56.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`POST /eth/v1/beacon/pool/voluntary_exits`",
+      "createdAt": "2026-03-11T15:05:21.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah thats what I thought",
+      "createdAt": "2026-03-11T15:07:20.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "any of the clients supposed to support the builder flag already on this endpoint?",
+      "createdAt": "2026-03-11T15:07:31.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "keep getting `VOLUNTARY_EXIT_ERROR_INVALID_SIGNATURE`",
+      "createdAt": "2026-03-11T15:07:47.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Lighthouse: ValidatorUnknown - doesn't recognize the builder index flag\nLodestar: Gets to signature verification but the API validation layer (validateApiVoluntaryExit) doesn't have builder-aware code - it uses getVoluntaryExitSignatureSet which only looks up validator pubkeys, not builder pubkeys\nPrysm: index out of bounds - treats it as a regular validator index",
+      "createdAt": "2026-03-11T15:10:55.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can confirm, this code path is not updated yet, we can process them though",
+      "createdAt": "2026-03-11T15:12:12.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You can process, but I can't submit 😂",
+      "createdAt": "2026-03-11T15:12:34.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can gossip them yourself 🤷‍♂️",
+      "createdAt": "2026-03-11T15:12:56.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "local kurtosis tests confirm that 0x00,0x01,0x02,0x03 deposits don't break the chain",
+      "createdAt": "2026-03-11T15:13:05.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "deposits, withdrawals most probably so exits should as well 🙂",
+      "createdAt": "2026-03-11T15:13:35.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yup, exits don't break either",
+      "createdAt": "2026-03-11T15:13:46.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "do not send them even if you can 🙂",
+      "createdAt": "2026-03-11T15:13:48.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "been trying to exit the builder",
+      "createdAt": "2026-03-11T15:13:50.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://klipy.com/gifs/soft-kobe-bryant",
+      "createdAt": "2026-03-11T15:14:32.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Deposits ✅ \nExits ❌ \nWithdrawals ✅ \nExit of 0x03 and testing recycling of builder index ❌",
+      "createdAt": "2026-03-11T15:17:39.469000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-11_at_16.15.48.png",
+          "content": "bf614992058241412327efb5b7355d59799bd9c27c7d9bb65c7c2822e35f365c"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-11_at_16.15.58.png",
+          "content": "48a08ec259716541525238c4b1ebb553965ea019a34aac5a6f4f139520661b8f"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-11_at_16.16.15.png",
+          "content": "80f13e9da0853afb408b4df334de86cbdf72068837b4205fbed97569d85db654"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you're too hopeful, need to try withdrawals with empty blocks",
+      "createdAt": "2026-03-11T15:18:49.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "both missing and empty",
+      "createdAt": "2026-03-11T15:18:53.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not related to builders",
+      "createdAt": "2026-03-11T15:19:01.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "actually, the exits just got processed",
+      "createdAt": "2026-03-11T15:20:04.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`[2026-03-11 15:19:52.54] ERROR blockchain: received an undefined execution engine error error=invalid forkchoice state`",
+      "createdAt": "2026-03-11T15:20:05.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I spoke too soon that it was working",
+      "createdAt": "2026-03-11T15:20:10.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "prysm right away started missing blocks when it had to include an exit",
+      "createdAt": "2026-03-11T15:20:20.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```\nMar-11 15:20:36.128[rest]            error: Req req-2p getStateFinalityCheckpoints error - REGEN_ERROR_NO_SEED_STATE\nError: REGEN_ERROR_NO_SEED_STATE\n    at StateRegenerator.getState (file:///usr/app/packages/beacon-node/src/chain/regen/regen.ts:210:13)\n    at JobItemQueue.jobQueueProcessor [as itemProcessor] (file:///usr/app/packages/beacon-node/src/chain/regen/queued.ts:320:35)\n    at Timeout.runJob [as _onTimeout] (file:///usr/app/packages/beacon-node/src/util/queue/itemQueue.ts:149:33)\n    at listOnTimeout (node:internal/timers:605:17)\n    at processTimers (node:internal/timers:541:7)\n```",
+      "createdAt": "2026-03-11T15:20:55.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lodestar also having issues",
+      "createdAt": "2026-03-11T15:21:01.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thats only on the api, shouldn't be critical",
+      "createdAt": "2026-03-11T15:21:27.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah that I was expecting, I don't think we even checked any of it yet. The invalid forkchoice state comes from the engine and Prysm will continue having this until we update the geth branch to accept an FCU to an older head and until clients stop voting for empty",
+      "createdAt": "2026-03-11T15:21:34.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "~~looks like we are recovering tho~~",
+      "createdAt": "2026-03-11T15:22:06.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lodestar: \n```\nMar-11 15:22:45.043[]                error: Error signing SyncCommitteeContribution slot=604, index=3, validatorIndex=143 - produceSyncCommitteeContribution failed with status 404: Block not in forkChoice, beaconBlockRoot=0xa74262ce35ee6f693e9293648fd7d7f7c9f4f2b980366b7415029aa0fab27a8d\nError: produceSyncCommitteeContribution failed with status 404: Block not in forkChoice, beaconBlockRoot=0xa74262ce35ee6f693e9293648fd7d7f7c9f4f2b980366b7415029aa0fab27a8d\n    at ApiResponse.error (file:///usr/app/packages/api/src/utils/client/response.ts:165:12)\n    at ApiResponse.assertOk (file:///usr/app/packages/api/src/utils/client/response.ts:156:18)\n    at ApiResponse.value (file:///usr/app/packages/api/src/utils/client/response.ts:105:10)\n    at file:///usr/app/packages/validator/src/services/syncCommittee.ts:221:92\n    at Array.map (<anonymous>)\n    at SyncCommitteeService.produceAndPublishAggregates (file:///usr/app/packages/validator/src/services/syncCommittee.ts:215:14)\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at file:///usr/app/packages/validator/src/services/syncCommittee.ts:105:11\n    at async Promise.all (index 3)\n    at runSyncCommitteeTasks (file:///usr/app/packages/validator/src/services/syncCommittee.ts:100:7)\n```",
+      "createdAt": "2026-03-11T15:22:58.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah exits seem to mess up lodestar and prysm completely",
+      "createdAt": "2026-03-11T15:23:54.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lighthouse trying to still producing blocks tho",
+      "createdAt": "2026-03-11T15:24:00.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thinking more, I think we can just submit the beacon block root. Because it looks like constructing the envelope for a given beacon block requires the node to have received the beacon block. Because `process_execution_payload` fetches the latest bid from the beacon state rather than from a beacon block.\nIn the envelope, we also need to fill up the `slot` and`builder_index`. The CL would have to fetch the beacon block by root and fill the fields from the beacon block.",
+      "createdAt": "2026-03-11T15:39:05.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the API would work like the following then:\n1. Construct the envelope with the payload and execution requests sent with the API. Set the beacon block root in the envelope to the root passed to the API. \n2. Fetch the beacon block by the root and set the slot and builder index in the envelope corresponding to the one in the beacon block. \n3. Run `process_execution_payload(state, signed_execution_payload_envelope, execution_engine, verify=False)`\n4. Return the output `ExecutionPayloadEnvelope` to the builder with the state root set to the post state root after `process_execution_payload`",
+      "createdAt": "2026-03-11T15:45:34.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "epbs-devnet-1 scope just dropped: https://notes.ethereum.org/@ethpandaops/epbs-devnet-1\n\nWe should aim to have https://github.com/ethereum/consensus-specs/pull/4992 merged in the next day or two, have new cl spec release by EOW and launch devnet 1 next wed on the 18th of March. Lets try to hit these deadlines!",
+      "createdAt": "2026-03-11T15:47:28.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't see anything there, what are we testing in that devnet?",
+      "createdAt": "2026-03-11T15:50:44.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can't we continue using this one until it doesn't give more? we can test existing structures on this one until we have them fixed, what' s the point of launching a new devnet when we can still use this one for unresolved issues, it's not like we have a hardfork. The only one would be the PTC attestations packing issue, which yes, we should launch a new devnet if this one breaks",
+      "createdAt": "2026-03-11T15:51:55.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "pretty sure there are a few consensus breaking changes in the new devnet",
+      "createdAt": "2026-03-11T15:52:47.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that would make devnet 0 break",
+      "createdAt": "2026-03-11T15:52:56.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there's the PTC lookbehind is the only one I can think of",
+      "createdAt": "2026-03-11T15:55:00.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/pull/4948",
+      "createdAt": "2026-03-11T15:55:15.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh Justin just told me that this would be forkchoice change not consensus change",
+      "createdAt": "2026-03-11T15:55:27.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "soz",
+      "createdAt": "2026-03-11T15:55:35.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but again I think my original plan in https://discord.com/channels/595666850260713488/1480581540655399095/1480582319541715197 is much more cost-effective and we can iterate over this",
+      "createdAt": "2026-03-11T15:55:44.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it does not make sense to launch a new devnet when Teku and Nimbus can't even sync yet",
+      "createdAt": "2026-03-11T15:56:02.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lets continue testing on devnet-0 all the failing current structures (withdrawals, exits, etc). When we fix those lets try PTC attestations until we split",
+      "createdAt": "2026-03-11T15:56:31.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and then we can just scrape this one off",
+      "createdAt": "2026-03-11T15:56:40.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Can we do both? Keep devnet-0 & start working on devnet-1 for clients that are ready for that?",
+      "createdAt": "2026-03-11T15:58:16.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the main reason I wanna actually push for devnet 1 is to make sure that the change set between devnet 0 and devnet 1 won't get too big",
+      "createdAt": "2026-03-11T15:58:42.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we can keep acknowledge the limitations, and keep testing everyting on devnet 1.",
+      "createdAt": "2026-03-11T15:59:14.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also ideally all these should be ironed out by next tuesday",
+      "createdAt": "2026-03-11T16:00:23.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but no client is ready for devnet-0 yet, we fail in Kurtosis with the current branches",
+      "createdAt": "2026-03-11T16:00:25.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so we can focus on the new changeset from wed on",
+      "createdAt": "2026-03-11T16:00:30.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also in general supporting multiple specs at once is a hard-to-justify cost",
+      "createdAt": "2026-03-11T16:01:16.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, whatever you guys say, I'll continue my testing on this devnet so please keep it up, this devnet is useful and I can' t even think of having separate branches with different specs to be testing on separate devnets",
+      "createdAt": "2026-03-11T16:01:23.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "jinx",
+      "createdAt": "2026-03-11T16:01:31.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Okay so no to doing both. That's fine. What do clients prefer?\n* Continue working on devnet-0.\n* Bail on devnet-0 & start devnet-1 with new changes.",
+      "createdAt": "2026-03-11T16:09:43.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when do you guys want to add bal?",
+      "createdAt": "2026-03-11T16:28:52.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This should happen after the standalone epbs devnets, in glamsterdam-devnet-0.",
+      "createdAt": "2026-03-11T16:45:19.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Depends on how long you think it will take for epbs to stabilize. Hopefully before the interop.",
+      "createdAt": "2026-03-11T16:46:22.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's fine with me, but ya my main question was when glamsterdam-devnet-0\nI agree its good to have a stable epbs devnet first.. so will have to be after devnet1 (at least)",
+      "createdAt": "2026-03-11T16:48:43.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes. Your guess is as good as mine 😅",
+      "createdAt": "2026-03-11T16:49:32.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i’d aim for interop - 1 week for glam-dev-0",
+      "createdAt": "2026-03-11T18:23:44.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not that certain about 2., can't the builder submit the beacon block beforehand, or most likely the node has already seen it on p2p from the proposer gossiping it, we can still trigger by root if it doesn't have it but it's likely the beacon node also has the post block state cached at that point",
+      "createdAt": "2026-03-11T20:43:27.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Fairly doable. Could we be nasty and try -2 so that we get there with a somewhat stable testing environment? What I would love for Interop is to be in a place in which we can run benchmarking tests during that week",
+      "createdAt": "2026-03-11T21:33:28.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "those will necessarily have to be interlocked with BALs.",
+      "createdAt": "2026-03-11T21:33:43.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "out of Private communications with <@917367578966523934> I realized there's something we could be testing right now on ePBS devnet 0 and is related to the EL more than the CL. We should check the behavior of BLOCKROOT, if it's the parent blockroot or the blockroot of the block that included the parent hash, today these are equal. In Gloas they are not. I doubt this breaks any contract, but still good to check this behavior. <@808969530608451584> you're perfect for these kinds of things 😄",
+      "createdAt": "2026-03-11T21:42:10.319000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2020-10-02",
+  "messageCount": 127,
+  "sourceHash": "360e5043a5ec19dca818b5fe49d07999c79ece5fed591d9cf64e6833c358c004",
+  "searchText": "target is configured to 20m with limit of 40m -maybe someone made amistake when defining the spec this is still called the limit, I think <@!489256758989029405> The 10th item in the block header is around 20M? (immediately following the block number, which is the 9th item) yup Surprisingly high for a testnet. 😬 But whatever. 😛 I think someone thought it was the limit (2×target) Definitely sounds like it. I noticed when connecting but the network was already up and in the end it makes sense You could have your node vote that down toward 10M, maybe spin up several nodes. 😉 to test it this way hah, need to have a validator added first if all need some sleep :) Did you figure out the problem above? Easy for me to assume that it is the Besu node that produced an invalid block. If Geth syncs with it then I will trace block locally. But I was debugging and it seems that the block is invalid. Maybe I'm missing something, but your error makes it sound like Nethermind thinks the block is too big, but from your debugging data above it looks like it is well under the limit? no, no of the 20 million 10003200 is assigned to eip1559 rest to legacy and the block has 10017000 oj eip1559 either some calculation issue on our side or an invalid block That means that the gas *limit* for EIP-1559 transactions is `10017000 * 2` (about 20M). yeah but after the migration finishes (block 800k) it will be 40m Right. oh wait you are right Was the error on \"too much legacy gas used\" or \"too much 1559 gas used\"? my mistake blocks up to 20m are fine Problem solved, you can sleep easy tonight? 😄 got a few more eips to dream about :) It sounds like the transition is basically just starting (about 50% in each). With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions. Any 1559 transactions over 10M will result in base fee increasing though. Sweet dreams of EIPs! > Surprisingly high for a testnet. 😬 <@!301186049323958275> I implemented a tool to submit high volume of transactions to simulate network congestion. I ran it for 2 hours at full block capacity to make the base fee high. > It sounds like the transition is basically just starting (about 50% in each). With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions. Any 1559 transactions over 10M will result in base fee increasing though. <@!301186049323958275> I am a bit confused about that. Is it in the spec ? Your latest PR has the single transaction pool, right ? I thought we were removing the distinction about the gas budget for each pool. <@!301186049323958275> i guess the issue is that the block creation is not a consensus thing, so it makes sense we don't mention that in the spec. The current way we compute the gas limit during block creation is not appropriate for EIP-1559 <@!301186049323958275> there is no information about gas limit check when processing the block in the specification. could you please add the equivalent of your sentence in the specification ? > With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions. <@574864862338088960> I thought you hadn't implemented my PR fully yet? I was trying to describe what I thought you had implemented, which IIUC, is a mix of current spec and my PR? My PR completely removes the transition (the primary change, which I don't think you have implemented). It also tweaks the base fee algorithm very slightly (which I think you already implemented). <@!301186049323958275> yes actually my implementation is a mix of current spec and your PR. i have the latest base fee computation but not yet the removal of transition period and the single pool anyway there is the ACD today, if there is consensus on merging your PR it will simplify discussions in sync <@!301186049323958275> <@!489256758989029405> With the latest implementation the minimum base fee is 7, right ? and there is a minimum increase of 1 but no minimum decrease The basefee increased from 7 at block #6642 (http://eip1559-testnet.ops.pegasys.tech:3000/block/6642) to 1.12 GWEI (1,126,524,907) at block #6607 (http://eip1559-testnet.ops.pegasys.tech:3000/block/6607) after about 40 minutes (165 blocks) of full block capacity (20,160,000 ~ 100.8%) <@!574864862338088960> No? Minimum shouldn't be 7 I don't think? Though, maybe the math works out that way? Ok maybe i did a mistake in the implementation You are using the base fee algorithm from my PR, right? yes This is this branch ? https://github.com/ethereum/EIPs/blob/MicahZoltu-patch-1/EIPS/eip-1559.md ```python gas_delta = parent_gas_target - parent_gas_used fee_delta = parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR expected_base_fee = parent_base_fee - fee_delta ``` This is because gas delta was at 0 in my case basically no transactions Imagine parent base fee is 7 and parent block was empty: ```python gas_delta = 10000000 - 0 # 10000000 fee_delta = 7 * 10000000 // 10000000 // 8 # 0 ``` Yep, looks like you are right. Not intentional, but not a problem either. ok good, thanks Does the order of magnitude of base fee increase sound reasonable ? about 40 minutes at full block capacity to reach 1GWEI with average block time of 15 seconds (almost what we have on mainnet) I'm not too worried since I don't think we'll see the base fee reach minimum on mainnet possibly ever. And if it does (perhaps due to a bug or attack), 40 minutes for a full rebound doesn't bother me. I think we should care more about the base fee ability to respond appropriately to transient gas utilization spikes. We have to balance high volatility in base fee with minimizing the amount of time miner_bribe wars are going on. That would mean adjusting the base fee max change denominator based on the X previous blocks to detect spikes ? Or track the pourcentage delta of basefee and if the delta was already at maximum change denominator then allow to set it to a higher value. but that would be another block header modification. Sorry, I am not proposing we try to automate it. Just that when deciding on the divisor that is what I think we should care about. hmm i see. yes. this is why we made this parameter configurable to test different configurations but we clearly lack good simulators my fuzzer tool is very naive and is good only to stress test the network <@!486501030046203915> any update on the simulators ? > Does the order of magnitude of base fee increase sound reasonable ? about 40 minutes at full block capacity to reach 1GWEI with average block time of 15 seconds (almost what we have on mainnet) To be sure I understand, it takes 40 mins of full blocks for the base fee to 10x? IMO that's _much_ too slow. I believe at a max increase of 12.5%, it was roughly 5 mins to 10x. I think the DoS risks get amplified the longer someone can fill blocks for cheap, so it'd be good for the base fee to rise/fall quickly. <@!301186049323958275> <@!574864862338088960> > anyway there is the ACD today, if there is consensus on merging your PR it will simplify discussions Will either of you be on ACD to discuss this? I just linked Micah's PR (https://github.com/ethereum/EIPs/pull/2924) to my comment about discussing 1559 <@!552133098075193354> It takes 40 minutes to 100,000,000x. 🙂 AHHH I'm planning on making it. It is late here though so I am not at 100% capability. 🙂 Thanks! This is what I want to cover on the call: https://github.com/ethereum/pm/issues/211#issuecomment-701496873 > What do we see as the biggest risks of this proposal? On ACD#77, the DoS risk was mentioned. Is this the only major risk we see? If so, what are potential mitigations (lower slack factor in 1559? EIP-2929? Snapshot sync?) I would rather discuss how we can verify that risk prior to discussing how we can mitigate it. IIRC, someone indicated that they are \"concerned the chain won't be able to handle 2x blocks even transiently\", but we have no data to back up that claim. Seems like something we *could* test without too much difficulty? Yeah agreed Once validated, we can then either ignore it (because it isn't a real problem) or discuss mitigations (if it turns out to be a real problem). Yep. I believe the challenge with validaitng this concern is mainnet's state size and node distribution. Tricky to replicate It has never been clear to me why someone can't just fork off mainnet to test. Create a patched client that forks away from mainnet and in that fork introduces 1559 and lowers the difficulty to something tiny (so it can be mined by the testing rig). This *seems* like a pretty easy task, but maybe I'm missing some complexity. > <@!486501030046203915> any update on the simulators ? <@!574864862338088960> ready to blast 🙂 it'd be helpful to know the kinds of behaviour you think would be interesting and I can code \"a spamming agent\" that produces such transactions <@!486501030046203915> ok thanks for the update. yes we need to define the scenarios we want to simulate. i don't know who can lead this effort. <@!301186049323958275> <@!273808422753796097> do you already have in mind some scenarios to validate the economic model? <@!664249717949202460> BTW i have implemented a new mode in the fuzzer tool. it is now possible to import file with existing transactions. i don't know if that would be easier. probably not since you would have to do the signing operation > This *seems* like a pretty easy task, but maybe I'm missing some complexity. <@!301186049323958275> if there is any, it must be around the accuracy of results after scale down of the difficulty? Attacker effort would need to be adjusted accordingly perhaps .. > i don't know who can lead this effort. <@!301186049323958275> <@!273808422753796097> do you already have in mind some scenarios to validate the economic model? <@!574864862338088960> You probably want to ask someone who is negative toward 1559. 😬 I think Vitalik and I are both over-confident in our assessment of the EIP and thus don't see any need to do these tests, so we aren't particularly good sources of \"potential problems to look for\". At least, that is how I feel and I get the *impression* that Vitalik shares my confidence. Maybe they have ideas though despite that! that makes sense, do you know who is pretty against it ? It is unclear to me who is against 1559, which is what confuses me. Every time we talk about it it seems like everyone thinks it is great but there is somehow some air of uncertainty that is coming from somewhere I don't understand. My best guess is that this uncertainty is coming from Twitter. 😖 haha this is weird. i don't understand as well e.g., Bitcoin maximalists and miners (who lose money if 1559 lands) looking to throw shade. That is really just wild speculation though. hmm, and how much should we do to convince them ? maybe we can ignore the bitcoin maximalists but not the miners. all those political stuff are clearly not my scope. i would be happy to help on that front but i need someone who knows the political context to help me > hmm, and how much should we do to convince them ? If it really is just Bitcoin maximalists and miners sad about losing out on future revenue, then very little unless they bring up a *valid* attack vector. However, I think a lot of people use Twitter to get a \"feel\" for the community and this leads to hesitancy when you have a lobby working against it. So that could be a potential threat. Ok i see. One of the main goal of this EIP is to help reaching mass adoption removing pain points of the actual system. > It is unclear to me who is against 1559, which is what confuses me. Every time we talk about it it seems like everyone thinks it is great but there is somehow some air of uncertainty that is coming from somewhere I don't understand. I should have a better idea about this sometime next week! We've done ~20 ",
+  "excerpts": [
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "target is configured to 20m with limit of 40m -maybe someone made amistake when defining the spec",
+      "createdAt": "2020-10-02T00:57:50.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this is still called the limit, I think",
+      "createdAt": "2020-10-02T00:58:27.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> The 10th item in the block header is around 20M?",
+      "createdAt": "2020-10-02T01:00:22.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(immediately following the block number, which is the 9th item)",
+      "createdAt": "2020-10-02T01:01:00.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2020-10-02T01:01:05.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Surprisingly high for a testnet.  😬",
+      "createdAt": "2020-10-02T01:01:14.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But whatever.  😛",
+      "createdAt": "2020-10-02T01:01:18.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think someone thought it was the limit (2×target)",
+      "createdAt": "2020-10-02T01:01:34.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Definitely sounds like it.",
+      "createdAt": "2020-10-02T01:01:42.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I noticed when connecting but the network was already up",
+      "createdAt": "2020-10-02T01:01:50.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and in the end it makes sense",
+      "createdAt": "2020-10-02T01:01:55.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You could have your node vote that down toward 10M, maybe spin up several nodes.  😉",
+      "createdAt": "2020-10-02T01:01:56.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "to test it this way",
+      "createdAt": "2020-10-02T01:02:04.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hah, need to have a validator added",
+      "createdAt": "2020-10-02T01:02:22.012000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "first if all need some sleep :)",
+      "createdAt": "2020-10-02T01:02:35.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Did you figure out the problem above?",
+      "createdAt": "2020-10-02T01:02:46.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Easy for me to assume that it is the Besu node that produced an invalid block.",
+      "createdAt": "2020-10-02T01:03:21.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If Geth syncs with it then I will trace block locally.",
+      "createdAt": "2020-10-02T01:03:37.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But I was debugging and it seems that the block is invalid.",
+      "createdAt": "2020-10-02T01:03:51.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe I'm missing something, but your error makes it sound like Nethermind thinks the block is too big, but from your debugging data above it looks like it is well under the limit?",
+      "createdAt": "2020-10-02T01:03:57.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "no, no",
+      "createdAt": "2020-10-02T01:04:06.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "of the 20 million",
+      "createdAt": "2020-10-02T01:04:10.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "10003200 is assigned to eip1559",
+      "createdAt": "2020-10-02T01:04:27.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "rest to legacy",
+      "createdAt": "2020-10-02T01:04:30.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and the block has 10017000 oj eip1559",
+      "createdAt": "2020-10-02T01:04:50.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "either some calculation issue on our side or an invalid block",
+      "createdAt": "2020-10-02T01:05:18.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That means that the gas *limit* for EIP-1559 transactions is `10017000 * 2` (about 20M).",
+      "createdAt": "2020-10-02T01:05:20.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2020-10-02T01:05:37.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but after the migration finishes (block 800k) it will be 40m",
+      "createdAt": "2020-10-02T01:05:57.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right.",
+      "createdAt": "2020-10-02T01:06:03.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh wait",
+      "createdAt": "2020-10-02T01:06:12.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you are right",
+      "createdAt": "2020-10-02T01:06:17.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Was the error on \"too much legacy gas used\" or \"too much 1559 gas used\"?",
+      "createdAt": "2020-10-02T01:06:19.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my mistake",
+      "createdAt": "2020-10-02T01:06:23.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "blocks up to 20m are fine",
+      "createdAt": "2020-10-02T01:06:30.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Problem solved, you can sleep easy tonight?  😄",
+      "createdAt": "2020-10-02T01:06:33.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "got a few more eips to dream about :)",
+      "createdAt": "2020-10-02T01:07:12.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It sounds like the transition is basically just starting (about 50% in each).  With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions.  Any 1559 transactions over 10M will result in base fee increasing though.",
+      "createdAt": "2020-10-02T01:07:54.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sweet dreams of EIPs!",
+      "createdAt": "2020-10-02T01:08:00.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Surprisingly high for a testnet.  😬\n<@!301186049323958275> I implemented a tool to submit high volume of transactions to simulate network congestion. I ran it for 2 hours at full block capacity to make the base fee high.",
+      "createdAt": "2020-10-02T07:32:57.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> It sounds like the transition is basically just starting (about 50% in each).  With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions.  Any 1559 transactions over 10M will result in base fee increasing though.\n<@!301186049323958275> I am a bit confused about that. Is it in the spec ? Your latest PR has the single transaction pool, right ? I thought we were removing the distinction about the gas budget for each pool.",
+      "createdAt": "2020-10-02T07:34:22.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> i guess the issue is that the block creation is not a consensus thing, so it makes sense we don't mention that in the spec.",
+      "createdAt": "2020-10-02T07:35:33.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The current way we compute the gas limit during block creation is not appropriate for EIP-1559",
+      "createdAt": "2020-10-02T07:37:18.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> there is no information about gas limit check when processing the block in the specification. could you please add the equivalent of your sentence in the specification ?\n> With 20M for the 10th header item, that means any block can have around 10M gas worth of legacy transactions and 20M gas of 1559 transactions.",
+      "createdAt": "2020-10-02T07:55:02.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@574864862338088960> I thought you hadn't implemented my PR fully yet?",
+      "createdAt": "2020-10-02T09:25:21.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I was trying to describe what I thought you had implemented, which IIUC, is a mix of current spec and my PR?",
+      "createdAt": "2020-10-02T09:26:14.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My PR completely removes the transition (the primary change, which I don't think you have implemented).  It also tweaks the base fee algorithm very slightly (which I think you already implemented).",
+      "createdAt": "2020-10-02T09:27:50.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275>  yes actually my implementation is a mix of current spec and your PR. i have the latest base fee computation but not yet the removal of transition period and the single pool",
+      "createdAt": "2020-10-02T09:30:44.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "anyway there is the ACD today, if there is consensus on merging your PR it will simplify discussions",
+      "createdAt": "2020-10-02T09:31:08.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-10-02T11:29:55.782000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "f24e8fcfa32df7eaf61050e1d25b201eba214e8b5218d89f0bd9630f96949ba7"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "in sync",
+      "createdAt": "2020-10-02T11:30:07.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> <@!489256758989029405> With the latest implementation the minimum base fee is 7, right ?",
+      "createdAt": "2020-10-02T11:34:14.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and there is a minimum increase of 1 but no minimum decrease",
+      "createdAt": "2020-10-02T11:36:16.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The basefee increased from 7 at block #6642 (http://eip1559-testnet.ops.pegasys.tech:3000/block/6642) to 1.12 GWEI (1,126,524,907) at block #6607 (http://eip1559-testnet.ops.pegasys.tech:3000/block/6607) after about 40 minutes (165 blocks) of full block capacity (20,160,000 ~ 100.8%)",
+      "createdAt": "2020-10-02T12:24:48.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!574864862338088960> No?  Minimum shouldn't be 7 I don't think?",
+      "createdAt": "2020-10-02T12:30:20.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Though, maybe the math works out that way?",
+      "createdAt": "2020-10-02T12:30:29.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok maybe i did a mistake in the implementation",
+      "createdAt": "2020-10-02T12:30:34.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You are using the base fee algorithm from my PR, right?",
+      "createdAt": "2020-10-02T12:31:03.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2020-10-02T12:31:11.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is this branch ? https://github.com/ethereum/EIPs/blob/MicahZoltu-patch-1/EIPS/eip-1559.md",
+      "createdAt": "2020-10-02T12:31:35.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```python\ngas_delta = parent_gas_target - parent_gas_used\nfee_delta = parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR\nexpected_base_fee = parent_base_fee - fee_delta\n```",
+      "createdAt": "2020-10-02T12:31:54.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is because gas delta was at 0 in my case",
+      "createdAt": "2020-10-02T12:33:04.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "basically no transactions",
+      "createdAt": "2020-10-02T12:33:10.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Imagine parent base fee is 7 and parent block was empty:\n```python\ngas_delta = 10000000 - 0 # 10000000\nfee_delta = 7 * 10000000 // 10000000 // 8 # 0\n```\nYep, looks like you are right.",
+      "createdAt": "2020-10-02T12:34:02.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not intentional, but not a problem either.",
+      "createdAt": "2020-10-02T12:34:09.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok good, thanks",
+      "createdAt": "2020-10-02T12:34:19.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Does the order of magnitude of base fee increase sound reasonable ? about 40 minutes at full block capacity to reach 1GWEI with average block time of 15 seconds (almost what we have on mainnet)",
+      "createdAt": "2020-10-02T12:35:48.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not too worried since I don't think we'll see the base fee reach minimum on mainnet possibly ever.",
+      "createdAt": "2020-10-02T12:45:50.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And if it does (perhaps due to a bug or attack), 40 minutes for a full rebound doesn't bother me.",
+      "createdAt": "2020-10-02T12:46:09.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think we should care more about the base fee ability to respond appropriately to transient gas utilization spikes.",
+      "createdAt": "2020-10-02T12:46:44.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We have to balance high volatility in base fee with minimizing the amount of time miner_bribe wars are going on.",
+      "createdAt": "2020-10-02T12:47:14.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That would mean adjusting the base fee max change denominator based on the X previous blocks to detect spikes ?",
+      "createdAt": "2020-10-02T12:48:06.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or track the pourcentage delta of basefee and if the delta was already at maximum change denominator then allow to set it to a higher value. but that would be another block header modification.",
+      "createdAt": "2020-10-02T12:51:15.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry, I am not proposing we try to automate it.  Just that when deciding on the divisor that is what I think we should care about.",
+      "createdAt": "2020-10-02T13:00:15.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm i see. yes. this is why we made this parameter configurable to test different configurations",
+      "createdAt": "2020-10-02T13:00:49.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but we clearly lack good simulators",
+      "createdAt": "2020-10-02T13:00:59.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my fuzzer tool is very naive and is good only to stress test the network",
+      "createdAt": "2020-10-02T13:01:16.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!486501030046203915> any update on the simulators ?",
+      "createdAt": "2020-10-02T13:01:26.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Does the order of magnitude of base fee increase sound reasonable ? about 40 minutes at full block capacity to reach 1GWEI with average block time of 15 seconds (almost what we have on mainnet)\nTo be sure I understand, it takes 40 mins of full blocks for the base fee to 10x? IMO that's _much_ too slow. I believe at a max increase of 12.5%, it was roughly 5 mins to 10x. I think the DoS risks get amplified the longer someone can fill blocks for cheap, so it'd be good for the base fee to rise/fall quickly.",
+      "createdAt": "2020-10-02T13:20:54.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> <@!574864862338088960> \n> anyway there is the ACD today, if there is consensus on merging your PR it will simplify discussions\nWill either of you be on ACD to discuss this? I just linked Micah's PR (https://github.com/ethereum/EIPs/pull/2924) to my comment about discussing 1559",
+      "createdAt": "2020-10-02T13:22:54.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!552133098075193354> It takes 40 minutes to 100,000,000x.  🙂",
+      "createdAt": "2020-10-02T13:26:34.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "AHHH",
+      "createdAt": "2020-10-02T13:26:49.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm planning on making it.  It is late here though so I am not at 100% capability.  🙂",
+      "createdAt": "2020-10-02T13:27:07.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Thanks! This is what I want to cover on the call: https://github.com/ethereum/pm/issues/211#issuecomment-701496873",
+      "createdAt": "2020-10-02T13:27:45.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> What do we see as the biggest risks of this proposal? On ACD#77, the DoS risk was mentioned. Is this the only major risk we see? If so, what are potential mitigations (lower slack factor in 1559? EIP-2929? Snapshot sync?)\nI would rather discuss how we can verify that risk prior to discussing how we can mitigate it.",
+      "createdAt": "2020-10-02T13:29:46.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "IIRC, someone indicated that they are \"concerned the chain won't be able to handle 2x blocks even transiently\", but we have no data to back up that claim.  Seems like something we *could* test without too much difficulty?",
+      "createdAt": "2020-10-02T13:30:19.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah agreed",
+      "createdAt": "2020-10-02T13:30:28.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Once validated, we can then either ignore it (because it isn't a real problem) or discuss mitigations (if it turns out to be a real problem).",
+      "createdAt": "2020-10-02T13:30:38.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep. I believe the challenge with validaitng this concern is mainnet's state size and node distribution. Tricky to replicate",
+      "createdAt": "2020-10-02T13:31:38.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It has never been clear to me why someone can't just fork off mainnet to test.",
+      "createdAt": "2020-10-02T13:33:49.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Create a patched client that forks away from mainnet and in that fork introduces 1559 and lowers the difficulty to something tiny (so it can be mined by the testing rig).",
+      "createdAt": "2020-10-02T13:34:32.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This *seems* like a pretty easy task, but maybe I'm missing some complexity.",
+      "createdAt": "2020-10-02T13:34:55.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> <@!486501030046203915> any update on the simulators ?\n<@!574864862338088960> ready to blast 🙂 it'd be helpful to know the kinds of behaviour you think would be interesting and I can code \"a spamming agent\" that produces such transactions",
+      "createdAt": "2020-10-02T14:19:51.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!486501030046203915> ok thanks for the update. yes we need to define the scenarios we want to simulate.",
+      "createdAt": "2020-10-02T15:29:35.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i don't know who can lead this effort. <@!301186049323958275> <@!273808422753796097> do you already have in mind some scenarios  to validate the economic model?",
+      "createdAt": "2020-10-02T15:30:29.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!664249717949202460> BTW i have implemented a new mode in the fuzzer tool. it is now possible to import file with existing transactions. i don't know if that would be easier. probably not since you would have to do the signing operation",
+      "createdAt": "2020-10-02T15:33:05.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mohseng",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> This *seems* like a pretty easy task, but maybe I'm missing some complexity.\n<@!301186049323958275> if there is any, it must be around the accuracy of results after scale down of the difficulty?  Attacker effort would need to be adjusted accordingly perhaps ..",
+      "createdAt": "2020-10-02T15:34:23.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> i don't know who can lead this effort. <@!301186049323958275> <@!273808422753796097> do you already have in mind some scenarios  to validate the economic model?\n<@!574864862338088960> You probably want to ask someone who is negative toward 1559.  😬   I think Vitalik and I are both over-confident in our assessment of the EIP and thus don't see any need to do these tests, so we aren't particularly good sources of \"potential problems to look for\".",
+      "createdAt": "2020-10-02T15:45:30.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "At least, that is how I feel and I get the *impression* that Vitalik shares my confidence.  Maybe they have ideas though despite that!",
+      "createdAt": "2020-10-02T15:46:14.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that makes sense, do you know who is pretty against it ?",
+      "createdAt": "2020-10-02T15:46:15.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is unclear to me who is against 1559, which is what confuses me.  Every time we talk about it it seems like everyone thinks it is great but there is somehow some air of uncertainty that is coming from somewhere I don't understand.",
+      "createdAt": "2020-10-02T15:46:49.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My best guess is that this uncertainty is coming from Twitter.  😖",
+      "createdAt": "2020-10-02T15:47:07.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "haha this is weird. i don't understand as well",
+      "createdAt": "2020-10-02T15:47:10.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "e.g., Bitcoin maximalists and miners (who lose money if 1559 lands) looking to throw shade.",
+      "createdAt": "2020-10-02T15:47:27.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is really just wild speculation though.",
+      "createdAt": "2020-10-02T15:47:49.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm, and how much should we do to convince them ? maybe we can ignore the bitcoin maximalists but not the miners.",
+      "createdAt": "2020-10-02T15:48:52.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "all those political stuff are clearly not my scope. i would be happy to help on that front but i need someone who knows the political context to help me",
+      "createdAt": "2020-10-02T15:49:56.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> hmm, and how much should we do to convince them ?\nIf it really is just Bitcoin maximalists and miners sad about losing out on future revenue, then very little unless they bring up a *valid* attack vector.  However, I think a lot of people use Twitter to get a \"feel\" for the community and this leads to hesitancy when you have a lobby working against it.",
+      "createdAt": "2020-10-02T15:51:45.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So that could be a potential threat. Ok i see.",
+      "createdAt": "2020-10-02T15:52:57.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "One of the main goal of this EIP is to help reaching mass adoption removing pain points of the actual system.",
+      "createdAt": "2020-10-02T15:53:44.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> It is unclear to me who is against 1559, which is what confuses me.  Every time we talk about it it seems like everyone thinks it is great but there is somehow some air of uncertainty that is coming from somewhere I don't understand.\nI should have a better idea about this sometime next week! We've done ~20 community calls so far with <@!642887713246150666> and I basically need to sit down and write-up a summary.",
+      "createdAt": "2020-10-02T15:53:48.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok thanks <@!552133098075193354>",
+      "createdAt": "2020-10-02T15:54:07.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Off the top of my head, I think \"miners\" is the group with the highest % against.",
+      "createdAt": "2020-10-02T15:54:40.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is unsurprising.  We are saying, \"we will start paying you less\" which never goes over well no matter how reasonable the request is from a design/architecture standpoint.",
+      "createdAt": "2020-10-02T15:55:17.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think otherwise, the biggest negative criticism is \"it's a convoluted scheme, which changes a lot of things, and whose benefits are hard to articulate/weight\"",
+      "createdAt": "2020-10-02T15:55:27.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kubuxu",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Over on Filecoin Testent we had a nice base fee increase event when miners learned that some sectors will transition to mainnet (sector is unit of power) so they started sealing more sectors thus chain usage increased.",
+      "createdAt": "2020-10-02T16:54:05.790000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "Screenshot_2020-10-02_Gas_-_Grafana3.png",
+          "content": "ebfed17dbc3de624b794978c7e145e61b31d4542b496921d47a91f797e0df87a"
+        }
+      ]
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@96996691282001920> Does Filecoin have a miner bribe variable?",
+      "createdAt": "2020-10-02T16:57:23.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If not, what decides who gets included if there are more transactions prending than will fit in one block?",
+      "createdAt": "2020-10-02T16:57:58.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kubuxu",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, we have the miner bribe (GasPremium).",
+      "createdAt": "2020-10-02T16:58:54.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is your black elasticity set to?  2x?",
+      "createdAt": "2020-10-02T16:59:16.260000+00:00",
+      "attachments": []
+    }
+  ]
+}

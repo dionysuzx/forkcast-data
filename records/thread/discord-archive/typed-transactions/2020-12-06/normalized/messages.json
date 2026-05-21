@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "channel": "typed-transactions",
+  "date": "2020-12-06",
+  "messageCount": 35,
+  "sourceHash": "ef58f69d2df5c03fd351dfb38109d8cbc4fb4acb11e1c2c1a877ba900973c352",
+  "searchText": "I have been thinking about the current spec a bit more (option A) and I'm starting to un-convince myself that it is incompatible with Option B of <@!206016661470314496>'s devp2p proposals that we decided to go with. We could say that `[nonce1, ...]` is still valid and to be interpreted as a legacy transaction, but `rlp([nonce1, ...])` is *also* valid and strongly preferred after fork block. We could even go so far as to say that something like `n` weeks after the fork block clients can stop supporting `[nonce1, ...]` which is a step toward what the Geth team wants in terms of removing old networking code paths. <@!543900561460822016> Reading over your original argument for option C, I think I may have mis-represented it. Which of these aligns with what you were thinking? ```py rlp_encode([ [nonce1, ...], 0x01, rlp_encode([chainId2, nonce2, ...]), [nonce3, ...], 0x01, rlp_encode([chainId4, nonce4, ...]), )] ``````py rlp_encode([ [nonce1, ...], 0x01, [chainId2, nonce2, ...], [nonce3, ...], 0x01, [chainId4, nonce4, ...], )] ``` I was thinking the second That won't work past Berlin because 2718 transaction payloads are not all RLP. Though, I suppose we don't *have* to share encoding between devp2p and hashing and signing. 🤔 technically there shouldn't be a difference between the two examples you have I do think I have had it stuck in my head that we need to share encoding schemes across different parts of the system (signing, transport, block), but that isn't necessarily true. unless you mean `rlpBytes` for the inner list What does `rlp(...)` mean to you? Maybe I should change that to `rlp_encode(...)` for clarity? Anywhere I put `rlp(...)` I mean `rlp_encode(...)` which is a function that returns a byte array. that confuses me because there are bytes which represent rlp and then there are bytes which are encoded *in* the rlp as a byte string i have encoded the typed tx payload as an rlp item with a list length prefix these are those raw bytes https://gist.github.com/lightclient/af944a74f6e8debcbb1232ac007df3cc ```ts type RlpItem = RlpItem[] | ByteArray function rlp_encode(item: RlpItem): ByteArray ``` I think you are the only one who can read encoded RLP directly with your eyeballs. 😬 I'll change to `rlp_encode` to add more clarity. Though, I find it surprising that you see `rlp(...)` as a no-op when it shows up inside another `rlp(...)`. I would be curious to better understand why you make that assumption. I'm guessing it has something to do with the way your encoder/decoder is written? (note ☝️ is purely to satiate my curiosity) actually, I thought there was a conversation a while back where someone said that `rlp([x, rlp([y, z])])` was the same as `rlp([x, [y, z]])` so there was no need for the inner `rlp` but now I can't find any reference to that! Perhaps you are thinking of SSZ where that *is* a major feature? If I allow myself to be open to the idea of having different transport encoding vs merklization encoding vs hash encoding, then I think there is another option available: ```py rlp_encode([ [nonce1, ...], [1, [chainId2, nonce2, ...]], )] ``` I'm not sure I agree with this though - we should be switching off the tx type to determine how to decode the payload. Once we see it is an rlp decoder, we can decode it immediately - we shouldn't need to first decode and rlp byte list The problem with this and your suggestion is that it means we need to define devp2p encoding separately for *every* new typed transaction. This isn't the end of the world, but I do find it a bit unfortunate. If we share a devp2p encoding with merklization encoding then we don't need to define multiple encoding mechanisms for every typed transaction. I *think* you are assuming that everyone does manual stream decoding? This strategy very much will not work for my RLP decoder for example. For example, my RLP decoder (not a stream decoder) simply is `function rlp_decode(bytes: ByteArray): RlpItem`. *grumble* we also need to define how typed transactions are hashed I think. I thought I defined this somewhere, but now I can't find it. 😢 My gut tells me that the client devs aren't going to like having a different encoding for hashing, merklization, and devp2p. The idea is growing on me personally though. <@213672586264051717> Which of these did you implement? https://discordapp.com/channels/595666850260713488/779922457631916064/784985515899486209 <@543900561460822016> can you check out https://github.com/ethereum/pm/issues/231#issuecomment-739465644 and provide feedback? I'm trying to simplify the discussion as much as possible so we can (hopefully) resolve this issue rapidly. (the linked comment specifically) I took <@!543900561460822016> 's block rlp and tried to parse it. While I had to fix an unrelated bug and I haven't implemented 2930 yet, I can confirm that it would parse it correctly.",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have been thinking about the current spec a bit more (option A) and I'm starting to un-convince myself that it is incompatible with Option B of <@!206016661470314496>'s devp2p proposals that we decided to go with.",
+      "createdAt": "2020-12-06T03:07:56.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We could say that `[nonce1, ...]` is still valid and to be interpreted as a legacy transaction, but `rlp([nonce1, ...])` is *also* valid and strongly preferred after fork block.  We could even go so far as to say that something like `n` weeks after the fork block clients can stop supporting `[nonce1, ...]` which is a step toward what the Geth team wants in terms of removing old networking code paths.",
+      "createdAt": "2020-12-06T03:10:29.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!543900561460822016> Reading over your original argument for option C, I think I may have mis-represented it.",
+      "createdAt": "2020-12-06T03:31:22.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which of these aligns with what you were thinking?\n```py\nrlp_encode([\n    [nonce1, ...],\n    0x01,\n    rlp_encode([chainId2, nonce2, ...]),\n    [nonce3, ...],\n    0x01,\n    rlp_encode([chainId4, nonce4, ...]),\n)]\n``````py\nrlp_encode([\n    [nonce1, ...],\n    0x01,\n    [chainId2, nonce2, ...],\n    [nonce3, ...],\n    0x01,\n    [chainId4, nonce4, ...],\n)]\n```",
+      "createdAt": "2020-12-06T03:32:11.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I was thinking the second",
+      "createdAt": "2020-12-06T03:32:49.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That won't work past Berlin because 2718 transaction payloads are not all RLP.",
+      "createdAt": "2020-12-06T03:33:28.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Though, I suppose we don't *have* to share encoding between devp2p and hashing and signing.  🤔",
+      "createdAt": "2020-12-06T03:34:07.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "technically there shouldn't be a difference between the two examples you have",
+      "createdAt": "2020-12-06T03:34:30.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I do think I have had it stuck in my head that we need to share encoding schemes across different parts of the system (signing, transport, block), but that isn't necessarily true.",
+      "createdAt": "2020-12-06T03:34:40.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "unless you mean `rlpBytes` for the inner list",
+      "createdAt": "2020-12-06T03:34:49.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What does `rlp(...)` mean to you?",
+      "createdAt": "2020-12-06T03:35:01.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Maybe I should change that to `rlp_encode(...)` for clarity?",
+      "createdAt": "2020-12-06T03:35:12.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Anywhere I put `rlp(...)` I mean `rlp_encode(...)` which is a function that returns a byte array.",
+      "createdAt": "2020-12-06T03:35:27.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "that confuses me because there are bytes which represent rlp and then there are bytes which are encoded *in* the rlp as a byte string",
+      "createdAt": "2020-12-06T03:36:03.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i have encoded the typed tx payload as an rlp item with a list length prefix",
+      "createdAt": "2020-12-06T03:36:32.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "these are those raw bytes https://gist.github.com/lightclient/af944a74f6e8debcbb1232ac007df3cc",
+      "createdAt": "2020-12-06T03:36:58.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```ts\ntype RlpItem = RlpItem[] | ByteArray\nfunction rlp_encode(item: RlpItem): ByteArray\n```",
+      "createdAt": "2020-12-06T03:37:44.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think you are the only one who can read encoded RLP directly with your eyeballs.  😬",
+      "createdAt": "2020-12-06T03:38:36.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'll change to `rlp_encode` to add more clarity.  Though, I find it surprising that you see `rlp(...)` as a no-op when it shows up inside another `rlp(...)`.  I would be curious to better understand why you make that assumption.  I'm guessing it has something to do with the way your encoder/decoder is written?",
+      "createdAt": "2020-12-06T03:40:13.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(note ☝️ is purely to satiate my curiosity)",
+      "createdAt": "2020-12-06T03:41:20.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "actually, I thought there was a conversation a while back where someone said that `rlp([x, rlp([y, z])])` was the same as `rlp([x, [y, z]])` so there was no need for the inner `rlp` but now I can't find any reference to that!",
+      "createdAt": "2020-12-06T03:50:36.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Perhaps you are thinking of SSZ where that *is* a major feature?",
+      "createdAt": "2020-12-06T03:51:31.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If I allow myself to be open to the idea of having different transport encoding vs merklization encoding vs hash encoding, then I think there is another option available:\n```py\nrlp_encode([\n    [nonce1, ...],\n    [1, [chainId2, nonce2, ...]],\n)]\n```",
+      "createdAt": "2020-12-06T03:52:20.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not sure I agree with this though - we should be switching off the tx type to determine how to decode the payload. Once we see it is an rlp decoder, we can decode it immediately - we shouldn't need to first decode and rlp byte list",
+      "createdAt": "2020-12-06T03:52:38.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The problem with this and your suggestion is that it means we need to define devp2p encoding separately for *every* new typed transaction.",
+      "createdAt": "2020-12-06T03:52:57.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This isn't the end of the world, but I do find it a bit unfortunate.  If we share a devp2p encoding with merklization encoding then we don't need to define multiple encoding mechanisms for every typed transaction.",
+      "createdAt": "2020-12-06T03:54:25.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I *think* you are assuming that everyone does manual stream decoding?  This strategy very much will not work for my RLP decoder for example.",
+      "createdAt": "2020-12-06T03:54:57.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For example, my RLP decoder (not a stream decoder) simply is `function rlp_decode(bytes: ByteArray): RlpItem`.",
+      "createdAt": "2020-12-06T03:56:46.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "*grumble* we also need to define how typed transactions are hashed I think.",
+      "createdAt": "2020-12-06T04:02:48.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I thought I defined this somewhere, but now I can't find it.  😢",
+      "createdAt": "2020-12-06T04:03:04.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My gut tells me that the client devs aren't going to like having a different encoding for hashing, merklization, and devp2p.  The idea is growing on me personally though.",
+      "createdAt": "2020-12-06T04:06:42.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@213672586264051717> Which of these did you implement?  https://discordapp.com/channels/595666850260713488/779922457631916064/784985515899486209",
+      "createdAt": "2020-12-06T04:17:00.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@543900561460822016> can you check out https://github.com/ethereum/pm/issues/231#issuecomment-739465644 and provide feedback?  I'm trying to simplify the discussion as much as possible so we can (hopefully) resolve this issue rapidly.",
+      "createdAt": "2020-12-06T07:14:18.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(the linked comment specifically)",
+      "createdAt": "2020-12-06T07:14:29.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xraino",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I took <@!543900561460822016> 's block rlp and tried to parse it. While I had to fix an unrelated bug and I haven't implemented 2930 yet, I can confirm that it would parse it correctly.",
+      "createdAt": "2020-12-06T18:48:21.836000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,753 @@
+{
+  "schemaVersion": 1,
+  "channel": "withdrawal-methods",
+  "date": "2022-11-11",
+  "messageCount": 90,
+  "sourceHash": "b422f03e27363fe21f01adda0942ae9806acff59eaed1a6ac23b6e318e98f9f7",
+  "searchText": "So while implementing `capella` and reasoning about the `builder-spec` I realized we don't even need to transmit the `Withdrawal`s in the beacon blocks. I've made a PR to `consensus-specs` to discuss this. https://github.com/ethereum/consensus-specs/pull/3092 `ExecutionPayloadHeader` only uses a root of withdrawals and not the list itself? That's ugly. How would a system that doesn't have direct access to state (_e.g._ Vouch) be able to obtain the withdrawals from the root? You could lookup the full block or sign the full block if desired (when not using a builder). What do you imagine Vouch using the withdrawals for? Choosing between competing blocks? that's a pretty unfair competition: at most one such block is valid we don't even need withdrawals root in the block 😆 the payload's state root + beacon states balances (i.e. beacon's stateroot) 100% cover the withdrawal effects How would the execution node know which balances to increment if the data is not in the execution payload? if the blocks are built on different parents they could have different withdrawals, but they’d likely also have very different attestations and the one attempting a re-org would probably pay more not sure if Vouch considers this (yet) there could be an “extended payload” that contains the actual withdrawals, but it’s quite ugly from a spec PoV so IMO we should keep the withdrawals in the block Oh lord I do hope that vouch is not playing with reorging 🙂 because the beacon node can calculate expected ~~balances~~ withdrawals and send to the engine they are totally derivable from the beacon state No, but we do have to suffer beacon nodes having differences of opinion. As for looking up the full block, hard to do when it's still a proposal. I think you guys must be talking about different things: the execution node surely needs the withdrawals to actually pay the ETH1 addresses But is there an actual application for `vouch` knowing what are the withdrawals that will be included? yes, but it can be generated locally by the beacon node before it calls execution engine new payload using get expected withdrawals on the pre state It allows us to sanity check the values. had some success in a lodestar<>geth, lodestar<>nethermind test , geth/nethermind seems to accept each others payloads so a +ve step thanks to <@412614104222531604> for persisting and testing out this configuration we verified that the validatorindex started from 0 (this lodestar image had latest spec changes) and looped back after some time it seems like a fine optimization to simply compare the hash tree root *but* i am pretty strongly against changing the spec in this way as it is a departure from what we 'expect' -- i.e. just having the data in the block we ( <@412614104222531604> + I ) just tested a full withdrawal and the balance updated 32 eth (though seems like validator still getting some rewards post withdrawal as we shortened the exit/withdraw ability window) ```json { \"data\": { \"index\": \"225\", \"balance\": \"3016\", \"status\": \"withdrawal_done\", \"validator\": { \"pubkey\": \"0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8\", \"withdrawal_credentials\": \"0x01dd0712bfc68f5baf52140367fe90bddf88197a5bb706bf234b502228f5dddd\", \"effective_balance\": \"0\", \"slashed\": false, \"activation_eligibility_epoch\": \"0\", \"activation_epoch\": \"0\", \"exit_epoch\": \"7\", \"withdrawable_epoch\": \"8\" } }, \"execution_optimistic\": false } ``` \"withdrawal_done\" right! awesome its balance should be 0 though effective balance 0 seems like it still getting some reward balance itself should be 0 but thats ok, for a normal withdrawal it won't be a issue balance might be leftover from last skimming ? no, balance goes to 0 balance is now 2226, so another clearing round happened and then it again got something lets leave it, by tomorrow it should be/stay at 0 balance bit weird. curl http://127.0.0.1:4000/eth/v1/beacon/states/head/validators/0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8 {\"data\":{\"index\":\"225\",\"balance\":\"0\",\"status\":\"withdrawal_done\",\"validator\":{\"pubkey\":\"0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8\",\"withdrawal_credentials\":\"0x01dd0712bfc68f5baf52140367fe90bddf88197a5bb706bf234b502228f5dddd\",\"effective_balance\":\"0\",\"slashed\":false,\"activation_eligibility_epoch\":\"0\", balance 0 now no thats ok, its still part of sync committee most likely ahh right because we shortened the windows <@577788234810130432> feel free to ask your questions here. or join in for the voice call <a:graphwave:780160449115062282> hey, quick question - do the withdrawals get included in a block? <@792822129019584562> joining for the call? yes in party lounge? yeah ```withdrawals-bootnode-1 ansible_host=161.35.69.12 withdrawals-lodestar-geth-1 ansible_host=161.35.73.93 withdrawals-prysm-nethermind-1 ansible_host=161.35.78.101 withdrawals-prysm-geth-1 ansible_host=161.35.78.148 withdrawals-lodestar-nethermind-1 ansible_host=161.35.78.23``` <@792822129019584562> do I have to have `--eth1 false` ? not if we are mining first are we gonna be mining? yes as of the current design do you have a link to the busanet config? not sure yesterday there was talk of switching miner off/on do you need genesis.ssz? no, this <https://github.com/gobitfly/eth2-beaconchain-explorer/blob/master/config/sepolia.chain.yml> ``` \"config\": { \"chainId\": int(data['chain_id']), \"homesteadBlock\":0, \"eip150Block\":0, \"eip155Block\":0, \"eip158Block\":0, \"byzantiumBlock\":0, \"constantinopleBlock\":0, \"petersburgBlock\":0, \"istanbulBlock\":0, \"berlinBlock\":0, \"londonBlock\":0, \"mergeForkBlock\":0, \"arrowGlacierBlock\":0, \"grayGlacierBlock\":0, \"shanghaiBlock\": int(data['genesis_timestamp']) + int(data['genesis_delay']) + (int(data['capella_epoch']) * 32 * int(data['sec_per_slot'])), \"terminalTotalDifficulty\":9 },``` ``` \"name\": \"Testnet\", \"engine\": {}, \"params\": { \"gasLimitBoundDivisor\": \"0x400\", \"registrar\": \"0x0000000000000000000000000000000000000000\", \"accountStartNonce\": \"0x0\", \"maximumExtraDataSize\": \"0xffff\", \"minGasLimit\": \"0x1388\", \"networkID\": hex(int(data['chain_id'])), \"MergeForkIdTransition\": \"0x0\", \"eip150Transition\": \"0x0\", \"eip158Transition\": \"0x0\", \"eip160Transition\": \"0x0\", \"eip161abcTransition\": \"0x0\", \"eip161dTransition\": \"0x0\", \"eip155Transition\": \"0x0\", \"eip140Transition\": \"0x0\", \"eip211Transition\": \"0x0\", \"eip214Transition\": \"0x0\", \"eip658Transition\": \"0x0\", \"eip145Transition\": \"0x0\", \"eip1014Transition\": \"0x0\", \"eip1052Transition\": \"0x0\", \"eip1283Transition\": \"0x0\", \"eip1283DisableTransition\": \"0x0\", \"eip152Transition\": \"0x0\", \"eip1108Transition\": \"0x0\", \"eip1344Transition\": \"0x0\", \"eip1884Transition\": \"0x0\", \"eip2028Transition\": \"0x0\", \"eip2200Transition\": \"0x0\", \"eip2565Transition\": \"0x0\", \"eip2929Transition\": \"0x0\", \"eip2930Transition\": \"0x0\", \"eip1559Transition\": \"0x0\", \"eip3198Transition\": \"0x0\", \"eip3529Transition\": \"0x0\", \"eip3541Transition\": \"0x0\", \"eip4895TransitionTimestamp\": hex(int(data['genesis_timestamp']) + int(data['genesis_delay']) + (int(data['capella_epoch']) * 32 * int(data['sec_per_slot']))), \"terminalTotalDifficulty\":\"0x9\" },``` shanghaiBlock -> shanghaiTime <@412614104222531604> cc <@360491619402776577> <@360491619402776577> Thanks genesis at 1668188441 + 1000 = 1668189441 (2022-11-11 17:57:21 +0000 UTC) ```processing mnemonic 0, for 500 validators ...validator 100/500 ...validator 200/500 ...validator 300/500 ...validator 400/500 ...validator 500/500``` FYI https://github.com/ethereum/consensus-specs/pull/3095 http://161.35.69.12:3334 Shanghai: Friday, 11 November 2022 19:37:27 (1668191847) <@360491619402776577> added your keys thx <@&652918665943056397> is anyone around? ``` 022-11-11 18:13:50.4621|Processed block 1 (0x0a6a51...39beb5) is invalid: 2022-11-11 18:13:50.4621|- hash: expected 0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0, got 0x0a6a51479fcb7ce9c7b9dfb4fd0515cea45a70d0f3d0ddd7fffa5e9f9339beb5 2022-11-11 18:13:50.4621|- state root: expected 0x58f397226d7b9bebb9533294102ed5382e729bc23d54af3d41a6859683063fd4, got 0x5c9ba34f1167c7f2ccb56623667e04f2d3e769148d181f4a51484e14b3ced910 2022-11-11 18:13:50.4621|Processed block is not valid 1 (0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0) 2022-11-11 18:13:50.4625|Suggested block TD: 131073, Suggested block IsPostMerge False, Block TD: 131073, Block IsPostMerge False ``` This is the block on geth: ``` > eth.getBlock(0x1) { baseFeePerGas: 875000000, difficulty: 131072, extraData: \"0xd883010b00846765746888676f312e31382e38856c696e7578\", gasLimit: 4198399, gasUsed: 0, hash: \"0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0\", logsBloom: \"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\", miner: \"0xb02a2eda1b317fbd16760128836b0ac59b560e9d\", mixHash: \"0x7ec94cb5544bb62a5aec37f0b29367d0d91a44a74df1a19e65c3c88d3c8888df\", nonce: \"0x789ea841983c15b2\", number: 1, parentHash: \"0xcaaa2b228f183dabc91e49646cf9c734ead24450c2fd5adf48a7af143554d559\", receiptsRoot: \"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421\", sha3Uncles: \"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347\", size: 541, stateRoot: \"0x58f397226d7b9bebb9533294102ed5382e729bc23d54af3d41a6859683063fd4\", timestamp: 1668190232, totalDifficulty: 131073, transactions: [], transactionsRoot: \"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421\", uncles: [] } ``` ``` ERROR[11-11|18:23:21.367] ########## BAD BLOCK ######### Block: 31 (0x0c2862654472d5b627b610e0c9d56824da5557482ff61c574855a78bd6126212) Error: invalid withdrawalsHash: have 0xd2f953d6c402faf0df0b89a1670aa3d350ce63a4533d5e161ed972051bc12091, expected nil Platform: geth (devel) go1.18.8 amd64 linux VCS: f0248d23-20221110 Chain config: &params.ChainConfig{ChainID:1337803, HomesteadBlock:0, DAOForkBlock:<nil>, DAOForkSupport:false, EIP150Block:0, EIP150Hash:0x0000000000000000000000000000000000000000000000000000000000000000, EIP155Block:0, EIP158Block:0, ByzantiumBlock:0, ConstantinopleBlock:0, PetersburgBlock:0, IstanbulBlock:0, MuirGlacierBlock:<nil>, BerlinBlock:0, LondonBlock:0, ArrowGlacierBlock:0, GrayGlacierBlock:0, MergeNetsplitBlock:<nil>, ShanghaiTime:<nil>, CancunBlock:<nil>, TerminalTotalDifficulty:9, TerminalTotalDifficultyPassed:false, Ethash:(*params.EthashConfig)(nil), Clique:(*params.CliqueConfig)(nil)} Receipts: ############################## WARN [11-11|18:23:21.367] NewPayloadV1: inserting block failed error=\"invalid withdrawalsHash: have 0xd2f953d6c402faf0df0b89a1670aa3d350ce63a4533d5e161ed972051bc12091, expected nil\" ``` ShanghaiTime:<nil>, <@360491619402776577> `cat ~/customer_config_data/genesis.json | grep shanghai` > ShanghaiTime *big.Int `json:\"shanghaiBlock,omitempty\"` ``` devops@withdrawals-bootnode-1 ➜ eth2-beaconchain-explorer git:(feature/testnet) ✗ sudo docker run -d -p 127.0.0.1:6379:6379 redis:7 8a4d9365d5d4b2556c9f5477f48bbf194b08fd8184635b8cbe12c0e00003359e docker: Error response from daemon: driver failed programming external connectivity on endpoint intelligent_wescoff (223f477d0dc788ce3cb3b3ddc7e317918b2ced1b47b53ab77209964be6b67112): (iptables failed: iptables --wait -t filter -A DOCKER ! -i docker0 -o docker0 -p tcp -d 172.17.0.2 --dport 6379 -j ACCEPT: iptables: No chain/target/match by that name. (exit status 1)).``` any idea why I can't start redis? > > INFO [11-11|18:39:09.802] Writing default main-net genesis block For next tries to start the miner: ``` docker exec -it executio",
+  "excerpts": [
+    {
+      "author": "ethdreamer",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So while implementing `capella` and reasoning about the `builder-spec` I realized we don't even need to transmit the `Withdrawal`s in the beacon blocks. I've made a PR to `consensus-specs` to discuss this.\nhttps://github.com/ethereum/consensus-specs/pull/3092",
+      "createdAt": "2022-11-11T00:16:18.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "`ExecutionPayloadHeader` only uses a root of withdrawals and not the list itself?  That's ugly.",
+      "createdAt": "2022-11-11T07:44:56.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "How would a system that doesn't have direct access to state (_e.g._ Vouch) be able to obtain the withdrawals from the root?",
+      "createdAt": "2022-11-11T07:46:15.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "You could lookup the full block or sign the full block if desired (when not using a builder).\n\nWhat do you imagine Vouch using the withdrawals for? Choosing between competing blocks?",
+      "createdAt": "2022-11-11T09:25:23.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "that's a pretty unfair competition: at most one such block is valid",
+      "createdAt": "2022-11-11T10:27:13.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we don't even need withdrawals root in the block 😆",
+      "createdAt": "2022-11-11T10:29:31.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the payload's state root + beacon states balances (i.e. beacon's stateroot) 100% cover the withdrawal effects",
+      "createdAt": "2022-11-11T10:30:19.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "How would the execution node know which balances to increment if the data is not in the execution payload?",
+      "createdAt": "2022-11-11T10:49:57.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if the blocks are built on different parents they could have different withdrawals, but they’d likely also have very different attestations and the one attempting a re-org would probably pay more\n\nnot sure if Vouch considers this (yet)",
+      "createdAt": "2022-11-11T11:00:39.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "there could be an “extended payload” that contains the actual withdrawals, but it’s quite ugly from a spec PoV so IMO we should keep the withdrawals in the block",
+      "createdAt": "2022-11-11T11:01:21.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Oh lord I do hope that vouch is not playing with reorging 🙂",
+      "createdAt": "2022-11-11T11:05:40.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "because the beacon node can calculate expected ~~balances~~ withdrawals and send to the engine",
+      "createdAt": "2022-11-11T12:25:34.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "they are totally derivable from the beacon state",
+      "createdAt": "2022-11-11T12:26:40.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "No, but we do have to suffer beacon nodes having differences of opinion.\n\nAs for looking up the full block, hard to do when it's still a proposal.",
+      "createdAt": "2022-11-11T12:52:08.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I think you guys must be talking about different things: the execution node surely needs the withdrawals to actually pay the ETH1 addresses",
+      "createdAt": "2022-11-11T13:04:06.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But is there an actual application for `vouch` knowing what are the withdrawals that will be included?",
+      "createdAt": "2022-11-11T13:05:03.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, but it can be generated locally by the beacon node before it calls execution engine new payload",
+      "createdAt": "2022-11-11T13:13:30.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "using get expected withdrawals on the pre state",
+      "createdAt": "2022-11-11T13:13:58.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It allows us to sanity check the values.",
+      "createdAt": "2022-11-11T13:16:32.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "had some success in a lodestar<>geth, lodestar<>nethermind test , geth/nethermind seems to accept each others payloads so a +ve step",
+      "createdAt": "2022-11-11T13:25:48.284000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "955c4153aa9cd6e6c45d066a748bb40b5d98fd48cae4d1402d85583384ea5b44"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "cf397c518d18310695447710de084f4c33a59550c14f0d6fdae2e483023ca510"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "thanks to <@412614104222531604> for persisting and testing out this configuration",
+      "createdAt": "2022-11-11T13:26:37.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we verified that the validatorindex started from 0 (this lodestar image had latest spec changes) and looped back after some time",
+      "createdAt": "2022-11-11T13:28:31.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "it seems like a fine optimization to simply compare the hash tree root *but* i am pretty strongly against changing the spec in this way as it is a departure from what we 'expect' -- i.e. just having the data in the block",
+      "createdAt": "2022-11-11T15:53:52.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we ( <@412614104222531604> + I ) just tested a full withdrawal",
+      "createdAt": "2022-11-11T16:35:17.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "and the balance updated 32 eth (though seems like validator still getting some rewards post withdrawal as we shortened the exit/withdraw ability window)",
+      "createdAt": "2022-11-11T16:36:19.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```json\n{\n  \"data\": {\n    \"index\": \"225\",\n    \"balance\": \"3016\",\n    \"status\": \"withdrawal_done\",\n    \"validator\": {\n      \"pubkey\": \"0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8\",\n      \"withdrawal_credentials\": \"0x01dd0712bfc68f5baf52140367fe90bddf88197a5bb706bf234b502228f5dddd\",\n      \"effective_balance\": \"0\",\n      \"slashed\": false,\n      \"activation_eligibility_epoch\": \"0\",\n      \"activation_epoch\": \"0\",\n      \"exit_epoch\": \"7\",\n      \"withdrawable_epoch\": \"8\"\n    }\n  },\n  \"execution_optimistic\": false\n}\n```",
+      "createdAt": "2022-11-11T16:36:48.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "\"withdrawal_done\"",
+      "createdAt": "2022-11-11T16:36:53.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right!",
+      "createdAt": "2022-11-11T16:37:01.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "awesome",
+      "createdAt": "2022-11-11T16:37:04.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "its balance should be 0 though",
+      "createdAt": "2022-11-11T16:37:37.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "effective balance 0",
+      "createdAt": "2022-11-11T16:37:53.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "seems like it still getting some reward",
+      "createdAt": "2022-11-11T16:37:57.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "balance itself should be 0",
+      "createdAt": "2022-11-11T16:38:03.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but thats ok, for a normal withdrawal it won't be a issue",
+      "createdAt": "2022-11-11T16:38:20.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "balance might be leftover from last skimming ?",
+      "createdAt": "2022-11-11T16:38:39.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "no, balance goes to 0",
+      "createdAt": "2022-11-11T16:38:49.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "balance is now 2226, so another clearing round happened and then it again got something",
+      "createdAt": "2022-11-11T16:39:41.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "lets leave it, by tomorrow it should be/stay at 0 balance",
+      "createdAt": "2022-11-11T16:39:56.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "bit weird.",
+      "createdAt": "2022-11-11T16:40:13.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "curl http://127.0.0.1:4000/eth/v1/beacon/states/head/validators/0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8\n{\"data\":{\"index\":\"225\",\"balance\":\"0\",\"status\":\"withdrawal_done\",\"validator\":{\"pubkey\":\"0x8ac4e901db208ba51b61e31a983870dce108214e8a23a4eb1d6f8ed11921084e5aa2052dd190341cbd373753913a3ae8\",\"withdrawal_credentials\":\"0x01dd0712bfc68f5baf52140367fe90bddf88197a5bb706bf234b502228f5dddd\",\"effective_balance\":\"0\",\"slashed\":false,\"activation_eligibility_epoch\":\"0\",",
+      "createdAt": "2022-11-11T16:40:17.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "balance 0 now",
+      "createdAt": "2022-11-11T16:40:21.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "no thats ok, its still part of sync committee most likely",
+      "createdAt": "2022-11-11T16:40:39.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ahh right",
+      "createdAt": "2022-11-11T16:40:51.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "because we shortened the windows",
+      "createdAt": "2022-11-11T16:40:53.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@577788234810130432> feel free to ask your questions here.",
+      "createdAt": "2022-11-11T16:54:23.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "or join in for the voice call",
+      "createdAt": "2022-11-11T16:54:55.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<a:graphwave:780160449115062282> hey, quick question - do the withdrawals get included in a block?",
+      "createdAt": "2022-11-11T16:55:46.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@792822129019584562> joining for the call?",
+      "createdAt": "2022-11-11T16:57:45.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2022-11-11T16:59:20.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "in party lounge?",
+      "createdAt": "2022-11-11T16:59:56.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2022-11-11T17:00:01.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```withdrawals-bootnode-1    ansible_host=161.35.69.12\nwithdrawals-lodestar-geth-1    ansible_host=161.35.73.93\nwithdrawals-prysm-nethermind-1    ansible_host=161.35.78.101\nwithdrawals-prysm-geth-1    ansible_host=161.35.78.148\nwithdrawals-lodestar-nethermind-1    ansible_host=161.35.78.23```",
+      "createdAt": "2022-11-11T17:00:46.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@792822129019584562> do I have to have `--eth1 false`  ?",
+      "createdAt": "2022-11-11T17:03:20.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "not if we are mining first",
+      "createdAt": "2022-11-11T17:03:34.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "are we gonna be mining?",
+      "createdAt": "2022-11-11T17:08:30.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes as of the current design",
+      "createdAt": "2022-11-11T17:08:42.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "do you have a link to the busanet config?",
+      "createdAt": "2022-11-11T17:09:15.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "not sure yesterday there was talk of switching miner off/on",
+      "createdAt": "2022-11-11T17:09:53.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "do you need genesis.ssz?",
+      "createdAt": "2022-11-11T17:10:55.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "no, this <https://github.com/gobitfly/eth2-beaconchain-explorer/blob/master/config/sepolia.chain.yml>",
+      "createdAt": "2022-11-11T17:12:53.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```    \"config\": {\n        \"chainId\": int(data['chain_id']),\n        \"homesteadBlock\":0,\n        \"eip150Block\":0,\n        \"eip155Block\":0,\n        \"eip158Block\":0,\n        \"byzantiumBlock\":0,\n        \"constantinopleBlock\":0,\n        \"petersburgBlock\":0,\n        \"istanbulBlock\":0,\n        \"berlinBlock\":0,\n        \"londonBlock\":0,\n        \"mergeForkBlock\":0,\n        \"arrowGlacierBlock\":0,\n        \"grayGlacierBlock\":0,\n        \"shanghaiBlock\": int(data['genesis_timestamp']) + int(data['genesis_delay']) + (int(data['capella_epoch']) * 32 * int(data['sec_per_slot'])),\n        \"terminalTotalDifficulty\":9\n    },```",
+      "createdAt": "2022-11-11T17:18:40.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```    \"name\": \"Testnet\",\n    \"engine\": {},\n    \"params\": {\n        \"gasLimitBoundDivisor\": \"0x400\",\n        \"registrar\": \"0x0000000000000000000000000000000000000000\",\n        \"accountStartNonce\": \"0x0\",\n        \"maximumExtraDataSize\": \"0xffff\",\n        \"minGasLimit\": \"0x1388\",\n        \"networkID\": hex(int(data['chain_id'])),\n        \"MergeForkIdTransition\": \"0x0\",\n        \"eip150Transition\": \"0x0\",\n        \"eip158Transition\": \"0x0\",\n        \"eip160Transition\": \"0x0\",\n        \"eip161abcTransition\": \"0x0\",\n        \"eip161dTransition\": \"0x0\",\n        \"eip155Transition\": \"0x0\",\n        \"eip140Transition\": \"0x0\",\n        \"eip211Transition\": \"0x0\",\n        \"eip214Transition\": \"0x0\",\n        \"eip658Transition\": \"0x0\",\n        \"eip145Transition\": \"0x0\",\n        \"eip1014Transition\": \"0x0\",\n        \"eip1052Transition\": \"0x0\",\n        \"eip1283Transition\": \"0x0\",\n        \"eip1283DisableTransition\": \"0x0\",\n        \"eip152Transition\": \"0x0\",\n        \"eip1108Transition\": \"0x0\",\n        \"eip1344Transition\": \"0x0\",\n        \"eip1884Transition\": \"0x0\",\n        \"eip2028Transition\": \"0x0\",\n        \"eip2200Transition\": \"0x0\",\n        \"eip2565Transition\": \"0x0\",\n        \"eip2929Transition\": \"0x0\",\n        \"eip2930Transition\": \"0x0\",\n        \"eip1559Transition\": \"0x0\",\n        \"eip3198Transition\": \"0x0\",\n        \"eip3529Transition\": \"0x0\",\n        \"eip3541Transition\": \"0x0\",\n        \"eip4895TransitionTimestamp\": hex(int(data['genesis_timestamp']) + int(data['genesis_delay']) + (int(data['capella_epoch']) * 32 * int(data['sec_per_slot']))),\n        \"terminalTotalDifficulty\":\"0x9\"\n    },```",
+      "createdAt": "2022-11-11T17:19:23.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "shanghaiBlock -> shanghaiTime",
+      "createdAt": "2022-11-11T17:19:59.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@412614104222531604>",
+      "createdAt": "2022-11-11T17:20:16.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "cc <@360491619402776577>",
+      "createdAt": "2022-11-11T17:29:43.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@360491619402776577>",
+      "createdAt": "2022-11-11T17:29:59.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Thanks",
+      "createdAt": "2022-11-11T17:30:18.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "genesis at 1668188441 + 1000 = 1668189441  (2022-11-11 17:57:21 +0000 UTC)",
+      "createdAt": "2022-11-11T17:41:07.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```processing mnemonic 0, for 500 validators\n...validator 100/500\n...validator 200/500\n...validator 300/500\n...validator 400/500\n...validator 500/500```",
+      "createdAt": "2022-11-11T17:44:57.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "FYI https://github.com/ethereum/consensus-specs/pull/3095",
+      "createdAt": "2022-11-11T17:52:09.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "http://161.35.69.12:3334",
+      "createdAt": "2022-11-11T17:57:38.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Shanghai:  Friday, 11 November 2022 19:37:27 (1668191847)",
+      "createdAt": "2022-11-11T18:12:58.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-11-11T18:15:38.523000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "5b5efafdfcff319422a3fcf96d4c400b7b299cda2f6ebbeaa1fd467d4fae27b9"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-11-11T18:16:48.210000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "906f0ecc6403e865f2d843a871fe15995b0d789aa9d677cceb0334d866c4b011"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@360491619402776577> added your keys",
+      "createdAt": "2022-11-11T18:17:38.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "thx",
+      "createdAt": "2022-11-11T18:17:43.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@&652918665943056397> is anyone around?",
+      "createdAt": "2022-11-11T18:18:32.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```\n022-11-11 18:13:50.4621|Processed block 1 (0x0a6a51...39beb5) is invalid: \n2022-11-11 18:13:50.4621|- hash: expected 0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0, got 0x0a6a51479fcb7ce9c7b9dfb4fd0515cea45a70d0f3d0ddd7fffa5e9f9339beb5 \n2022-11-11 18:13:50.4621|- state root: expected 0x58f397226d7b9bebb9533294102ed5382e729bc23d54af3d41a6859683063fd4, got 0x5c9ba34f1167c7f2ccb56623667e04f2d3e769148d181f4a51484e14b3ced910 \n2022-11-11 18:13:50.4621|Processed block is not valid 1 (0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0) \n2022-11-11 18:13:50.4625|Suggested block TD: 131073, Suggested block IsPostMerge False, Block TD: 131073, Block IsPostMerge False \n```",
+      "createdAt": "2022-11-11T18:18:39.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "This is the block on geth:\n```\n> eth.getBlock(0x1)\n{\n  baseFeePerGas: 875000000,\n  difficulty: 131072,\n  extraData: \"0xd883010b00846765746888676f312e31382e38856c696e7578\",\n  gasLimit: 4198399,\n  gasUsed: 0,\n  hash: \"0x81b89fcfa811b07c9a40228b4a6dbbea0cbb9de829ba2c16744807e268d2e5a0\",\n  logsBloom: \"0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\",\n  miner: \"0xb02a2eda1b317fbd16760128836b0ac59b560e9d\",\n  mixHash: \"0x7ec94cb5544bb62a5aec37f0b29367d0d91a44a74df1a19e65c3c88d3c8888df\",\n  nonce: \"0x789ea841983c15b2\",\n  number: 1,\n  parentHash: \"0xcaaa2b228f183dabc91e49646cf9c734ead24450c2fd5adf48a7af143554d559\",\n  receiptsRoot: \"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421\",\n  sha3Uncles: \"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347\",\n  size: 541,\n  stateRoot: \"0x58f397226d7b9bebb9533294102ed5382e729bc23d54af3d41a6859683063fd4\",\n  timestamp: 1668190232,\n  totalDifficulty: 131073,\n  transactions: [],\n  transactionsRoot: \"0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421\",\n  uncles: []\n}\n```",
+      "createdAt": "2022-11-11T18:20:14.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```\nERROR[11-11|18:23:21.367] \n########## BAD BLOCK #########\nBlock: 31 (0x0c2862654472d5b627b610e0c9d56824da5557482ff61c574855a78bd6126212)\nError: invalid withdrawalsHash: have 0xd2f953d6c402faf0df0b89a1670aa3d350ce63a4533d5e161ed972051bc12091, expected nil \nPlatform: geth (devel) go1.18.8 amd64 linux\nVCS: f0248d23-20221110\nChain config: &params.ChainConfig{ChainID:1337803, HomesteadBlock:0, DAOForkBlock:<nil>, DAOForkSupport:false, EIP150Block:0, EIP150Hash:0x0000000000000000000000000000000000000000000000000000000000000000, EIP155Block:0, EIP158Block:0, ByzantiumBlock:0, ConstantinopleBlock:0, PetersburgBlock:0, IstanbulBlock:0, MuirGlacierBlock:<nil>, BerlinBlock:0, LondonBlock:0, ArrowGlacierBlock:0, GrayGlacierBlock:0, MergeNetsplitBlock:<nil>, ShanghaiTime:<nil>, CancunBlock:<nil>, TerminalTotalDifficulty:9, TerminalTotalDifficultyPassed:false, Ethash:(*params.EthashConfig)(nil), Clique:(*params.CliqueConfig)(nil)}\nReceipts: \n##############################\n  \nWARN [11-11|18:23:21.367] NewPayloadV1: inserting block failed     error=\"invalid withdrawalsHash: have 0xd2f953d6c402faf0df0b89a1670aa3d350ce63a4533d5e161ed972051bc12091, expected nil\"\n```",
+      "createdAt": "2022-11-11T18:23:54.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ShanghaiTime:<nil>,",
+      "createdAt": "2022-11-11T18:24:22.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@360491619402776577> `cat ~/customer_config_data/genesis.json | grep shanghai`",
+      "createdAt": "2022-11-11T18:25:09.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> ShanghaiTime        *big.Int `json:\"shanghaiBlock,omitempty\"`",
+      "createdAt": "2022-11-11T18:30:07.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```\ndevops@withdrawals-bootnode-1 ➜  eth2-beaconchain-explorer git:(feature/testnet) ✗ sudo docker run -d -p 127.0.0.1:6379:6379 redis:7\n8a4d9365d5d4b2556c9f5477f48bbf194b08fd8184635b8cbe12c0e00003359e\ndocker: Error response from daemon: driver failed programming external connectivity on endpoint intelligent_wescoff (223f477d0dc788ce3cb3b3ddc7e317918b2ced1b47b53ab77209964be6b67112):  (iptables failed: iptables --wait -t filter -A DOCKER ! -i docker0 -o docker0 -p tcp -d 172.17.0.2 --dport 6379 -j ACCEPT: iptables: No chain/target/match by that name.\n (exit status 1)).```\nany idea why I can't start redis?",
+      "createdAt": "2022-11-11T18:35:14.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": ">                              \n> INFO [11-11|18:39:09.802] Writing default main-net genesis block",
+      "createdAt": "2022-11-11T18:41:08.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "For next tries to start the miner:\n```\ndocker exec -it execution /bin/sh\ngeth attach eldata/geth.ipc\nminer.setEtherbase(\"0xb02A2EdA1b317FBd16760128836B0Ac59B560e9D\")\nminer.start(1)\n```",
+      "createdAt": "2022-11-11T18:43:20.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Nuking both testnets now for the weekend",
+      "createdAt": "2022-11-11T18:45:58.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "We try again on monday",
+      "createdAt": "2022-11-11T18:46:21.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Seems like \"DOCKER\" chain on iptables got nuked by something else. Restarting the docker daemon normally fixes this as it will set up this iptables chain on start. `systemctl restart docker`",
+      "createdAt": "2022-11-11T19:47:03.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, so we rejected the block and geth accepted?",
+      "createdAt": "2022-11-11T23:51:28.884000+00:00",
+      "attachments": []
+    }
+  ]
+}

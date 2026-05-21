@@ -23,7 +23,11 @@ MCP, search, admin, API functions, and the Netlify site are serving layers over 
 
 ```bash
 npm install
-npm run backfill -- --source live --limit 12
+npm run backfill -- --source canonical --limit 0 \
+  --pm-root /Users/lucy/fun/pm \
+  --forkcast-root /Users/lucy/fun/forkcast \
+  --eips-root /Users/lucy/fun/acd-process/EIPs \
+  --eth-rnd-archive-root /Users/lucy/fun/ro-repos/eth-rnd-archive
 npm run derive
 npm run validate
 npm run build-snapshot
@@ -37,19 +41,19 @@ ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ## Sources
 
 - current Forkcast data and curated records
+- official `ethereum/EIPs` markdown for the full EIP corpus, enriched by Forkcast where available
 - upstream PM artifacts
-- `pm-lean` output
-- `pm-lean` fixture-live feed records from the `pm-lean-feed` branch while upstream PM automation is being wired
-- `ethereum/pm` GitHub protocol-call issues
-- Ethereum R&D Discord archive
+- optional `pm-lean` output
+- `ethereum/pm` GitHub protocol-call issues, including agenda bodies, labels, comments, and linked resources
+- `ethereum/eth-rnd-archive` Discord archive day/channel partitions
 - Ethereum Magicians topic links from PM issues
 - dummy fixture data, explicitly guarded
 
 ## Alive Automation
 
-The `Data Pipeline` GitHub Action runs every 30 minutes and defaults to `source=live`. That mode checks out `dionysuzx/pm-lean@pm-lean-feed`, ingests PM Lean feed records, refreshes Ethereum PM issue agendas through `gh`, validates schemas/provenance, builds snapshots/search/evals/site, deploys Netlify, then dispatches `forkcast-astro`.
+The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; builds snapshots/search/evals/site; deploys Netlify; then dispatches `forkcast-astro`.
 
-Dummy smoke data is not part of the live loop. The only synthetic live input is PM Lean `fixture-live`, which is labeled at the source and can be replaced by setting the PM Lean schedule to `source=pm`.
+Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
 ## Netlify
 

@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2020-09-30",
+  "messageCount": 150,
+  "sourceHash": "d84cb9eb7bced5bd694be29eeca6a54ee97dcef497064a96e32259aad3fa1d2b",
+  "searchText": "> <@!376568077950910466> i'm really confused because on the call last week i thought we discussed the latest eip-1559 work was done on https://github.com/vulcanize/go-ethereum-EIP1559/tree/eip1559_rebase, but it appears that the latest is https://github.com/vulcanize/go-ethereum/tree/1559_test ? <@!543900561460822016> I agree to me the latest is 1559_test branch. <@!376568077950910466> could you please confirm ? > I am quite sure guys that the block 304 was signed by an unauthorized signer <@!489256758989029405> I don't think so. ```shell curl -X POST --data '{\"jsonrpc\":\"2.0\",\"method\":\"clique_getSigners\",\"params\":[\"0x130\"], \"id\":1}' http://13.236.147.35:8545 ``` ```json { \"jsonrpc\" : \"2.0\", \"id\" : 1, \"result\" : [ \"0x36267c845cc42b57ccb869d655e5d5fb620cc69a\" ] } ``` `0x36267c845cc42b57ccb869d655e5d5fb620cc69a` is the address of the validator in the extra data of the genesis ```json { \"extraData\":\"0x000000000000000000000000000000000000000000000000000000000000000036267c845cc42b57ccb869d655e5d5fb620cc69a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\" } ``` let me check once again why I am getting a different signer maybe I was too confident about the header hashing is base fee of 0 allowed? I understand there is the minimum of 1 of the fee change but I was reading before some discussion on basefee zero and was wondering how it was solved in the end Both Blocks 304 and 305 are below target gas yet the BASEFEE grows from 0 to 1 fully synced I think the formula should be improved let me suggest something int direction = Math.Sign(parent.GasUsed - gasTarget); gasDelta = Math.Abs(parent.GasUsed - gasTarget); feeDelta = parent.BaseFee * (UInt256) gasDelta / (UInt256) gasTarget / BaseFeeMaxChangeDenominator; baseFee = min(UInt256, max(0, parent.BaseFee + direction * feeDelta)) I think this would simplify this strange cases when we move from 0 to 1 <@489256758989029405> Yes, base fee can go to 0, only requirement is that if the block is over-full by any amount, it must increase by 1 minimum. and generally the formula seems more readable current network moves from 0 to 1 on the underutilized network Wat? That is a bug. yeah this is what I suggest to fix look here: http://eip1559-testnet.ops.pegasys.tech:3000/block/305 and compre with block 304 I really wish we could get my PR merged... it feels silly that we keep suffering with the complexity of a system that no one actually wants. which PR? <@!574864862338088960> have a look at the suggested fix <@489256758989029405> <https://github.com/ethereum/EIPs/pull/2924/> 305 to 306 transition looks fine to me. Oh, 304 to 305.... 👀 Yeah, 304-305 is incorrect. int direction = Math.Sign(parent.GasUsed - gasTarget); gasDelta = Math.Abs(parent.GasUsed - gasTarget); feeDelta = parent.BaseFee * gasDelta / gasTarget / BaseFeeMaxChangeDenominator; baseFee = min(UInt256.MaxValue, max(0, parent.BaseFee + direction * feeDelta)) this is cleaner suggestion of mine Ah, I see the problem. currently we land with -1 which is inverted to +1 Is it fixed in my PR? ```python fee_delta = parent_base_fee * gas_delta // parent_gas_used // BASE_FEE_MAX_CHANGE_DENOMINATOR expected_base_fee = parent_base_fee - fee_delta ``` It gets rid of that `+1`, which means when the base fee is 0 the equation always evaluates to 0. yeah! I am just arriving at the exact equation gas_delta = parent_gas_used - parent_gas_target; fee_delta = parent_base_fee * gas_delta / parent_gas_target / BaseFeeMaxChangeDenominator; expected_base_fee = max(0, parent.BaseFee + fee_delt) yeah, the same just needs the max(0, parent.BaseFee + fee_delta) to avoid negative values In the spec we went with \"no negative values\" formula, but I believe you can implement it without the conditional if you accept negative numbers and round a certain way. Currently merged spec rounds toward negative infinity, my PR rounds toward 0 IIRC. yeah also the current implementation does not follow EIP Hmm, you sure about that? I synced the whole network with a formula that is inconsistent with EIP EIP says: # check if the base fee is correct if parent_gas_used >= parent_gas_target: gas_delta = parent_gas_used - parent_gas_target fee_delta = max(parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR, 1) expected_base_fee = parent_base_fee + fee_delta else: gas_delta = parent_gas_target - parent_gas_used fee_delta = (parent_base_fee * gas_delta - 1) // parent_gas_used // BASE_FEE_MAX_CHANGE_DENOMINATOR + 1 expected_base_fee = parent_base_fee - fee_delta assert expected_base_fee == block.base_fee, 'invalid block: base fee not correct' note that we arrive at fee delta by dividing by gas_target once and by gas_used in the other case That `+1` on the end is why it bounces between 0 and 1 I think. and the current network works if I always divde by the gas_target this changes the dynamic on the downwards adjustments Oh, good catch. Probably a mistake in the spec. yeah, especially if we get 0 there Bug exists in my PR as well. Will fix! simply get: gas_delta = parent_gas_used - parent_gas_target I cannot see my node on ethstats not sure why do you have the geth config for ethstats available? I don't have anything. 😬 I'm just a lowly spec author. <@!489256758989029405> Fixed my PR, would you mind taking a look to make sure it is correct? Changed gas_used divisor to gas_target. looks like two PRs combined - one is fixing formula, other changing tx pool behaviour / tx Yeah, getting a 1559 PR merged is absolute hell, so I have one PR out that contains all of the changes. 😢 added a comment for the negative values I believe we have unofficial/tentative agreement from everyone on all of the changes in my PR, just need the authors to officially endorse the PR so it can be merged and we can start targeting it. <@!489256758989029405> I don't believe it can be negative in the spec. Do you have some example numbers that would result in that algorithm ever evaluating to negative? when parent base fee is zero and block is underutilized like boock 304 aaah i see that without +1 -1 it should not happen actually woah if the gas target changes between the blocks if miners vote is it possible then? 🤔 Shouldn't matter since everything is calculated from the parent block? ```python # check if the base fee is correct if parent_gas_used == parent_gas_target: expected_base_fee = parent_base_fee elif parent_gas_used > parent_gas_target: gas_delta = parent_gas_used - parent_gas_target fee_delta = max(parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR, 1) expected_base_fee = parent_base_fee + fee_delta else: gas_delta = parent_gas_target - parent_gas_used fee_delta = parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR expected_base_fee = parent_base_fee - fee_delta assert expected_base_fee == block.base_fee, 'invalid block: base fee not correct' ``` The only place we reference the current block is in that assertion at the end. right, we seem safe Hmm, re your comment that `max` isn't necessary there. The issue is that if the base fee is `0` (or other similarly tiny number), the formula will round `fee_delta` to `0` which means it can never increase. ``` 0 * 10000000 / 10000000 / 8 == 0 ```so we need to do ``` max(0 * 10000000 / 10000000 / 8, 1) ``` Since division here rounds toward `0`, this problem exists for all current base fee values up to `7` I think. > do you have the geth config for ethstats available? <@!489256758989029405> we changed the password `$NODE_NAME:7pyzQMYIWkrPZ7ab@18.191.65.105:3001` <@!489256758989029405> should we update the implementation and deploy updated nodes ? what is the final formula ? the on from micah's pr would be advised <@574864862338088960> the $NODE_NAME can be anything? yes maybe we should try to set you as a signer before updating the implementation. So that we could validate your block mining. What do you think ? <@!489256758989029405> by the way the ethstats uses http and not https <@!489256758989029405> Besu implementation is ready. tell us when you are ready so we can deploy a fresh testnet. hey, just relaunch with your validator and I will sync and when it syncs fully then we will add nethermind validator in I still do not have the full eip1559 block building logic I am fine for you to relaunch the network at this stage at any time without confirming with our team if Geth is fine with this too generally do not wait for us with any upgrades, at this stage is better to fix the issues quickly than to cement them into the final solution just because we were reluctant to drop the test network ok so i will redeploy the testnet tomorrow with the latest base computation from the specification <@574864862338088960> Do you mean the base computation from my not-yet-merged PR? yes <@!301186049323958275> If so, do you plan on implementing the other changes (like no transition period and single pool)? are you very confident we have a consensus on those changes ? just don't want to undo what we did if not sure if we make it clear during next ACD then yes. <@!301186049323958275> is it reasonable ? <@!552133098075193354> can you make sure we rise the topic ? It was either in ACD or one of the EIP calls I believe where everyone indicated that they liked getting rid of the transition period with the only complaint being that Rick believes we need to have a strong deadline for migration so we can delete old code (which is not incompatible with my PR, but would require some future EIP). I believe we have just been waiting on: A. One of the authors to approve the PR so it merges. B. <@376568077950910466> <@574864862338088960> and now <@489256758989029405> to agree to switch the integration test network over to the new stuff. I think Ian indicated that they were tasked away from 1559 for the time being, which I suspect is contributing to the delay. I'm fine with re-affirming all of this in ACD or 1559 call if that gets things moving forward. Hopefully it will just be a matter of asking in a call, \"is anyone opposed getting rid of the 1559 transition period\" and when no one speaks up we then merge. Ok sounds good let's do that. Tomorrow i will update only the base fee computation. And we re-affirm it on the call and early next week i will be able to implement the changes to match your latest PR <@!301186049323958275> if we have a single pool the only incentive for users to use the new format is the fact than when legacy tx are converted the bribe is set only to base fee, is that right ? <@574864862338088960> Correct. There are solutions to \"forcing\" people to switch like a legacy tax. Yes i see, thanks Where they get charged a percentage higher base fee, where the tax rate increases with time. That can be a separate EIP though. Perhaps a dumb question, but is there any way to be sure that _all_ transactions can be successfully converted? from the spec: ``` Legacy Ethereum transactions will still work and be included in blocks, but they will not benefit directly from the new pricing system. This is due to the fact that upgrading from legacy transactions to new transactions results in the legacy transaction's gas_price entirely being consumed either by the base_fee or the miner_bribe. ``` you are right <@!552133098075193354> legacy tx gas price becomes both the feecap and the bribe Got it. And I guess in terms of sending the transaction, you don't need to re-sign it? Just like how in MetaMask you can \"speed up\" your transaction? actually it depends on how we will encode transactions best would be to have the typed transaction enveloppe with the current encoding it would fail What I'm trying to get at is say a wallet never implements 1559 (for example, Ledger just can't do it for N months), can we guarantee people will still be able to send txns, even though they may pay a bit more? we cannot convert legacy tx to eip1559 txs with the current implementation no. S",
+  "excerpts": [
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> <@!376568077950910466> i'm really confused because on the call last week i thought we discussed the latest eip-1559 work was done on https://github.com/vulcanize/go-ethereum-EIP1559/tree/eip1559_rebase, but it appears that the latest is https://github.com/vulcanize/go-ethereum/tree/1559_test ?\n<@!543900561460822016> I agree to me the latest is 1559_test branch. <@!376568077950910466> could you please confirm ?",
+      "createdAt": "2020-09-30T06:51:02.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> I am quite sure guys that the block 304 was signed by an unauthorized signer\n<@!489256758989029405> I don't think so. \n```shell\ncurl -X POST --data '{\"jsonrpc\":\"2.0\",\"method\":\"clique_getSigners\",\"params\":[\"0x130\"], \"id\":1}' http://13.236.147.35:8545\n```\n```json\n{\n  \"jsonrpc\" : \"2.0\",\n  \"id\" : 1,\n  \"result\" : [ \"0x36267c845cc42b57ccb869d655e5d5fb620cc69a\" ]\n}\n```",
+      "createdAt": "2020-09-30T07:02:24.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`0x36267c845cc42b57ccb869d655e5d5fb620cc69a` is the address of the validator in the extra data of the genesis",
+      "createdAt": "2020-09-30T07:02:46.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```json\n {\n\"extraData\":\"0x000000000000000000000000000000000000000000000000000000000000000036267c845cc42b57ccb869d655e5d5fb620cc69a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\"\n}\n```",
+      "createdAt": "2020-09-30T07:03:35.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "let me check once again why I am getting a different signer",
+      "createdAt": "2020-09-30T07:25:19.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "maybe I was too confident about the header hashing",
+      "createdAt": "2020-09-30T07:25:30.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-09-30T09:37:03.172000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "322f3c84c5ad7ae2c0ae4986ef3b1ac0b6ba6aa91efdcfd9c0809265d9c73901"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is base fee of 0 allowed?",
+      "createdAt": "2020-09-30T09:37:09.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I understand there is the minimum of 1 of the fee change but I was reading before some discussion on basefee zero and was wondering how it was solved in the end",
+      "createdAt": "2020-09-30T09:41:00.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Both Blocks 304 and 305 are below target gas yet the BASEFEE grows from 0 to 1",
+      "createdAt": "2020-09-30T10:08:26.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-09-30T10:15:27.001000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "461dc4c38697948b7dc8a4836b801976fdc127fe86a221e933660df7f55a4b0d"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "fully synced",
+      "createdAt": "2020-09-30T10:15:31.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the formula should be improved",
+      "createdAt": "2020-09-30T10:15:47.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "let me suggest something",
+      "createdAt": "2020-09-30T10:15:50.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "int direction = Math.Sign(parent.GasUsed - gasTarget);\n                gasDelta = Math.Abs(parent.GasUsed - gasTarget);\n                feeDelta = parent.BaseFee * (UInt256) gasDelta / (UInt256) gasTarget / BaseFeeMaxChangeDenominator;\n                baseFee = min(UInt256, max(0, parent.BaseFee + direction * feeDelta))",
+      "createdAt": "2020-09-30T10:23:11.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think this would simplify this strange cases when we move from 0 to 1",
+      "createdAt": "2020-09-30T10:23:27.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@489256758989029405> Yes, base fee can go to 0, only requirement is that if the block is over-full by any amount, it must increase by 1 minimum.",
+      "createdAt": "2020-09-30T10:23:33.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and generally the formula seems more readable",
+      "createdAt": "2020-09-30T10:23:37.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "current network moves from 0 to 1 on the underutilized network",
+      "createdAt": "2020-09-30T10:23:58.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Wat?",
+      "createdAt": "2020-09-30T10:24:05.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is a bug.",
+      "createdAt": "2020-09-30T10:24:08.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2020-09-30T10:24:10.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this is what I suggest to fix",
+      "createdAt": "2020-09-30T10:24:13.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "look here:",
+      "createdAt": "2020-09-30T10:24:35.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "http://eip1559-testnet.ops.pegasys.tech:3000/block/305",
+      "createdAt": "2020-09-30T10:24:36.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and compre with block 304",
+      "createdAt": "2020-09-30T10:24:42.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I really wish we could get my PR merged... it feels silly that we keep suffering with the complexity of a system that no one actually wants.",
+      "createdAt": "2020-09-30T10:24:56.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "which PR?",
+      "createdAt": "2020-09-30T10:25:09.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!574864862338088960> have a look at the suggested fix",
+      "createdAt": "2020-09-30T10:25:49.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@489256758989029405> <https://github.com/ethereum/EIPs/pull/2924/>",
+      "createdAt": "2020-09-30T10:26:36.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "305 to 306 transition looks fine to me.",
+      "createdAt": "2020-09-30T10:27:28.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, 304 to 305.... 👀",
+      "createdAt": "2020-09-30T10:27:39.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, 304-305 is incorrect.",
+      "createdAt": "2020-09-30T10:28:31.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "int direction = Math.Sign(parent.GasUsed - gasTarget);\ngasDelta = Math.Abs(parent.GasUsed - gasTarget);\nfeeDelta = parent.BaseFee * gasDelta / gasTarget / BaseFeeMaxChangeDenominator;\nbaseFee = min(UInt256.MaxValue, max(0, parent.BaseFee + direction * feeDelta))",
+      "createdAt": "2020-09-30T10:29:28.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this is cleaner suggestion of mine",
+      "createdAt": "2020-09-30T10:29:36.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, I see the problem.",
+      "createdAt": "2020-09-30T10:30:38.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "currently we land with -1 which is inverted to +1",
+      "createdAt": "2020-09-30T10:30:51.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is it fixed in my PR?",
+      "createdAt": "2020-09-30T10:32:06.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```python\nfee_delta = parent_base_fee * gas_delta // parent_gas_used // BASE_FEE_MAX_CHANGE_DENOMINATOR \t\t\texpected_base_fee = parent_base_fee - fee_delta\n```",
+      "createdAt": "2020-09-30T10:32:31.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It gets rid of that `+1`, which means when the base fee is 0 the equation always evaluates to 0.",
+      "createdAt": "2020-09-30T10:33:22.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah! I am just arriving at the exact equation",
+      "createdAt": "2020-09-30T10:36:32.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "gas_delta = parent_gas_used - parent_gas_target;\n                fee_delta = parent_base_fee * gas_delta / parent_gas_target / BaseFeeMaxChangeDenominator;\n                expected_base_fee = max(0, parent.BaseFee + fee_delt)",
+      "createdAt": "2020-09-30T10:37:03.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, the same",
+      "createdAt": "2020-09-30T10:37:18.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "just needs the max(0, parent.BaseFee + fee_delta) to avoid negative values",
+      "createdAt": "2020-09-30T10:37:49.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In the spec we went with \"no negative values\" formula, but I believe you can implement it without the conditional if you accept negative numbers and round a certain way.",
+      "createdAt": "2020-09-30T10:38:50.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently merged spec rounds toward negative infinity, my PR rounds toward 0 IIRC.",
+      "createdAt": "2020-09-30T10:39:10.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2020-09-30T10:39:10.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "also the current implementation does not follow EIP",
+      "createdAt": "2020-09-30T10:39:16.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, you sure about that?",
+      "createdAt": "2020-09-30T10:39:25.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I synced the whole network with a formula that is inconsistent with EIP",
+      "createdAt": "2020-09-30T10:39:26.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "EIP says:",
+      "createdAt": "2020-09-30T10:39:29.983000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "# check if the base fee is correct\n        if parent_gas_used >= parent_gas_target:\n            gas_delta = parent_gas_used - parent_gas_target\n            fee_delta = max(parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR, 1)\n            expected_base_fee = parent_base_fee + fee_delta\n        else:\n            gas_delta = parent_gas_target - parent_gas_used\n            fee_delta = (parent_base_fee * gas_delta - 1) // parent_gas_used // BASE_FEE_MAX_CHANGE_DENOMINATOR + 1\n            expected_base_fee = parent_base_fee - fee_delta\n        assert expected_base_fee == block.base_fee, 'invalid block: base fee not correct'",
+      "createdAt": "2020-09-30T10:39:44.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "note that we arrive at fee delta by dividing by gas_target once and by gas_used in the other case",
+      "createdAt": "2020-09-30T10:40:15.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That `+1` on the end is why it bounces between 0 and 1 I think.",
+      "createdAt": "2020-09-30T10:40:22.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and the current network works if I always divde by the gas_target",
+      "createdAt": "2020-09-30T10:40:29.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this changes the dynamic on the downwards adjustments",
+      "createdAt": "2020-09-30T10:40:49.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, good catch.",
+      "createdAt": "2020-09-30T10:41:01.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Probably a mistake in the spec.",
+      "createdAt": "2020-09-30T10:41:07.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, especially if we get 0 there",
+      "createdAt": "2020-09-30T10:41:19.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Bug exists in my PR as well.  Will fix!",
+      "createdAt": "2020-09-30T10:41:43.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "simply get: gas_delta = parent_gas_used - parent_gas_target",
+      "createdAt": "2020-09-30T10:43:47.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I cannot see my node on ethstats",
+      "createdAt": "2020-09-30T10:44:03.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "not sure why",
+      "createdAt": "2020-09-30T10:44:05.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "do you have the geth config for ethstats available?",
+      "createdAt": "2020-09-30T10:44:17.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't have anything.  😬",
+      "createdAt": "2020-09-30T10:52:04.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm just a lowly spec author.",
+      "createdAt": "2020-09-30T10:52:08.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> Fixed my PR, would you mind taking a look to make sure it is correct?  Changed gas_used divisor to gas_target.",
+      "createdAt": "2020-09-30T11:00:08.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "looks like two PRs combined - one is fixing formula, other changing tx pool behaviour / tx",
+      "createdAt": "2020-09-30T11:17:53.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, getting a 1559 PR merged is absolute hell, so I have one PR out that contains all of the changes.  😢",
+      "createdAt": "2020-09-30T11:21:15.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "added a comment for the negative values",
+      "createdAt": "2020-09-30T11:22:02.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe we have unofficial/tentative agreement from everyone on all of the changes in my PR, just need the authors to officially endorse the PR so it can be merged and we can start targeting it.",
+      "createdAt": "2020-09-30T11:22:05.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> I don't believe it can be negative in the spec.",
+      "createdAt": "2020-09-30T11:23:10.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you have some example numbers that would result in that algorithm ever evaluating to negative?",
+      "createdAt": "2020-09-30T11:23:22.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "when parent base fee is zero and block is underutilized",
+      "createdAt": "2020-09-30T11:23:51.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "like boock 304",
+      "createdAt": "2020-09-30T11:23:55.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "aaah",
+      "createdAt": "2020-09-30T11:24:17.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i see that without +1 -1 it should not happen",
+      "createdAt": "2020-09-30T11:24:38.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "actually",
+      "createdAt": "2020-09-30T11:25:41.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "woah",
+      "createdAt": "2020-09-30T11:25:44.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if the gas target changes between the blocks",
+      "createdAt": "2020-09-30T11:25:54.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if miners vote",
+      "createdAt": "2020-09-30T11:25:59.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is it possible then?",
+      "createdAt": "2020-09-30T11:26:05.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔",
+      "createdAt": "2020-09-30T11:26:09.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Shouldn't matter since everything is calculated from the parent block?",
+      "createdAt": "2020-09-30T11:26:27.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```python\n# check if the base fee is correct\nif parent_gas_used == parent_gas_target:\n    expected_base_fee = parent_base_fee\nelif parent_gas_used > parent_gas_target:\n    gas_delta = parent_gas_used - parent_gas_target\n    fee_delta = max(parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR, 1)\n    expected_base_fee = parent_base_fee + fee_delta\nelse:\n    gas_delta = parent_gas_target - parent_gas_used\n    fee_delta = parent_base_fee * gas_delta // parent_gas_target // BASE_FEE_MAX_CHANGE_DENOMINATOR\n    expected_base_fee = parent_base_fee - fee_delta\nassert expected_base_fee == block.base_fee, 'invalid block: base fee not correct'\n```",
+      "createdAt": "2020-09-30T11:27:27.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The only place we reference the current block is in that assertion at the end.",
+      "createdAt": "2020-09-30T11:27:46.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right, we seem safe",
+      "createdAt": "2020-09-30T11:32:10.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, re your comment that `max` isn't necessary there.  The issue is that if the base fee is `0` (or other similarly tiny number), the formula will round `fee_delta` to `0` which means it can never increase.",
+      "createdAt": "2020-09-30T11:32:53.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\n0 * 10000000 / 10000000 / 8 == 0\n```so we need to do\n```\nmax(0 * 10000000 / 10000000 / 8, 1)\n```",
+      "createdAt": "2020-09-30T11:33:49.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Since division here rounds toward `0`, this problem exists for all current base fee values up to `7` I think.",
+      "createdAt": "2020-09-30T11:34:24.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> do you have the geth config for ethstats available?\n<@!489256758989029405> we changed the password",
+      "createdAt": "2020-09-30T11:59:39.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`$NODE_NAME:7pyzQMYIWkrPZ7ab@18.191.65.105:3001`",
+      "createdAt": "2020-09-30T12:00:48.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> should we update the implementation and deploy updated nodes ? what is the final formula ?",
+      "createdAt": "2020-09-30T12:06:34.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the on from micah's pr would be advised",
+      "createdAt": "2020-09-30T12:08:39.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@574864862338088960> the $NODE_NAME can be anything?",
+      "createdAt": "2020-09-30T12:09:22.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2020-09-30T12:09:49.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "maybe we should try to set you as a signer before updating the implementation. So that we could validate your block mining. What do you think ?",
+      "createdAt": "2020-09-30T12:10:45.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> by the way the ethstats uses http and not https",
+      "createdAt": "2020-09-30T12:14:10.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!489256758989029405> Besu implementation is ready. tell us when you are ready so we can deploy a fresh testnet.",
+      "createdAt": "2020-09-30T14:38:26.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hey, just relaunch with your validator and I will sync and when it syncs fully then we will add nethermind validator in",
+      "createdAt": "2020-09-30T16:47:55.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I still do not have the full eip1559 block building logic",
+      "createdAt": "2020-09-30T16:48:04.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am fine for you to relaunch the network at this stage at any time without confirming with our team if Geth is fine with this too",
+      "createdAt": "2020-09-30T16:48:36.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "generally do not wait for us with any upgrades, at this stage is better to fix the issues quickly than to cement them into the final solution just because we were reluctant to drop the test network",
+      "createdAt": "2020-09-30T16:49:29.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok so i will redeploy the testnet tomorrow with the latest base computation from the specification",
+      "createdAt": "2020-09-30T17:05:04.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@574864862338088960> Do you mean the base computation from my not-yet-merged PR?",
+      "createdAt": "2020-09-30T17:07:40.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes <@!301186049323958275>",
+      "createdAt": "2020-09-30T17:07:55.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If so, do you plan on implementing the other changes (like no transition period and single pool)?",
+      "createdAt": "2020-09-30T17:08:02.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "are you very confident we have a consensus on those changes ?",
+      "createdAt": "2020-09-30T17:08:28.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "just don't want to undo what we did if not sure",
+      "createdAt": "2020-09-30T17:08:42.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if we make it clear during next ACD then yes. <@!301186049323958275> is it reasonable ? <@!552133098075193354> can you make sure we rise the topic ?",
+      "createdAt": "2020-09-30T17:09:38.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It was either in ACD or one of the EIP calls I believe where everyone indicated that they liked getting rid of the transition period with the only complaint being that Rick believes we need to have a strong deadline for migration so we can delete old code (which is not incompatible with my PR, but would require some future EIP).",
+      "createdAt": "2020-09-30T17:12:40.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe we have just been waiting on:\nA. One of the authors to approve the PR so it merges.\nB. <@376568077950910466> <@574864862338088960> and now <@489256758989029405> to agree to switch the integration test network over to the new stuff.",
+      "createdAt": "2020-09-30T17:13:38.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think Ian indicated that they were tasked away from 1559 for the time being, which I suspect is contributing to the delay.",
+      "createdAt": "2020-09-30T17:14:17.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm fine with re-affirming all of this in ACD or 1559 call if that gets things moving forward.",
+      "createdAt": "2020-09-30T17:14:51.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hopefully it will just be a matter of asking in a call, \"is anyone opposed getting rid of the 1559 transition period\" and when no one speaks up we then merge.",
+      "createdAt": "2020-09-30T17:15:59.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok sounds good let's do that. Tomorrow i will update only the base fee computation. And we re-affirm  it on the call and early next week i will be able to implement the changes to match your latest PR",
+      "createdAt": "2020-09-30T17:16:33.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> if we have a single pool the only incentive for users to use the new format is the fact than when legacy tx are converted the bribe is set only to base fee, is that right ?",
+      "createdAt": "2020-09-30T17:19:18.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@574864862338088960> Correct.",
+      "createdAt": "2020-09-30T17:23:11.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There are solutions to \"forcing\" people to switch like a legacy tax.",
+      "createdAt": "2020-09-30T17:23:37.959000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes i see, thanks",
+      "createdAt": "2020-09-30T17:23:47.784000+00:00",
+      "attachments": []
+    }
+  ]
+}

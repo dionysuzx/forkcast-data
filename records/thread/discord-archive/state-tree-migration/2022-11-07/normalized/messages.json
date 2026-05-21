@@ -1,0 +1,232 @@
+{
+  "schemaVersion": 1,
+  "channel": "state-tree-migration",
+  "date": "2022-11-07",
+  "messageCount": 27,
+  "sourceHash": "e8a5db4dafd38921fd98a899f8e093075dbfa4c52f079600ff81c272382a6623",
+  "searchText": "Made a PR on the PMT, going to tackle the verkle trie structure next Thanks! Have left a comment asking for clarification 🙂 BTW If you're into POAPs, there is a POAP for some of the verkle trie repos : https://www.gitpoap.io/gp/625 sweet <@353136597522448385> , <@555483069038198827> , <@427491045308235776> , I’ve some interesting news. I found a more efficient pure Go (no assembly, no special CPU instructions) to calculate the `Inverse(...)`. The impl _should_ be correct since it passes existing `go-ipa` tests which remain untouched. This leads to the following improvements in our benchmarks: ```markdown name old time/op new time/op delta FpInverse/go-ipa-16 1.66µs ± 5% 1.12µs ± 2% -32.34% (p=0.000 n=15+13) FpInverse/go-blst-16 1.42µs ± 1% 1.42µs ± 2% ~ (p=0.955 n=13+15) HashAddress/pedersen_hash-16 6.71µs ± 1% 6.08µs ± 2% -9.40% (p=0.000 n=12+15) HashStorageSlot/pedersen_hash-16 8.45µs ± 3% 7.88µs ± 3% -6.75% (p=0.000 n=15+15) PedersenCommit/non_zero_entries=1-16 39.4µs ± 1% 38.0µs ± 2% -3.59% (p=0.000 n=14+15) PedersenCommit/non_zero_entries=2-16 46.5µs ± 1% 45.2µs ± 1% -2.73% (p=0.000 n=15+15) PedersenCommit/non_zero_entries=4-16 60.9µs ± 2% 59.3µs ± 2% -2.56% (p=0.000 n=15+13) PedersenCommit/non_zero_entries=8-16 89.7µs ± 2% 87.7µs ± 1% -2.17% (p=0.000 n=14+12) PedersenUpdateCommitment/vec_num_entries=1-16 13.9µs ± 2% 8.7µs ± 3% -37.53% (p=0.000 n=15+15) PedersenUpdateCommitment/vec_num_entries=4-16 13.9µs ± 3% 8.7µs ± 3% -37.60% (p=0.000 n=15+15) PedersenUpdateCommitment/vec_num_entries=16-16 14.1µs ± 1% 8.7µs ± 3% -38.32% (p=0.000 n=13+15) PedersenUpdateCommitment/vec_num_entries=64-16 13.9µs ± 0% 8.6µs ± 2% -37.69% (p=0.000 n=11+12) PedersenUpdateCommitment/vec_num_entries=256-16 14.0µs ± 0% 8.8µs ± 2% -37.57% (p=0.000 n=12+12) ``` Which in TL;DR terms means: - ~1.09x speedup in calculating Pedersen Hashes (i.e: trie keys for addresses and storage slots) - ~1.60x speedup for updating a Verkle Trie leaf, since updating a single value of a leaf is dominated by transforming a EC point to a Fr (remember https://i.imgur.com/xhFqybs.png). If you want to see more details you can: - Check the PR I did in `go-ipa` with the new implementation of `Inverse(...)` and how I found it. (Kudos to Consensys guys): https://github.com/crate-crypto/go-ipa/pull/26 - Check the PR in the benchmark repo I’ve been working on that shows the improvements by running again the same benchmarks, but using this new PR changes in `go-ipa`: https://github.com/jsign/verkle-vs-patricia/pull/3 Understanding this optimized Inverse implementation is out of my reach! This is beating even the BLST C benchmark. Apparently, is based on this paper https://github.com/pornin/bingcd/blob/main/doc/bingcd.pdf Probably <@427491045308235776> can really review that PR if looks convincing 😅 Oh nice! Checking the PR, are all of the changes from the goff tool? If so, the PR can be auto merged. I'll need to re-run it to rebase all of the new changes since last release Would be nice if there was a way to check for new releases of goff signal a PR like dependabot 😄 <@774033563732541451> I also added a commit to convert multiple EC points to an Fr: <https://github.com/crate-crypto/go-ipa/commit/1e2c01217e049e941709ca0db25a4d12104b27e3> But I think to benchmark it, you will need to either wait for it to upstreamed to go-verkle. This decreases the reliance on the inverse operation, but gains depend on the average case. The more children that need to be updated per level, the more efficient this is For `Inverse(...)` yes, but the new generated code for all the element field operations is different for other methods and even tests. So.. I extracted the `Inverse (...)` new logic manually to have the least amount of changes migrated, and avoid some new `const` repetition wtih some variables renaming... but in a nutshell, the logic is the same. The new generated code also has completely reworked the tests... I avoided updating that because if I also updated the test, it wasn't really convincing to me how to know if the new implementation does the same as the previous one... so kept the original tests. > Would be nice if there was a way to check for new releases of goff signal a PR like dependabot 😄 Definitely. We could create a Github Action that runs every week on that repo, and does the whole pipeline: 1) `git clone` the gnark-crypto repo 2) Run the `geoff` tool for our case 3) Try to ~hash the folder result of the generated code, and check it against some `lastgnark.sha3` file. If that fails, it means that there's some new thing... probably you'd get some email about a Github Action failing or something. Maybe too automagical... (Step 3 is comparing hashes since we don't have a pristine \"copy\" of the generated code in our repo... if that would be the case, it might be a bit easier just comparing files. So for comparing hashes, we'd have that `lastgnark.sha3` file with the latest known hash of the current known last implementation. Hopefully isn't that confusing!) I'll look into this! Uhm, interesting. AFAIK, the current go-verkle impl only deals with single value updating, but I've seen some intentions to add \"batch updating\", so I guess it might be related to using that. I can craft some benchmark in my repo to compare N-single-updating (like, how it currently works), and compare it to using this single-N-updating. Or maybe that's worth doing in go-ipa as a benchmark there In any case, I agree at EOD the thing that matters is how many slots in a single leaf will get touched on the average case Yeah I think this could work. I'm surprised there is no out of the box solution for this though The other option is the old friend \"watch\" repo for gnark-crypto :P But yeah, that can have some noise. Would be nice to avoid some custom GH Action. For N updates, you can have a particular node being updated K times, and this method would be more performant the larger the K. Would the benchmark take that into consideration? Yeah too much noise, I usually ignore github emails and notifications 😅 Oh you can watch for releases, that would work very well Makes sense. Yeah, something like, compare both updating the commitment if 1 out of 256 got changed, 4 of 256, etc. I'd expect at some point for some N of 256 that your new impl will be faster than doing N times the current one. We could discover what that N number is. Depending on the M/I ratio, it could be 2/3 Cool, I'll take some note to maybe play with this at some point. Sounds good! Thanks for collecting the updated benchmarks, updating goff and making the PR 😬 I'll review and merge it in two to five minutes, just need to double check something You're welcome. Happy to find these improvements. No rush to review! Have merged both PRs, should now be able to merge <https://github.com/jsign/verkle-vs-patricia/pull/3> Great, I'll merge that tomorrow since I want to do an extra commit to update the readme with the latest numbers (including my laptop setup).",
+  "excerpts": [
+    {
+      "author": "ghost.marshmallow",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Made a PR on the PMT, going to tackle the verkle trie structure next",
+      "createdAt": "2022-11-07T09:36:59.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Thanks! Have left a comment asking for clarification 🙂 \n\nBTW If you're into POAPs, there is a POAP for some of the verkle trie repos : https://www.gitpoap.io/gp/625",
+      "createdAt": "2022-11-07T11:54:48.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ghost.marshmallow",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sweet",
+      "createdAt": "2022-11-07T15:59:19.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@353136597522448385> , <@555483069038198827> , <@427491045308235776> , I’ve some interesting news. \n\nI found a more efficient pure Go (no assembly, no special CPU instructions) to calculate the `Inverse(...)`. The impl _should_ be correct since it passes existing `go-ipa` tests which remain untouched.\n\nThis leads to the following improvements in our benchmarks:\n```markdown\nname                  old time/op    new time/op    delta\nFpInverse/go-ipa-16     1.66µs ± 5%    1.12µs ± 2%  -32.34%  (p=0.000 n=15+13)\nFpInverse/go-blst-16    1.42µs ± 1%    1.42µs ± 2%     ~     (p=0.955 n=13+15)\nHashAddress/pedersen_hash-16    6.71µs ± 1%    6.08µs ± 2%  -9.40%  (p=0.000 n=12+15)\nHashStorageSlot/pedersen_hash-16    8.45µs ± 3%    7.88µs ± 3%  -6.75%  (p=0.000 n=15+15)\nPedersenCommit/non_zero_entries=1-16               39.4µs ± 1%    38.0µs ± 2%   -3.59%  (p=0.000 n=14+15)\nPedersenCommit/non_zero_entries=2-16               46.5µs ± 1%    45.2µs ± 1%   -2.73%  (p=0.000 n=15+15)\nPedersenCommit/non_zero_entries=4-16               60.9µs ± 2%    59.3µs ± 2%   -2.56%  (p=0.000 n=15+13)\nPedersenCommit/non_zero_entries=8-16               89.7µs ± 2%    87.7µs ± 1%   -2.17%  (p=0.000 n=14+12)\nPedersenUpdateCommitment/vec_num_entries=1-16      13.9µs ± 2%     8.7µs ± 3%  -37.53%  (p=0.000 n=15+15)\nPedersenUpdateCommitment/vec_num_entries=4-16      13.9µs ± 3%     8.7µs ± 3%  -37.60%  (p=0.000 n=15+15)\nPedersenUpdateCommitment/vec_num_entries=16-16     14.1µs ± 1%     8.7µs ± 3%  -38.32%  (p=0.000 n=13+15)\nPedersenUpdateCommitment/vec_num_entries=64-16     13.9µs ± 0%     8.6µs ± 2%  -37.69%  (p=0.000 n=11+12)\nPedersenUpdateCommitment/vec_num_entries=256-16    14.0µs ± 0%     8.8µs ± 2%  -37.57%  (p=0.000 n=12+12)\n```",
+      "createdAt": "2022-11-07T22:46:51.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which in TL;DR terms means:\n\n- ~1.09x speedup in calculating Pedersen Hashes (i.e: trie keys for addresses and storage slots)\n- ~1.60x speedup for updating a Verkle Trie leaf, since updating a single value of a leaf is dominated by transforming a EC point to a Fr (remember https://i.imgur.com/xhFqybs.png).\n\nIf you want to see more details you can:\n- Check the PR I did in `go-ipa` with the new implementation of `Inverse(...)` and how I found it. (Kudos to Consensys guys): https://github.com/crate-crypto/go-ipa/pull/26 \n- Check the PR in the benchmark repo I’ve been working on that shows the improvements by running again the same benchmarks, but using this new PR changes in `go-ipa`: https://github.com/jsign/verkle-vs-patricia/pull/3\n\nUnderstanding this optimized Inverse implementation is out of my reach! This is beating even the BLST C benchmark. Apparently, is based on this paper https://github.com/pornin/bingcd/blob/main/doc/bingcd.pdf\nProbably <@427491045308235776>  can really review that PR if looks convincing 😅",
+      "createdAt": "2022-11-07T22:49:15.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh nice! Checking the PR, are all of the changes from the goff tool? If so, the PR can be auto merged. I'll need to re-run it to rebase all of the new changes since last release\n\nWould be nice if there was a way to check for new releases of goff signal a PR like dependabot 😄",
+      "createdAt": "2022-11-07T23:03:54.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@774033563732541451> I also added a commit to convert multiple EC points to an Fr: <https://github.com/crate-crypto/go-ipa/commit/1e2c01217e049e941709ca0db25a4d12104b27e3>\n\nBut I think to benchmark it, you will need to either wait for it to upstreamed to go-verkle. This decreases the reliance on the inverse operation, but gains depend on the average case. The more children that need to be updated per level, the more efficient this is",
+      "createdAt": "2022-11-07T23:08:15.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For `Inverse(...)` yes, but the new generated code for all the element field operations is different for other methods and even tests. \nSo.. I extracted the `Inverse (...)` new logic manually to have the least amount of changes migrated, and avoid some new `const` repetition wtih some variables renaming... but in a nutshell, the logic is the same.\nThe new generated code also has completely reworked the tests... I avoided updating that because if I also updated the test, it wasn't really convincing to me how to know if the new implementation does the same as the previous one... so kept the original tests.",
+      "createdAt": "2022-11-07T23:11:23.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Would be nice if there was a way to check for new releases of goff signal a PR like dependabot 😄\nDefinitely. We could create a Github Action that runs every week on that repo, and does the whole pipeline:\n1) `git clone` the gnark-crypto repo\n2) Run the `geoff` tool for our case\n3) Try to ~hash the folder result of the generated code, and check it against some `lastgnark.sha3` file.\nIf that fails, it means that there's some new thing... probably you'd get some email about a Github Action failing or something.\nMaybe too automagical...",
+      "createdAt": "2022-11-07T23:14:07.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(Step 3 is comparing hashes since we don't have a pristine \"copy\" of the generated code in our repo...  if that would be the case, it might be a bit easier just comparing files. So for comparing hashes, we'd have that `lastgnark.sha3` file with the latest known hash of the current known last implementation. Hopefully isn't that confusing!)",
+      "createdAt": "2022-11-07T23:14:41.694000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'll look into this!",
+      "createdAt": "2022-11-07T23:17:22.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Uhm, interesting. AFAIK, the current go-verkle impl only deals with single value updating, but I've seen some intentions to add \"batch updating\", so I guess it might be related to using that.\nI can craft some benchmark in my repo to compare N-single-updating (like, how it currently works), and compare it to using this single-N-updating.",
+      "createdAt": "2022-11-07T23:17:58.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or maybe that's worth doing in go-ipa as a benchmark there",
+      "createdAt": "2022-11-07T23:18:15.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In any case, I agree at EOD the thing that matters is how many slots in a single leaf will get touched on the average case",
+      "createdAt": "2022-11-07T23:18:51.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah I think this could work. I'm surprised there is no out of the box solution for this though",
+      "createdAt": "2022-11-07T23:18:56.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The other option is the old friend \"watch\" repo  for gnark-crypto :P",
+      "createdAt": "2022-11-07T23:20:46.571000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "acdf7fe85d7c275f31cd7e1fcf4c3491a3d5f0bbbbfacc8319586cca9a50bed7"
+        }
+      ]
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But yeah, that can have some noise. Would be nice to avoid some custom GH Action.",
+      "createdAt": "2022-11-07T23:21:12.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For N updates, you can have a particular node being updated K times, and this method would be more performant the larger the K. Would the benchmark take that into consideration?",
+      "createdAt": "2022-11-07T23:23:08.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah too much noise, I usually ignore github emails and notifications 😅",
+      "createdAt": "2022-11-07T23:24:16.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh you can watch for releases, that would work very well",
+      "createdAt": "2022-11-07T23:24:58.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Makes sense. Yeah, something like, compare both updating the commitment if 1 out of 256 got changed, 4 of 256, etc. I'd expect at some point for some N of 256 that your new impl will be faster than doing N times the current one. We could discover what that N number is.",
+      "createdAt": "2022-11-07T23:26:01.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Depending on the M/I ratio, it could be 2/3",
+      "createdAt": "2022-11-07T23:27:34.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Cool, I'll take some note to maybe play with this at some point.",
+      "createdAt": "2022-11-07T23:28:30.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sounds good! Thanks for collecting the updated benchmarks, updating goff and making the PR 😬  \n\nI'll review and merge it in two to five minutes, just need to double check something",
+      "createdAt": "2022-11-07T23:30:42.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You're welcome. Happy to find these improvements.\nNo rush to review!",
+      "createdAt": "2022-11-07T23:31:53.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Have merged both PRs, should now be able to merge <https://github.com/jsign/verkle-vs-patricia/pull/3>",
+      "createdAt": "2022-11-07T23:45:00.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Great, I'll merge that tomorrow since I want to do an extra commit to update the readme with the latest numbers (including my laptop setup).",
+      "createdAt": "2022-11-07T23:49:39.537000+00:00",
+      "attachments": []
+    }
+  ]
+}

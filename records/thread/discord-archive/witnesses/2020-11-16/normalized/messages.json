@@ -1,0 +1,624 @@
+{
+  "schemaVersion": 1,
+  "channel": "witnesses",
+  "date": "2020-11-16",
+  "messageCount": 76,
+  "sourceHash": "f46d23eb0195340ed83620a46d56f3ab9a5a97e0a0a21bb375982ad08ead40b7",
+  "searchText": "2020-11-16 12:50:01.4799|Persisting 0x7150619152ea24aa72f5045ffdb68737a0e584680d617c3d5b020745f2958ee5 witness (5178) 2020-11-16 12:50:01.5184|Broadcasting block 11268977 (0x715061...958ee5) to 11 peers. 2020-11-16 12:50:01.5208|Processed 11268977 | 1,213ms, mgasps 20.55 total 6.16, tps 245.58 total 78.95, bps 0.82 total 0.22, recv queue 0, proc queue 0 <@!482518216019542016> node is ready for serving the mainnet syncs <@!489256758989029405> I'm getting a timeout when attempting to connect. did you change the node ID, port or something else? ah maybe, let me check \"Network\": { \"ActivePeersMaxCount\": 200, \"DiscoveryPort\": 31305, \"P2PPort\": 31505, \"DiagTracerEnabled\": false }, \"JsonRpc\": { \"Enabled\": true, \"TracerTimeout\": 20000, \"Host\": \"0.0.0.0\", \"Port\": 8550 }, nethermind> node.switch(\"94.237.80.80:8550\") \"http://94.237.80.80:8550\" nethermind> eth.blockNumber Request complete in 142982.1µs 11269940.0 nethermind> works for me <@!489256758989029405> and node ID is still the same? let me check nethermind> node.enode Request complete in 42721.0µs \"enode://424c920fb33c5322a7a2e40a3449dd53a822b096e8e65f7c7758a3a4fc880db0e68a945c58d9c14ae1775014fee877c98b14c47c173ed923b2c1c53b9bf57df5@94.237.80.80:31505\" yeah, that's different <@!489256758989029405> with the correct node ID we connect but your node disconnects before sending the auth ack. do you see any errors in your logs? witnesses are regularly ~5000 nodes > <@!489256758989029405> with the correct node ID we connect but your node disconnects before sending the auth ack. do you see any errors in your logs? <@!482518216019542016> did you switch to mainnet settings? I have lots and lots of logs so would not see it <@!489256758989029405> yep, on mainnet well, now it's connected oh, we are full ok we probably were sending you TooManyPeers 200 filled <@!489256758989029405> I just realized we are unlikely to get any NewBlock msgs from your node as you're not mining and when you're jost forwarding NewBlock msgs from other nodes you only send it to a subset of your peers, right? yeah, likely currently we only fetch witnesses when we receive a NewBlock msg but only from the very node that sent you the NewBlock message? yes <@!482518216019542016> One option is that we could decouple from `NewBlock` entirely. We could check in `BeamBlockImporter.preview_transactions` if we have a witness yet for the given header. If not, trigger a coro that asks any peers that support `wit` for the hashes. As long as we only receive empty responses, keep trying every few seconds. <@!489256758989029405> any way you can reserve a few peer slots on your node for us? I'm having a hard time connecting as your node is maxed out I can change the peers to 1000 or set you as a static node would you please send me the details for the static node (enode) enode://9f9f8b2bd6b6de873411358e949efb68b6983cb4e3046083e182a221ac8ef74d06730e27050023a86b5dc4b6969b68da9b5b338fc60624f10642b4db40d57d98@94.63.192.187:30303 try now <@!425615769280315392> another option is to fetch witnesses when we receive NewBlockHashes, as those are supposed to be sent to every peer Is `NewBlockHashes` sent before or after importing the block locally? after we do not send NewBlockHashes to each peer I would need to change that ah wait we do are you connected now? with static peer list? yep and I'm getting NewBlockHashes from you 🙂 great so close 🙂 6000 nodes is 12 messages to Nethermind or 24 to Geth you guys wanna jump in the #witness voice channel? should take miliseconds to get the block ready <@!364458974906548225> I cannot now - I am on a Starkware workshop in parallel and it is all voice and video there I can for the next 8 minutes only before the next session starts but I think I have disabled microphone in discord you wanted to celebrate? 😄 10... 9... 8... (I'm probably just making things more complicated. you two seemed to be figuring out things fine, you can ignore me) hhaha, yeah, it is all fine I mean, we took our time but it will soon be working, I think just wonder how much time it will take us to implement the fetcher on our side but should be possible to have it ready by the end of this week too the cool thing is that witness support seems to be super light on the server 5000 * 32 bytes is 150k it is a small message, negligible <@!489256758989029405> still can't connect reliably, though 😦 sometimes it just disconnects from me during the handshake let me change the number of peers try now take it while it is free 🙂 105/1024 ``` DEBUG 2020-11-16 19:55:03,903 BeamBlockImporter Beam importing <BlockHeader #11270874 0cdc0d24> (239 txns, 12,451,758 gas) ... DEBUG 2020-11-16 19:55:04,193 BeamBlockImporter Missing 0 witnesses out of 5729 for block b'\\x0c\\xdc\\r$\\xed\"\\xcd\\xd03\\xc2T#\\x1a \\xc460i-\\xa9\\xa8\\xa6\\xfd\\x135\\xc1;\\xa3\\xff\\x7f(\\xd4' INFO 2020-11-16 19:55:17,778 MuirGlacierVM Block #11270874-0x0cdc..28d4 reads 5872 unique node hashes, 430 addresses, 184 bytecodes, and 931 storage slots ``` We seem to be fetching all the trie nodes included in the witness hashes for a block, but when importing the block the VM is still pausing because of missing data. And from the reported reads at the end of the block import, it looks like the witness hashes collected by nethermind are incomplete? Hm, interesting, let's see if we can find any more about which pieces are missing. Bytecode? Accounts that are senders/recipients of transactions? Contract storage? Trie refactoring at state root calculation time? Intermediate nodes or leaf nodes? Generally whatever is touched on the trie should be added: ok, I know what may be missing I bet it would be bytecodes I think we have an additional bytecode cache inside the EVM",
+  "excerpts": [
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2020-11-16 12:50:01.4799|Persisting 0x7150619152ea24aa72f5045ffdb68737a0e584680d617c3d5b020745f2958ee5 witness (5178)\n2020-11-16 12:50:01.5184|Broadcasting block 11268977 (0x715061...958ee5) to 11 peers.\n2020-11-16 12:50:01.5208|Processed   11268977 |    1,213ms, mgasps   20.55 total    6.16, tps  245.58 total   78.95, bps    0.82 total    0.22, recv queue 0, proc queue 0",
+      "createdAt": "2020-11-16T12:54:49.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!482518216019542016>",
+      "createdAt": "2020-11-16T12:55:07.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "node is ready for serving the mainnet syncs",
+      "createdAt": "2020-11-16T12:55:18.614000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> I'm getting a timeout when attempting to connect. did you change the node ID, port or something else?",
+      "createdAt": "2020-11-16T16:14:20.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ah maybe, let me check",
+      "createdAt": "2020-11-16T16:21:07.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"Network\": {\n    \"ActivePeersMaxCount\": 200,\n    \"DiscoveryPort\": 31305,\n    \"P2PPort\": 31505,\n    \"DiagTracerEnabled\": false\n  },\n  \"JsonRpc\": {\n    \"Enabled\": true,\n    \"TracerTimeout\": 20000,\n    \"Host\": \"0.0.0.0\",\n    \"Port\": 8550\n  },",
+      "createdAt": "2020-11-16T16:21:44.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "nethermind> node.switch(\"94.237.80.80:8550\")\n\"http://94.237.80.80:8550\"\nnethermind> eth.blockNumber\nRequest complete in 142982.1µs\n11269940.0\nnethermind>",
+      "createdAt": "2020-11-16T16:22:50.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "works for me",
+      "createdAt": "2020-11-16T16:22:52.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> and node ID is still the same?",
+      "createdAt": "2020-11-16T16:23:54.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let me check",
+      "createdAt": "2020-11-16T16:27:47.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "nethermind> node.enode\nRequest complete in 42721.0µs\n\"enode://424c920fb33c5322a7a2e40a3449dd53a822b096e8e65f7c7758a3a4fc880db0e68a945c58d9c14ae1775014fee877c98b14c47c173ed923b2c1c53b9bf57df5@94.237.80.80:31505\"",
+      "createdAt": "2020-11-16T16:28:09.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah, that's different",
+      "createdAt": "2020-11-16T16:30:05.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> with the correct node ID we connect but your node disconnects before sending the auth ack. do you see any errors in your logs?",
+      "createdAt": "2020-11-16T16:33:56.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "witnesses are regularly ~5000 nodes",
+      "createdAt": "2020-11-16T16:34:00.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> <@!489256758989029405> with the correct node ID we connect but your node disconnects before sending the auth ack. do you see any errors in your logs?\n<@!482518216019542016> did you switch to mainnet settings?",
+      "createdAt": "2020-11-16T16:34:24.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have lots and lots of logs so would not see it",
+      "createdAt": "2020-11-16T16:34:34.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> yep, on mainnet",
+      "createdAt": "2020-11-16T16:35:07.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "well, now it's connected",
+      "createdAt": "2020-11-16T16:35:11.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "oh, we are full",
+      "createdAt": "2020-11-16T16:35:43.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2020-11-16T16:35:44.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we probably were sending you TooManyPeers",
+      "createdAt": "2020-11-16T16:35:51.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "200 filled",
+      "createdAt": "2020-11-16T16:35:55.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> I just realized we are unlikely to get any NewBlock msgs from your node as you're not mining and when you're jost forwarding NewBlock msgs from other nodes you only send it to a subset of your peers, right?",
+      "createdAt": "2020-11-16T16:40:00.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah, likely",
+      "createdAt": "2020-11-16T16:40:25.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "currently we only fetch witnesses when we receive a NewBlock msg",
+      "createdAt": "2020-11-16T16:41:34.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but only from the very node that sent you the NewBlock message?",
+      "createdAt": "2020-11-16T16:57:54.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2020-11-16T16:58:29.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!482518216019542016> One option is that we could decouple from `NewBlock` entirely. We could check in `BeamBlockImporter.preview_transactions` if we have a witness yet for the given header. If not, trigger a coro that asks any peers that support `wit` for the hashes. As long as we only receive empty responses, keep trying every few seconds.",
+      "createdAt": "2020-11-16T16:58:54.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> any way you can reserve a few peer slots on your node for us? I'm having a hard time connecting as your node is maxed out",
+      "createdAt": "2020-11-16T17:00:04.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can change the peers to 1000 or set you as a static node",
+      "createdAt": "2020-11-16T17:00:25.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "would you please send me the details for the static node (enode)",
+      "createdAt": "2020-11-16T17:00:34.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "enode://9f9f8b2bd6b6de873411358e949efb68b6983cb4e3046083e182a221ac8ef74d06730e27050023a86b5dc4b6969b68da9b5b338fc60624f10642b4db40d57d98@94.63.192.187:30303",
+      "createdAt": "2020-11-16T17:03:09.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "try now",
+      "createdAt": "2020-11-16T17:04:10.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!425615769280315392> another option is to fetch witnesses when we receive NewBlockHashes, as those are supposed to be sent to every peer",
+      "createdAt": "2020-11-16T17:04:49.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is `NewBlockHashes` sent before or after importing the block locally?",
+      "createdAt": "2020-11-16T17:05:47.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "after",
+      "createdAt": "2020-11-16T17:06:31.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we do not send NewBlockHashes to each peer",
+      "createdAt": "2020-11-16T17:11:35.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I would need to change that",
+      "createdAt": "2020-11-16T17:11:51.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ah wait",
+      "createdAt": "2020-11-16T17:12:03.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we do",
+      "createdAt": "2020-11-16T17:12:04.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "are you connected now?",
+      "createdAt": "2020-11-16T17:12:57.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "with static peer list?",
+      "createdAt": "2020-11-16T17:13:01.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yep",
+      "createdAt": "2020-11-16T17:16:25.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and I'm getting NewBlockHashes from you 🙂",
+      "createdAt": "2020-11-16T17:16:37.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "great",
+      "createdAt": "2020-11-16T17:20:36.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so close 🙂",
+      "createdAt": "2020-11-16T17:20:44.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "6000 nodes is 12 messages to Nethermind or 24 to Geth",
+      "createdAt": "2020-11-16T17:21:28.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you guys wanna jump in the #witness voice channel?",
+      "createdAt": "2020-11-16T17:21:35.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "should take miliseconds to get the block ready",
+      "createdAt": "2020-11-16T17:21:41.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!364458974906548225> I cannot now - I am on a Starkware workshop in parallel and it is all voice and video there",
+      "createdAt": "2020-11-16T17:22:12.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can for the next 8 minutes only before the next session starts",
+      "createdAt": "2020-11-16T17:22:30.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but I think I have disabled microphone in discord",
+      "createdAt": "2020-11-16T17:22:45.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you wanted to celebrate? 😄",
+      "createdAt": "2020-11-16T17:22:58.309000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "10... 9... 8...",
+      "createdAt": "2020-11-16T17:23:15.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(I'm probably just making things more complicated.  you two seemed to be figuring out things fine, you can ignore me)",
+      "createdAt": "2020-11-16T17:23:53.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hhaha, yeah, it is all fine",
+      "createdAt": "2020-11-16T17:24:05.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I mean, we took our time",
+      "createdAt": "2020-11-16T17:24:16.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but it will soon be working, I think",
+      "createdAt": "2020-11-16T17:24:36.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "just wonder how much time it will take us to implement the fetcher on our side",
+      "createdAt": "2020-11-16T17:24:50.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but should be possible to have it ready by the end of this week too",
+      "createdAt": "2020-11-16T17:25:01.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the cool thing is that witness support seems to be super light on the server",
+      "createdAt": "2020-11-16T17:25:27.913000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "5000 * 32 bytes is 150k",
+      "createdAt": "2020-11-16T17:25:43.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is a small message, negligible",
+      "createdAt": "2020-11-16T17:26:23.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> still can't connect reliably, though 😦",
+      "createdAt": "2020-11-16T18:15:46.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sometimes it just disconnects from me during the handshake",
+      "createdAt": "2020-11-16T18:16:49.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let me change the number of peers",
+      "createdAt": "2020-11-16T18:18:14.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "try now",
+      "createdAt": "2020-11-16T18:18:54.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "take it while it is free 🙂 105/1024",
+      "createdAt": "2020-11-16T18:19:46.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```\n   DEBUG  2020-11-16 19:55:03,903     BeamBlockImporter  Beam importing <BlockHeader #11270874 0cdc0d24> (239 txns, 12,451,758 gas) ...\n   DEBUG  2020-11-16 19:55:04,193     BeamBlockImporter  Missing 0 witnesses out of 5729 for block b'\\x0c\\xdc\\r$\\xed\"\\xcd\\xd03\\xc2T#\\x1a \\xc460i-\\xa9\\xa8\\xa6\\xfd\\x135\\xc1;\\xa3\\xff\\x7f(\\xd4'\n    INFO  2020-11-16 19:55:17,778         MuirGlacierVM  Block #11270874-0x0cdc..28d4 reads 5872 unique node hashes, 430 addresses, 184 bytecodes, and 931 storage slots\n```",
+      "createdAt": "2020-11-16T20:06:21.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We seem to be fetching all the trie nodes included in the witness hashes for a block, but when importing the block the VM is still pausing because of missing data. And from the reported reads at the end of the block import, it looks like the witness hashes collected by nethermind are incomplete?",
+      "createdAt": "2020-11-16T20:09:30.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hm, interesting, let's see if we can find any more about which pieces are missing. Bytecode? Accounts that are senders/recipients of transactions? Contract storage? Trie refactoring at state root calculation time? Intermediate nodes or leaf nodes?",
+      "createdAt": "2020-11-16T23:34:57.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Generally whatever is touched on the trie should be added:",
+      "createdAt": "2020-11-16T23:46:48.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-11-16T23:46:49.606000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "902021c6417e4dfa8146d1181ac24d3ff09e3ad1b4d9996e8d18df519451e32c"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, I know what may be missing",
+      "createdAt": "2020-11-16T23:48:39.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I bet it would be bytecodes",
+      "createdAt": "2020-11-16T23:48:51.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think we have an additional bytecode cache inside the EVM",
+      "createdAt": "2020-11-16T23:49:04.821000+00:00",
+      "attachments": []
+    }
+  ]
+}

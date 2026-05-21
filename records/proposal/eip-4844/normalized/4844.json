@@ -1,0 +1,37 @@
+{
+  "id": 4844,
+  "title": "EIP-4844: Shard Blob Transactions",
+  "status": "Final",
+  "description": "Shard Blob Transactions scale data-availability of Ethereum in a simple, forwards-compatible manner.",
+  "laymanDescription": "",
+  "author": "Vitalik Buterin (@vbuterin), Dankrad Feist (@dankrad), Diederik Loerakker (@protolambda), George Kadianakis (@asn-d6), Matt Garnett (@lightclient), Mofi Taiwo (@Inphi), Ansgar Dietrichs (@adietrichs)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2022-02-25",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-4844-shard-blob-transactions/8430",
+  "requires": [
+    "1559",
+    "2718",
+    "2930",
+    "4895"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Dencun",
+      "statusHistory": [
+        {
+          "status": "Included",
+          "call": null,
+          "date": null
+        }
+      ]
+    }
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract Introduce a new transaction format for \"blob-carrying transactions\" which contain a large amount of data that cannot be accessed by EVM execution, but whose commitment can be accessed. The format is intended to be fully compatible with the format that will be used in full sharding. ## Motivation Rollups are in the short and medium term, and possibly in the long term, the only trustless scaling solution for Ethereum. Transaction fees on L1 have been very high for months and there is greater urgency in doing anything required to help facilitate an ecosystem-wide move to rollups. Rollups are significantly reducing fees for many Ethereum users: Optimism and Arbitrum frequently provide fees that are ~3-8x lower than the Ethereum base layer itself, and ZK rollups, which have better data compression and can avoid including signatures, have fees ~40-100x lower than the base layer. However, even these fees are too expensive for many users. The long-term solution to the long-term inadequacy of rollups by themselves has always been data sharding, which would add ~16 MB per block of dedicated data space to the chain that rollups could use. However, data sharding will still take a considerable amount of time to finish implementing and deploying. This EIP provides a stop-gap solution until that point by implementing the _transaction format_ that would be used in sharding, but not actually sharding those transactions. Instead, the data from this transaction format is simply part of the beacon chain and is fully downloaded by all consensus nodes (but can be deleted after only a relatively short delay). Compared to full data sharding, this EIP has a reduced cap on the number of these transactions that can be included, corresponding to a target of ~0.375 MB per block and a limit of ~0.75 MB. ## Specification ### Parameters | Constant | Value | | - | - | | `BLOB_TX_TYPE` | `Bytes1(0x03)` | | `BYTES_PER_FIELD_ELEMENT` | `32` | | `FIELD_ELEMENTS_PER_BLOB` | `4096` | | `BLS_MODULUS` | `52435875175126190479447740508185965837690552500527637822603658699938581184513` | | `VERSIONED_HASH_VERSION_KZG` | `Bytes1(0x01)` | | `POINT_EVALUATION_PRECOMPILE_ADDRESS` | `Bytes20(0x0A)` | | `POINT_EVALUATION_PRECOMPILE_GAS` | `50000` | | `MAX_BLOB_GAS_PER_BLOCK` | `786432` | | `TARGET_BLOB_GAS_PER_BLOCK` | `393216` | | `MIN_BASE_FEE_PER_BLOB_GAS` | `1` | | `BLOB_BASE_FEE_UPDATE_FRACTION` | `3338477` | | `GAS_PER_BLOB` | `2**17` | | `HASH_OPCODE_BYTE` | `Bytes1(0x49)` | | `HASH_OPCODE_GAS` | `3` | | [`MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS`](https://github.com/ethereum/consensus-specs/blob/4de1d156c78b555421b72d6067c73b614ab55584/configs/mainnet.yaml#L148) | `4096` | ### Type aliases | Type | Base type | Additional checks | | - | - | - | | `Blob` | `ByteVector[BYTES_PER_FIELD_ELEMENT * FIELD_ELEMENTS_PER_BLOB]` | | | `VersionedHash` | `Bytes32` | | | `KZGCommitment` | `Bytes48` | Perform IETF BLS signature \"KeyValidate\" check but do allow the identity point | | `KZGProof` | `Bytes48` | Same as for `KZGCommitment` | ### Cryptographic Helpers Throughout this proposal we use cryptographic methods and classes defined in the corresponding [consensus 4844 specs](https://github.com/ethereum/consensus-specs/blob/86fb82b221474cc89387fa6436806507b3849d88/specs/deneb). Specifically, we use the following methods from [`polynomial-commitments.md`](https://github.com/ethereum/consensus-specs/blob/86fb82b221474cc89387fa6436806507b3849d88/specs/deneb/polynomial-commitments.md): - [`verify_kzg_proof()`](https://github.com/ethereum/consensus-specs/blob/86fb82b221474cc89387fa6436806507b3849d88/specs/deneb/polynomial-commitments.md#verify_kzg_proof) - [`verify_blob_kzg_proof_batch()`](https://github.com/ethereum/consensus-specs/blob/86fb82b221474cc89387fa6436806507b3849d88/specs/deneb/polynomial-commitments.md#verify_blob_kzg_proof_batch) ### Helpers ```python def kzg_to_versioned_hash(commitment: KZGCommitment) -> VersionedHash: return VERSIONED_HASH_VERSION_KZG + sha256(commitment)[1:] ``` Approximates `factor * e ** (numerator / denominator)` using Taylor expansion: ```python def fake_exponential(factor: int, numerator: int, denominator: int) -> int: i = 1 output = 0 numerator_accum = factor * denominator while numerator_accum > 0: output += numerator_accum numerator_accum = (numerator_accum * numerator) // (denominator * i) i += 1 return output // denominator ``` ### Blob transaction We introduce a new type of [EIP-2718](./eip-2718.md) transaction, \"blob transaction\", where the `TransactionType` is `BLOB_TX_TYPE` and the `TransactionPayload` is the RLP serialization of the following `TransactionPayloadBody`: ``` [chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, max_fee_per_blob_gas, blob_versioned_hashes, y_parity, r, s] ``` The fields `chain_id`, `nonce`, `max_priority_fee_per_gas`, `max_fee_per_gas`, `gas_limit`, `value`, `data`, and `access_list` follow the same semantics as [EIP-1559](./eip-1559.md). The field `to` deviates slightly from the semantics with the exception that it MUST NOT be `nil` and therefore must always represent a 20-byte address. This means that blob transactions cannot have the form of a create transaction. The field `max_fee_per_blob_gas` is a `uint256` and the field `blob_versioned_hashes` represents a list of hash outputs from `kzg_to_versioned_hash`. The [EIP-2718](./eip-2718.md) `ReceiptPayload` for this transaction is `rlp([status, cumulative_transaction_gas_used, logs_bloom, logs])`. #### Signature The signature values `y_parity`, `r`, and `s` are calculated by constructing a secp256k1 signature over the following digest: `keccak256(BLOB_TX_TYPE || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, max_fee_per_blob_gas, blob_versioned_hashes]))`. ### Header extension The current header encoding is extended with two new 64-bit unsigned integer fields: - `blob_gas_used` is the total amount of blo"
+}

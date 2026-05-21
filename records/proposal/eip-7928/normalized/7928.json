@@ -3,13 +3,17 @@
   "title": "EIP-7928: Block-Level Access Lists",
   "status": "Draft",
   "description": "Enforced block access lists with state locations and post-transaction state diffs",
+  "laymanDescription": "This introduces access lists at the block level rather than individual transactions, dramatically reducing gas costs for applications that access similar state and enabling new optimization patterns.",
   "author": "Toni Wahrstätter (@nerolation), Dankrad Feist (@dankrad), Francesco D`Amato (@fradamt), Jochem Brouwer (@jochem-brouwer), Ignacio Hagopian (@jsign), Felipe Selmo (@fselmo), Rahul (@raxhvl), Stefan (@qu0b)",
   "type": "Standards Track",
   "category": "Core",
   "createdDate": "2025-03-31",
   "discussionLink": "https://ethereum-magicians.org/t/eip-7928-block-level-access-lists/23337",
-  "reviewer": "bot",
-  "layer": "EL",
+  "requires": [],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
   "forkRelationships": [
     {
       "forkName": "Glamsterdam",
@@ -42,15 +46,6 @@
       ]
     }
   ],
-  "laymanDescription": "This introduces access lists at the block level rather than individual transactions, dramatically reducing gas costs for applications that access similar state and enabling new optimization patterns.",
-  "northStarAlignment": {
-    "scaleL1": {
-      "description": "Significantly reduces gas costs for state access through block-level optimization, improving overall network efficiency and throughput."
-    },
-    "improveUX": {
-      "description": "Lower gas costs for complex applications and improved predictability for applications with similar state access patterns."
-    }
-  },
   "stakeholderImpacts": {
     "endUsers": {
       "description": "Lower gas costs for complex applications, especially DeFi protocols and applications that access similar state across multiple transactions."
@@ -83,5 +78,7 @@
     "Improves block processing efficiency",
     "Provides more predictable gas costs for complex applications"
   ],
-  "tradeoffs": null
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP introduces Block-Level Access Lists (BALs) that record all accounts and storage locations accessed during block execution, along with their post-execution values. BALs enable parallel disk reads, parallel transaction validation, parallel state root computation and executionless state updates. ## Motivation Transaction execution cannot be parallelized without knowing in advance which addresses and storage slots will be accessed. While [EIP-2930](./eip-2930.md) introduced optional transaction access lists, they are not enforced. This proposal enforces access lists at the block level, enabling: - Parallel disk reads and transaction execution - Parallel post-state root calculation - State reconstruction without executing transactions - Reduced execution time to `parallel IO + parallel EVM` ## Specification ### Block Structure Modification We introduce a new field to the block header, `block_access_list_hash`, which contains the Keccak-256 hash of the RLP-encoded block access list. When no state changes are present, this field is the hash of an empty RLP list `0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347`, i.e. `keccak256(rlp.encode([]))`. ```python class Header: # Existing fields ... block_access_list_hash: Hash32 = keccak256(rlp.encode(block_access_list)) ``` The `BlockAccessList` is not included in the block body. The EL stores BALs separately and transmits them as a field in the `ExecutionPayload` via the engine API. The BAL is RLP-encoded as a list of `AccountChanges`. When no state changes are present, this field is the empty RLP list `0xc0`, i.e. `rlp.encode([])`. ### RLP Data Structures BALs use RLP encoding following the pattern: `address -> field -> block_access_index -> change`. ```python # Type aliases for RLP encoding Address = bytes20 # 20-byte Ethereum address StorageKey = uint256 # Storage slot key StorageValue = uint256 # Storage value Bytecode = bytes # Variable-length contract bytecode BlockAccessIndex = uint16 # Block access index (0 for pre-execution, 1..n for transactions, n+1 for post-execution) Balance = uint256 # Post-transaction balance in wei Nonce = uint64 # Account nonce # Core change structures (RLP encoded as lists) # StorageChange: [block_access_index, new_value] StorageChange = [BlockAccessIndex, StorageValue] # BalanceChange: [block_access_index, post_balance] BalanceChange = [BlockAccessIndex, Balance] # NonceChange: [block_access_index, new_nonce] NonceChange = [BlockAccessIndex, Nonce] # CodeChange: [block_access_index, new_code] CodeChange = [BlockAccessIndex, Bytecode] # SlotChanges: [slot, [changes]] # All changes to a single storage slot SlotChanges = [StorageKey, List[StorageChange]] # AccountChanges: [address, storage_changes, storage_reads, balance_changes, nonce_changes, code_changes] # All changes for a single account, grouped by field type AccountChanges = [ Address, # address List[SlotChanges], # storage_changes (slot -> [block_access_index -> new_value]) List[StorageKey], # storage_reads (read-only storage keys) List[BalanceChange], # balance_changes ([block_access_index -> post_balance]) List[NonceChange], # nonce_changes ([block_access_index -> new_nonce]) List[CodeChange] # code_changes ([block_access_index -> new_code]) ] # BlockAccessList: List of AccountChanges BlockAccessList = List[AccountChanges] ``` ### Scope and Inclusion **`BlockAccessList`** is the set of all addresses accessed during block execution. It **MUST** include: - Addresses with state changes (storage, balance, nonce, or code). - Addresses accessed without state changes, including: - Targets of `BALANCE`, `EXTCODESIZE`, `EXTCODECOPY`, `EXTCODEHASH` opcodes - Targets of `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL` (even if they revert; see [Gas Validation Before State Access](#gas-validation-before-state-access) for inclusion conditions) - Target addresses of `CREATE`/`CREATE2` if the target account is accessed - Deployed contract addresses from calls with initcode to empty addresses (e.g., calling `0x0` with initcode) - Transaction sender and recipient addresses (even for zero-value transfers) - COINBASE address if the block contains transactions or withdrawals to the COINBASE address - Beneficiary addresses for `SELFDESTRUCT` - System contract addresses accessed during pre/post-execution; the system caller address, `SYSTEM_ADDRESS` (`0xfffffffffffffffffffffffffffffffffffffffe`), MUST NOT be included unless it experiences state access itself - Withdrawal recipient addresses, regardless of whether the withdrawal amount is non-zero - Precompiled contracts when called or accessed Addresses with no state changes **MUST** still be present with empty change lists. Entries from an [EIP-2930](./eip-2930.md) access list **MUST NOT** be included automatically. Only addresses and storage slots that are actually touched or changed during execution are recorded. ### Block Access List Size Constraint The block access list is constrained by the block gas limit rather than a fixed maximum number of items. The constraint is defined as: ``` bal_items <= block_gas_limit // ITEM_COST ``` Where: - `bal_items = storage_keys + addresses` - `ITEM_COST = 2000` The `storage_keys` is the total number of storage keys across all accounts, and `addresses` is the total number of unique addresses accessed in the block. With [EIP-7981](./eip-7981.md), the cheapest way to add an item to the BAL is a cold `SLOAD` at `COLD_SLOAD_COST` (2100, as defined in [EIP-2929](./eip-2929.md)). `ITEM_COST` is set deliberately below this minimum to create a buffer of approximately `block_gas_limit / 42000` extra items, which absorbs BAL entries from system contract execution (e.g., [EIP-2935](./eip-2935.md), [EIP-4788](./eip-4788.md), [EIP-7002](./eip-7002.md), [EIP-7251](./eip-7251.md)) and withdrawal recipients ([EIP-4895](./eip-4895.md)) that do not consume block gas. ### Gas Validation Before State Access State-accessing opcodes perform gas validation in two phases: - *"
 }

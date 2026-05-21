@@ -1,0 +1,448 @@
+{
+  "schemaVersion": 1,
+  "channel": "distributed-validators",
+  "date": "2020-07-17",
+  "messageCount": 54,
+  "sourceHash": "f1d33aa4d11c2ca089465bf5ec77e16bb5e3cfcb7b014e6423bf18c5bb7aa129",
+  "searchText": "Hello Everyone, thank you for connecting to yesterday's community call! For reference and those who were unable to attend, I have attached the details of the call recording and presentation below. Recording Link: https://consensys.zoom.us/rec/play/v5F-d-ms_W03HdyX5gSDVv99W9S6fK6shyEXqfIKyEy0UyYLY1eiZOEWMLY8ml-53JjWei8U80O9uX_E Password: 5x#.0wO1 Presentation: https://docs.google.com/presentation/d/1XiHTOENFDbMHzvS2apd1tCNHkzgJ3KutryB8om5Ur6I/edit#slide=id.p Hey y’all, tux from NuCypher here in https://notes.ethereum.org/@adiasg/preventing-eth2-validator-failure#Type-2 I'm curious as to the rationale behind the BNs deciding on the message to provide the VCs. From my point of view, it would make more sense for the BNs to stay as they are today (_i.e._ possibly untrusted state providers) and instead alter VCs so they can choose which BNs they want to trust, either individually or in aggregate. This would allow each VC to make their own decisions about what they trust enough to sign without requiring protocol changes, additional messages to manage leadership, _etc._ As for signing, separating out the signer functionality from the VC gives benefits. Signers would be the gatekeepers to signing, so would contain slashing protection (in phase 0, at least). This would make VCs stateless, so easier to manage and build resilient configurations, and having an m/n set of signers would result in security and resiliency. So: BN manages chain state, VC decides what to sign, and signer does the signing. Linkage betwen entities is loose, in that any VC can use any ephemeral combination of BCs to obtain state and VCs can use any combination of signers that meet its signing needs. Also, BNs don't need to worry about aggregating signatures from VCs as the VC carries out the aggregation and the BN is just presented with a valid signature for a given attestation. Which means they don't know or care if a VC is standalone, running in some threshold system, trusting the BC, using internal voting to decide on state, _etc._ re type2: AFAIK vc are keeping track with previous signed messages, at least thats the case in prysm and lh. So I also dont understand why bns should decide on the message. I mean they could decide but this would lead unnecessarily to rejections by the vcs if that would result in a slashable msg. What is meant by \"good\" msg from bns? Is there a ttl or how do you decide if it's not \"good\". I don't undestand, if you want the VC to decide on which message to sign, it has to be almost a full beacon node Thats true. I think I might have misunderstood the proposed procedure. What does \"good\" msg mean in this context? Also, I dont see how vcs know at the end what msgs other vcs have signed and what msg has been broadcast. As vcs are keeping track of signed msgs, it is crucial that they know what has been signed to avoid slashings. IMO it would require some kind of round where they aknowledge that the threshold has been reached and to form shared knowledge. In the current proposal we aggregate this knowledge at bn level. But it's vc's duty to avoid slashings so they would need to know. I believe every VC should be paired with a BN 🙂 Besides that, what's the procedure in case there is no threshold reached by vcs? Also is there a ttl? > I believe every VC should be paired with a BN 🙂 <@!555483069038198827> at Prysmatic, when we originally designed the VC <> BN architecture back in Devcon Prague, the purpose of a VC was solely to serve as a lightweight wrapper around keys, with a strong assumption of trust. It was only later that it was recommended we include slashing protection in the VC. If SSV's require us to move back to the original, \"full-trust\" paradigm between VC <> BN I think that is fine Yes, I actually think this is necessary even without SSVs See this thread: https://github.com/ethereum/eth2.0-specs/issues/1969 > It was only later that it was recommended we include slashing protection in the VC. This is what I remember too from that session, although others (who weren't a part of that group) remember differently. Those are the notes from that discussion wow my handwriting is embarrassing 😅 I am not necessarily advocating that we stick to the same setup moving forward tho. I've wanted the VC to (1) be a small piece of software with a very limited communications surface and (2) to be able to protect itself from slashing since early. not sure when (2) came around (1) is very important in an environment where we have hot keys. (2) opens up many more designs but is not 1000% critical that said, if/when we move to fraud proofs for bad state transitions, it would be best to preserve optionlity on (2) if at all possible, but it does seem like a hard problem. we should maintain (1) as an invariant as it simplifies a lot of things agreed and opens up more designs (even without (2)) -- e.g. trust one BN but broadcast to many or load balance many vals against many trusted BNs Unfortunately, the roll of (2) becomes very similar (operationally) to a BN in a world with fraud proofs yes, it does we can also introduce a new notion of a \"state transition only bn\" although with statelessness or some sort of pre-state passing, the VC could just have state transition logic (no networking, block/state db, etc) right not a great compromise imo but something to consider This could be run on any trusted hardware that is able to execute those and would protect from slashing like the current design right it's basically the same as putting it into the VC, but without having to duplicate code and with some separation of concerns in terms of what code can actually access the key. The code that has full key access (VC) still stays simple If it is possible to run multiple state transition functions as well as many BNs and VCs with (BFT) agreement, then I'd argue either we're overpaying for security, or our code is very unreliable. it is certainly possible, always a matter of resources > <@!144468805697929216> > in https://notes.ethereum.org/@adiasg/preventing-eth2-validator-failure#Type-2 I'm curious as to the rationale behind the BNs deciding on the message to provide the VCs. That is how it works today. The VC requests the message to be signed from the BN. > So: BN manages chain state, VC decides what to sign, and signer does the signing. The first two things are tightly coupled (and gets even more so in Phase 1+). I don't see an immediate advantage by making these two components be able to not trust each other. It would result in a lot of redundancy without any benefits -- chain state will have to be managed at both BN and VC. (see https://github.com/ethereum/eth2.0-specs/issues/1969#issuecomment-659008908) > <@!311126836371259402> > What is meant by \"good\" msg from bns? Is there a ttl or how do you decide if it's not \"good\". Meaning that the message shouldn't be one that causes a slashing, from the perspective of that VC. > <@!555483069038198827> > This could be run on any trusted hardware that is able to execute those and would protect from slashing like the current design Oooooooh this is a neat solution. Not sure how much effort is needed for implementing such software, but makes perfect sense in theory! <@!544848504078598144> the BN doesn't send a message to the VC, the VC requests it. This is an important distinction, as the VC can decide from where to fetch its data to sign (including such items as random sampling or even proofs to confirm the data it is signing is correct) without needing the trust relationship. As for the BN/VC coupling, in phase 0 they are not coupled because although a bad proposal or attestation would not make the validator any money it is not a slashable offense. As such, there is no trust requirement between the two: if a VC decides that a BN is feeding it bad information it can go talk to a different one without any significant downside. If a signer cannot potect against slashing without knowing a significant amount about state it has a serious impact on validator security. There needs to be some consideration of the balance between network security and validator security: so far it has all been in the favour of the network, and if that continues it will make it hard for people to stake. I think type2 implies a different relationship of bn/vc as it is implemented in clients currently, eg vc getting to know what msg reached threshhold from bn or bn giving vc msg to sign instead of requesting. Not that I am per se against it but I think it needs more clarification in the doc. > If a signer cannot potect against slashing without knowing a significant amount about state it has a serious impact on validator security. For phase 1+, the slashing rules are (yet to be finalized, but generally seem to be) such that they require some state handling. This has minimal impact on the performance & security of a monolithic, trusted (BN+VC) client application. If the trust assumptions between the BN and VC change, wherein the VC doesn't trust the BN's output to protect against slashing (like in SSVs), then the VC will have to re-verify it. This re-verification process (that requires state handling in the VC) is caused by the change in trust assumptions, and not really the validator architecture itself. > This has minimal impact on the performance & security of a monolithic, trusted (BN+VC) client application. Perhaps, but the point I keep trying to make is that there is no trust required between BN and VC in phase 0, and people are building solutions on that basis. For example, HSMs could have a perfectly valid anti-slashing system built in to them for phase 0 that would suddenly be inadequate come phase 1. If there needs to be a move from BN->VC->signer to BN+VC->signer then it either needs to be built with the ability for phase 1 validators to continue with valid phase 0 architectures or there needs to be a way for phase 0 validators to regain control of their funds before phase 1 lands. I think we need to clearly communicate that unless your HSM is powerful enough to run full state transitions, it is not going to protect you from slashing we cannot let the accident that slashing protection was very easy (computationally) in phase 0 lock us into a future where we can't do more complex fraud proofs > There needs to be some consideration of the balance between network security and validator security: so far it has all been in the favour of the network, and if that continues it will make it hard for people to stake. <@!144468805697929216> Agree. And we must not forget that the two are inextricably linked. If we make design decisions that make it harder for folks to run their own validators, then this will inevitably have a centralising effect on voting power within the network (even with secret-shared). This makes it easier for a majority to be coerced into being dishonest (through the influence of a cartel, or government coercion on exchanges, for example). > we cannot let the accident that slashing protection was very easy (computationally) in phase 0 lock us into a future where we can't do more complex fraud proofs <@!555483069038198827> If fraud proofs are the motivating factor, then we also have to take into account that raising the barrier to staking will have a centralising effect on voting power, which somewhat paradoxically increases the need for fraud proofs... This brings me to a paragraph that you wrote in the discussion here: https://github.com/ethereum/eth2.0-specs/issues/1969 > We can potentially get *a bit* more decentralisation (by making secure staking more accessible), by leaving out all these extra fraud proofs. The disadvantage is that we lose a lot of protection from dishonest majorities that we were planning to have with Eth2. I reckon that the latter are more important and that it's ok to have a slightly higher bar for staking. I see this as the crux of the matter. Why do we assume that making secure staking more accessible has the potential to lead to *a bit* more",
+  "excerpts": [
+    {
+      "author": "maraschmiedt6542",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Hello Everyone, \n\nthank you for connecting to yesterday's community call!\n\nFor reference and those who were unable to attend, I have attached the details of the call recording and presentation below. \n\nRecording Link:\nhttps://consensys.zoom.us/rec/play/v5F-d-ms_W03HdyX5gSDVv99W9S6fK6shyEXqfIKyEy0UyYLY1eiZOEWMLY8ml-53JjWei8U80O9uX_E\nPassword: 5x#.0wO1\n\nPresentation:\nhttps://docs.google.com/presentation/d/1XiHTOENFDbMHzvS2apd1tCNHkzgJ3KutryB8om5Ur6I/edit#slide=id.p",
+      "createdAt": "2020-07-17T10:40:26.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuxxy_",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Hey y’all, tux from NuCypher here",
+      "createdAt": "2020-07-17T11:34:06.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "in https://notes.ethereum.org/@adiasg/preventing-eth2-validator-failure#Type-2 I'm curious as to the rationale behind the BNs deciding on the message to provide the VCs.\n\nFrom my point of view, it would make more sense for the BNs to stay as they are today (_i.e._ possibly untrusted state providers) and instead alter VCs so they can choose which BNs they want to trust, either individually or in aggregate.\n\nThis would allow each VC to make their own decisions about what they trust enough to sign without requiring protocol changes, additional messages to manage leadership, _etc._\n\nAs for signing, separating out the signer functionality from the VC gives benefits.  Signers would be the gatekeepers to signing, so would contain slashing protection (in phase 0, at least).  This would make VCs stateless, so easier to manage and build resilient configurations, and having an m/n set of signers would result in security and resiliency.\n\nSo: BN manages chain state, VC decides what to sign, and signer does the signing.  Linkage betwen entities is loose, in that any VC can use any ephemeral combination of BCs to obtain state and VCs can use any combination of signers that meet its signing needs.\n\nAlso, BNs don't need to worry about aggregating signatures from VCs as the VC carries out the aggregation and the BN is just presented with a valid signature for a given attestation.  Which means they don't know or care if a VC is standalone, running in some threshold system, trusting the BC, using internal voting to decide on state, _etc._",
+      "createdAt": "2020-07-17T11:58:17.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "re type2: AFAIK vc are keeping track with previous signed messages, at least thats the case in prysm and lh. So I also dont understand why bns should decide on the message. I mean they could decide but this would lead unnecessarily to rejections by the vcs if that would result in a slashable msg.",
+      "createdAt": "2020-07-17T14:39:14.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "What is meant by \"good\" msg from bns?  Is there a ttl or how do you decide if it's not \"good\".",
+      "createdAt": "2020-07-17T14:40:48.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I don't undestand, if you want the VC to decide on which message to sign, it has to be almost a full beacon node",
+      "createdAt": "2020-07-17T14:46:17.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Thats true. I think I might have misunderstood the proposed procedure. What does \"good\" msg mean in this context?",
+      "createdAt": "2020-07-17T14:54:49.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Also, I dont see how vcs know at the end what msgs other vcs have signed and what msg has been broadcast. As vcs are keeping track of signed msgs, it is crucial that they know what has been signed to avoid slashings. IMO it would require some kind of round where they aknowledge that the threshold has been reached and to form shared knowledge.",
+      "createdAt": "2020-07-17T15:10:52.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "In the current proposal we aggregate this knowledge at bn level. But  it's vc's duty to avoid slashings so they would need to know.",
+      "createdAt": "2020-07-17T15:12:32.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I believe every VC should be paired with a BN 🙂",
+      "createdAt": "2020-07-17T15:13:21.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Besides that, what's the procedure in case there is no threshold reached by vcs? Also is there a ttl?",
+      "createdAt": "2020-07-17T15:13:23.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulj",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> I believe every VC should be paired with a BN 🙂\n<@!555483069038198827> at Prysmatic, when we originally designed the VC <> BN architecture back in Devcon Prague, the purpose of a VC was solely to serve as a lightweight wrapper around keys, with a strong assumption of trust. It was only later that it was recommended we include slashing protection in the VC. If SSV's require us to move back to the original, \"full-trust\" paradigm between VC <> BN I think that is fine",
+      "createdAt": "2020-07-17T15:19:55.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yes, I actually think this is necessary even without SSVs",
+      "createdAt": "2020-07-17T15:21:55.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "See this thread: https://github.com/ethereum/eth2.0-specs/issues/1969",
+      "createdAt": "2020-07-17T15:22:17.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> It was only later that it was recommended we include slashing protection in the VC. \nThis is what I remember too from that session, although others (who weren't a part of that group) remember differently.",
+      "createdAt": "2020-07-17T15:26:40.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-07-17T15:27:02.192000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "IMG_20181029_130716.jpg",
+          "content": "65dc720b1abf3e4965787164fcd56d576b4adbb14b54e911b871bce879e0537e"
+        }
+      ]
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Those are the notes from that discussion",
+      "createdAt": "2020-07-17T15:27:13.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulj",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "wow my handwriting is embarrassing 😅",
+      "createdAt": "2020-07-17T15:27:36.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I am not necessarily advocating that we stick to the same setup moving forward tho.",
+      "createdAt": "2020-07-17T15:28:06.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I've wanted the VC to (1) be a small piece of software with a very limited communications surface and (2) to be able to protect itself from slashing since early. not sure when (2) came around\n(1) is very important in an environment where we have hot keys. (2) opens up many more designs but is not 1000% critical",
+      "createdAt": "2020-07-17T15:28:15.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "that said, if/when we move to fraud proofs for bad state transitions, it would be best to preserve optionlity on (2) if at all possible, but it does seem like a hard problem.",
+      "createdAt": "2020-07-17T15:29:13.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulj",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we should maintain (1) as an invariant as it simplifies a lot of things",
+      "createdAt": "2020-07-17T15:30:08.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "agreed",
+      "createdAt": "2020-07-17T15:30:16.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "and opens up more designs (even without (2)) -- e.g. trust one BN but broadcast to many",
+      "createdAt": "2020-07-17T15:30:44.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "or load balance many vals against many trusted BNs",
+      "createdAt": "2020-07-17T15:30:52.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Unfortunately, the roll of (2) becomes very similar (operationally) to a BN in a world with fraud proofs",
+      "createdAt": "2020-07-17T15:31:26.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, it does",
+      "createdAt": "2020-07-17T15:31:44.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we can also introduce a new notion of a \"state transition only bn\"",
+      "createdAt": "2020-07-17T15:32:12.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "although with statelessness or some sort of pre-state passing, the VC could just have state transition logic (no networking, block/state db, etc)",
+      "createdAt": "2020-07-17T15:32:19.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-07-17T15:32:21.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "not a great compromise imo but something to consider",
+      "createdAt": "2020-07-17T15:32:30.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "This could be run on any trusted hardware that is able to execute those and would protect from slashing like the current design",
+      "createdAt": "2020-07-17T15:32:47.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-07-17T15:32:58.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "it's basically the same as putting it into the VC, but without having to duplicate code",
+      "createdAt": "2020-07-17T15:33:17.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "and with some separation of concerns in terms of what code can actually access the key. The code that has full key access (VC) still stays simple",
+      "createdAt": "2020-07-17T15:33:50.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "If it is possible to run multiple state transition functions as well as many BNs and VCs with (BFT) agreement, then I'd argue either we're overpaying for security, or our code is very unreliable.",
+      "createdAt": "2020-07-17T15:34:32.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "it is certainly possible, always a matter of resources",
+      "createdAt": "2020-07-17T15:37:41.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adiasg",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> <@!144468805697929216> \n> in https://notes.ethereum.org/@adiasg/preventing-eth2-validator-failure#Type-2 I'm curious as to the rationale behind the BNs deciding on the message to provide the VCs.\nThat is how it works today. The VC requests the message to be signed from the BN.",
+      "createdAt": "2020-07-17T15:38:54.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adiasg",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> So: BN manages chain state, VC decides what to sign, and signer does the signing.\nThe first two things are tightly coupled (and gets even more so in Phase 1+). I don't see an immediate advantage by making these two components be able to not trust each other. It would result in a lot of redundancy without any benefits -- chain state will have to be managed at both BN and VC. (see https://github.com/ethereum/eth2.0-specs/issues/1969#issuecomment-659008908)",
+      "createdAt": "2020-07-17T15:41:56.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adiasg",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> <@!311126836371259402> \n> What is meant by \"good\" msg from bns?  Is there a ttl or how do you decide if it's not \"good\".\nMeaning that the message shouldn't be one that causes a slashing, from the perspective of that VC.",
+      "createdAt": "2020-07-17T15:43:12.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adiasg",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> <@!555483069038198827> \n> This could be run on any trusted hardware that is able to execute those and would protect from slashing like the current design\nOooooooh this is a neat solution. Not sure how much effort is needed for implementing such software, but makes perfect sense in theory!",
+      "createdAt": "2020-07-17T15:55:31.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@!544848504078598144> the BN doesn't send a message to the VC, the VC requests it.  This is an important distinction, as the VC can decide from where to fetch its data to sign (including such items as random sampling or even proofs to confirm the data it is signing is correct) without needing the trust relationship.\n\nAs for the BN/VC coupling, in phase 0 they are not coupled because although a bad proposal or attestation would not make the validator any money it is not a slashable offense.  As such, there is no trust requirement between the two: if a VC decides that a BN is feeding it bad information it can go talk to a different one without any significant downside.\n\nIf a signer cannot potect against slashing without knowing a significant amount about state it has a serious impact on validator security.  There needs to be some consideration of the balance between network security and validator security: so far it has all been in the favour of the network, and if that continues it will make it hard for people to stake.",
+      "createdAt": "2020-07-17T16:09:29.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "phil_govegan",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I think type2 implies a different relationship of bn/vc as it is implemented in clients currently, eg vc getting to know what msg reached threshhold from bn or bn giving vc msg to sign instead of requesting. Not that I am per se against it but I think it needs more clarification in the doc.",
+      "createdAt": "2020-07-17T16:15:58.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adiasg",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> If a signer cannot potect against slashing without knowing a significant amount about state it has a serious impact on validator security.\nFor phase 1+, the slashing rules are (yet to be finalized, but generally seem to be) such that they require some state handling. This has minimal impact on the performance & security of a monolithic, trusted (BN+VC) client application.\n\nIf the trust assumptions between the BN and VC change, wherein the VC doesn't trust the BN's output to protect against slashing (like in SSVs), then the VC will have to re-verify it. This re-verification process (that requires state handling in the VC) is caused by the change in trust assumptions, and not really the validator architecture itself.",
+      "createdAt": "2020-07-17T16:21:10.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> This has minimal impact on the performance & security of a monolithic, trusted (BN+VC) client application.\n\nPerhaps, but the point I keep trying to make is that there is no trust required between BN and VC in phase 0, and people are building solutions on that basis.  For example, HSMs could have a perfectly valid anti-slashing system built in to them for phase 0 that would suddenly be inadequate come phase 1.\n\nIf there needs to be a move from BN->VC->signer to BN+VC->signer then it either needs to be built with the ability for phase 1 validators to continue with valid phase 0 architectures or there needs to be a way for phase 0 validators to regain control of their funds before phase 1 lands.",
+      "createdAt": "2020-07-17T16:52:37.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I think we need to clearly communicate that unless your HSM is powerful enough to run full state transitions, it is not going to protect you from slashing",
+      "createdAt": "2020-07-17T18:03:50.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we cannot let the accident that slashing protection was very easy (computationally) in phase 0 lock us into a future where we can't do more complex fraud proofs",
+      "createdAt": "2020-07-17T18:04:32.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sacha6557",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> There needs to be some consideration of the balance between network security and validator security: so far it has all been in the favour of the network, and if that continues it will make it hard for people to stake.\n<@!144468805697929216> \n\nAgree. And we must not forget that the two are inextricably linked.\n\nIf we make design decisions that make it harder for folks to run their own validators, then this will inevitably have a centralising effect on voting power within the network (even with secret-shared). \n\nThis makes it easier for a majority to be coerced into being dishonest (through the influence of a cartel, or government coercion on exchanges, for example).",
+      "createdAt": "2020-07-17T18:16:49.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sacha6557",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> we cannot let the accident that slashing protection was very easy (computationally) in phase 0 lock us into a future where we can't do more complex fraud proofs\n<@!555483069038198827> \n\nIf fraud proofs are the motivating factor, then we also have to take into account that raising the barrier to staking will have a centralising effect on voting power, which somewhat paradoxically increases the need for fraud proofs...\n\nThis brings me to a paragraph that you wrote in the discussion here: https://github.com/ethereum/eth2.0-specs/issues/1969\n\n> We can potentially get *a bit* more decentralisation (by making secure staking more accessible), by leaving out all these extra fraud proofs. The disadvantage is that we lose a lot of protection from dishonest majorities that we were planning to have with Eth2. I reckon that the latter are more important and that it's ok to have a slightly higher bar for staking.\n\nI see this as the crux of the matter. Why do we assume that making secure staking more accessible has the potential to lead to *a bit* more decentralisation, and not *a lot* more?\n\nIf it turns out we can get *a lot* more, then it's not clear that the benefits of complex fraud proofs outweigh the benefits of safe-and-easy staking, Because, in such a world, it's much harder for the majority to be coerced into being dishonest in the first place.",
+      "createdAt": "2020-07-17T18:16:57.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> I think we need to clearly communicate that unless your HSM is powerful enough to run full state transitions, it is not going to protect you from slashing\n<@555483069038198827> It isn't just power, it is connectivity.  The model moves from the signer needing nothing more than a communications channel to a VC to it needing full p2p connectivity, time sync, etc. It is totally different.",
+      "createdAt": "2020-07-17T19:06:32.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So I cannot quantify the exact difference this makes in decentralization. I can only say that I have always seen staking as having some minimal technical competence requirement -- that of setting up a Linux box, keeping it up to date, securely generating keys etc. This will essentially stay the same.",
+      "createdAt": "2020-07-17T22:40:52.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "What I however can emphasize is that it makes a *huge* difference to the actual security. Without these fraud proofs, one random shard assignment that puts in a dishonest majority in a shard and votes for an invalid state transition, can mess up the whole system forever -- it's an unrecoverable fault. It could create a trillion ETH. I think that is simply unacceptable.",
+      "createdAt": "2020-07-17T22:42:27.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The second thing is that it means that without those fraud proofs, Ethereum simply cannot secure assets that are far beyond it's own market cap. That is crazy. If the world's financial system will eventually run on Ethereum (not a definite but something I would like to be possible), then it would be insane to have as a first \"requirement\" for that that the ETH market cap is half of the value of that whole system. Simply not gonna happen.",
+      "createdAt": "2020-07-17T22:44:10.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dankrad.eth",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "In the end, we are talking about the balance of making things easy for users or making things easy for validators. Because if things are easy for validators (no fraud proofs), they are hard for users: They will suddenly have to check insane amounts of data to be sure that no fraud has happened. I think that's the wrong tradeoff. I think when we encounter this kind of tradeoff, it should always be resolved in favour of users",
+      "createdAt": "2020-07-17T22:45:59.946000+00:00",
+      "attachments": []
+    }
+  ]
+}

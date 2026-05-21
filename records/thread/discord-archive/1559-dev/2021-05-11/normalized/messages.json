@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-05-11",
+  "messageCount": 61,
+  "sourceHash": "402a373f1cf1113ea4227bf7155b62062b3ba9d6ca0f94ed385472e5e0f5424b",
+  "searchText": "How about Nethermind, <@!489256758989029405> ? <@!211091239112671234> We implemented EIP3529 and today I will apply the last 1559 changes (gas limit). So we should be ready today/tomorrow I just restarted our sealer with the some requried additions to the miner and txpool ( by <@!415548822983278593> and <@!543900561460822016> ), so blocks are progressing again Hiya, I sent a handful of txs yesterday to Baikal; I tried sending 1559 tx (rejected), I deployed a contract started with 0xEF, and I checked if BASEFEE was invalid pre-fork Ah yeah and I selfdestructed a contract to ensure that the refund disable EIP was not yet active 🙂 BESU : enode://39eb08bbfad87481553c471a63ff2a4b4885fffa4ff50f1cf46744d9ad6e2f764ede146fe4df563fa9ccda1a46b9b1a88fb08135e1bf1d71b320912499da773d@3.21.156.138:30303 Stopped it again -- we need to hash out this block gas limit validation. The current geth miner will produce wrong blocks We have some difficulties to produce a block : > Invalid block header: gas target decreased too much\",\"throwable\":\"\"} > {\"timestamp\":\"2021-05-11T08:26:08,675\",\"level\":\"ERROR\",\"thread\":\"pool-7-thread-44\",\"class\":\"BlockMiner\",\"message\":\"Illegal block mined, could not be imported to local chain.\",\"throwable\":\"\"} Is this the problem where we have not yet agreed on? https://github.com/ethereum/EIPs/pull/3560#issuecomment-835862318 that doesn't seem to be the case . I added logs and I get parentGasTarget = 5998519 (is fork block) gasTarget = 2999259 (block.gas_limit // ELASTICITY_MULTIPLIER) (parentGasTarget - (parentGasTarget / GAS_LIMIT_BOUND_DIVISOR)) = 5992662 and so 2999259<5992662 Is that a block sealed by geth or is it a block you're sealing yourself and getting error when trying to import? I think geth sealed `499`, so should be one of your own blocks My own block I sealed and it's when i'm trying to import yes Well it seems like your miner didn't bump x2 the gasLimit on fork block? By \"miner\" i mean a module that prepares a block for sealing Yes this seems to be the case, I'll try to fix that. I fixed the issue we sealed the block 500 and quilt seems to be agree with Besu I just opened this: https://github.com/ethereum/EIPs/pull/3566 Would be great to resolve this before we continue mining. I think it won't affect the already sealed blocks, but it would affect upcoming blocks <@!439883507406340126> and <@!508125616940515329> signalled that the original behaviour was preferrable, and geth also prefers the original behaviour. So besu and Nethermind... ? to reduce the complexity of the code I am for the original behaviour I am for the original behaviour too Great, please thumb up https://github.com/ethereum/EIPs/pull/3566 then, and hopefully we can get this fixed and running before the next ACD Commenting here for the benefit of those who don't read the EIP. This is a behavior change relative to legacy behavior. It reduces the effectiveness of the miner gas throttle by half. I don't particularly care one way or another about how strong the miner throttle is, but we shouldn't be changing it as a side effect. I think a good question to ask is, if someone would have proposed changing to `/1024` to `/2048` in Berlin, would everyone have been for it? If not then we should not do this. If we want to maintain existing behavior without touching that code too heavily, then we should change the `/1024` to `/512`. Already commented on your comment -- it's not, it's basically no change at all, aside from marginal rounding errors I think you've just miscalculated it. The factors even out (but I admit I had to generate the test-table to be certain myself 🙂 ) Do you disagree that the current thing miners control is throughput (perhaps your perspective is that the thing the miners control is the limit)? Currently, miners control both the gas throughput of Ethereum **and** the maximum gas allowed in a single block. With the introduction of 1559, we need to double or half the rate at which miners can change *one of* those two things. The EIP as published right now doubles the rate at which miners can increase the maximum block size, while retaining the rate at which miners can adjust Ethereum's gas throughput. The EIP with the changes you have proposed I believe will leave the rate at which miners can change the maximum block size the same, while halving the rate at which they can change the chain's throughput. The more I think about it, the less I care *which* of these two variables we change. I do want to make sure we are making an intentional choice between them though. The EIP as published right now makes it so that if the parent `gasLimit` is `40000000`, then the next block can bump it to `40039063`. With the changes I proposed, they can bump it to `40039061` Hmm... that doesn't make sense to me. The `<=` to `<` change I get and agree with. It is the change of `gas_target` to `block.gas_limit` that makes me question that. 🤔 Previously they could bump `(gasLimit/2)` by a factor of `/1024`, but it was the taken `x2` to make up the gasLimit. Now they can bump `gasLimit/1024`, but it's directly the gasLimit, not the target They could bump the thing which was half the gaslimit, now they bump it directly 🤔 (I think I am starting to get it... wheels are turning ⚙️) OK, I believe you! Would still be nice to get an official answer to the question of which behavior we want to change (throughput or block size). Yeah I haven't been able to formulate it in words very well, hence why I've been trying to examplify with testcases instead 🙂 `assert((a < b) == (a/2 < b/2) == (a*2 < b*2))` Yeah, once you get it already, intuitively that makes sense, but it doesn't help when explaining to someone who hasn't internalized it yet 🙂 Unrelated to your PR then, do you have thoughts on whether we should be changing the rate at which miners can change the block size, or the rate at which miners can change the throughput? I don't have an opinion, really, I think Why did we introduced the first change: \"1. Checks based on limit, not target 2. Checks use <,> rather than <=, >=\"? Is it because of the mentioned asymmetry? The `<` vs `<=` I think was just an accident. I think the first change was more or less accidental aswell (as in, I don't think there was an intention in 1559 to change it, just the py ref implementation happened to do that) I also assume this was an accident I guess we are waiting until these EIP changes get merged and then we can launch Geth again with the \"new\" consensus for 1559? I've updated the geth base PR, but the txpool PR needs a rebase, then the miner PR needs a rebase. And besu needs an update aswell There is a PR for Besu and the tests are ok. I am waiting for your PR to be merged to update the node I think the geth code is kind of ready to start up again, but let's wait until the EIP is officially updated You may want to ping some of the authors in here. That EIP has really struggled historically with getting timely reviews. Gotcha, done (off-channel) Well, I guess cc <@!273808422753796097> here too, discussion is above ^ https://github.com/ethereum/EIPs/pull/3560 This one also",
+  "excerpts": [
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How about Nethermind, <@!489256758989029405> ?",
+      "createdAt": "2021-05-11T07:12:48.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!211091239112671234> We implemented EIP3529 and today I will apply the last 1559 changes (gas limit). So we should be ready today/tomorrow",
+      "createdAt": "2021-05-11T07:18:50.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just restarted our sealer with the some requried additions to the miner and txpool ( by <@!415548822983278593> and <@!543900561460822016> ), so blocks are progressing again",
+      "createdAt": "2021-05-11T07:20:34.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hiya, I sent a handful of txs yesterday to Baikal; I tried sending 1559 tx (rejected), I deployed a contract started with 0xEF, and I checked if BASEFEE was invalid pre-fork",
+      "createdAt": "2021-05-11T07:47:53.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah yeah and I selfdestructed a contract to ensure that the refund disable EIP was not yet active 🙂",
+      "createdAt": "2021-05-11T07:52:56.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "BESU : \nenode://39eb08bbfad87481553c471a63ff2a4b4885fffa4ff50f1cf46744d9ad6e2f764ede146fe4df563fa9ccda1a46b9b1a88fb08135e1bf1d71b320912499da773d@3.21.156.138:30303",
+      "createdAt": "2021-05-11T08:13:49.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Stopped it again -- we need to hash out this block gas limit validation. The current geth miner will produce wrong blocks",
+      "createdAt": "2021-05-11T08:30:55.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We have some difficulties to produce a block : \n> Invalid block header: gas target decreased too much\",\"throwable\":\"\"}\n> {\"timestamp\":\"2021-05-11T08:26:08,675\",\"level\":\"ERROR\",\"thread\":\"pool-7-thread-44\",\"class\":\"BlockMiner\",\"message\":\"Illegal block mined, could not be imported to local chain.\",\"throwable\":\"\"}",
+      "createdAt": "2021-05-11T08:31:50.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is this the problem where we have not yet agreed on? https://github.com/ethereum/EIPs/pull/3560#issuecomment-835862318",
+      "createdAt": "2021-05-11T08:38:28.258000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that doesn't seem to be the case . I added logs and I get\n\nparentGasTarget = 5998519 (is fork block)\ngasTarget = 2999259 (block.gas_limit // ELASTICITY_MULTIPLIER)\n\n(parentGasTarget - (parentGasTarget / GAS_LIMIT_BOUND_DIVISOR)) = 5992662\n\nand so 2999259<5992662",
+      "createdAt": "2021-05-11T08:50:48.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is that a block sealed by geth or is it a block you're sealing yourself and getting error when trying to import?",
+      "createdAt": "2021-05-11T09:23:07.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think geth sealed `499`, so should be one of your own blocks",
+      "createdAt": "2021-05-11T09:23:29.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My own block I sealed and it's when i'm trying to import yes",
+      "createdAt": "2021-05-11T09:24:11.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well it seems like your miner didn't bump x2 the gasLimit on fork block?",
+      "createdAt": "2021-05-11T09:26:27.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "By \"miner\" i mean a module that prepares a block for sealing",
+      "createdAt": "2021-05-11T09:27:51.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes this seems to be the case, I'll try to fix that.",
+      "createdAt": "2021-05-11T09:29:30.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I fixed the issue we sealed the block 500 and quilt seems to be agree with Besu",
+      "createdAt": "2021-05-11T10:02:17.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just opened this: https://github.com/ethereum/EIPs/pull/3566",
+      "createdAt": "2021-05-11T10:07:36.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Would be great to resolve this before we continue mining. I think it won't affect the already sealed blocks, but it would affect upcoming blocks",
+      "createdAt": "2021-05-11T10:55:24.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!439883507406340126> and <@!508125616940515329> signalled that the original behaviour was preferrable, and geth also prefers the original behaviour. So besu and Nethermind... ?",
+      "createdAt": "2021-05-11T10:56:15.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "to reduce the complexity of the code I am for the original behaviour",
+      "createdAt": "2021-05-11T11:13:27.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am for the original behaviour too",
+      "createdAt": "2021-05-11T11:14:21.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Great, please thumb up https://github.com/ethereum/EIPs/pull/3566 then, and hopefully we can get this fixed and running before the next ACD",
+      "createdAt": "2021-05-11T11:21:22.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Commenting here for the benefit of those who don't read the EIP.  This is a behavior change relative to legacy behavior.  It reduces the effectiveness of the miner gas throttle by half.",
+      "createdAt": "2021-05-11T11:28:33.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't particularly care one way or another about how strong the miner throttle is, but we shouldn't be changing it as a side effect.",
+      "createdAt": "2021-05-11T11:29:06.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think a good question to ask is, if someone would have proposed changing to `/1024` to `/2048` in Berlin, would everyone have been for it?  If not then we should not do this.",
+      "createdAt": "2021-05-11T11:29:55.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If we want to maintain existing behavior without touching that code too heavily, then we should change the `/1024` to `/512`.",
+      "createdAt": "2021-05-11T11:30:34.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Already commented on your comment -- it's not, it's basically no change at all, aside from marginal rounding errors",
+      "createdAt": "2021-05-11T11:38:05.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think you've just miscalculated it. The factors even out (but I admit I had to generate the test-table to be certain myself 🙂 )",
+      "createdAt": "2021-05-11T11:40:15.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you disagree that the current thing miners control is throughput (perhaps your perspective is that the thing the miners control is the limit)?",
+      "createdAt": "2021-05-11T11:41:51.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, miners control both the gas throughput of Ethereum **and** the maximum gas allowed in a single block.",
+      "createdAt": "2021-05-11T11:42:19.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "With the introduction of 1559, we need to double or half the rate at which miners can change *one of* those two things.",
+      "createdAt": "2021-05-11T11:42:31.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The EIP as published right now doubles the rate at which miners can increase the maximum block size, while retaining the rate at which miners can adjust Ethereum's gas throughput.",
+      "createdAt": "2021-05-11T11:43:47.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The EIP with the changes you have proposed I believe will leave the rate at which miners can change the maximum block size the same, while halving the rate at which they can change the chain's throughput.",
+      "createdAt": "2021-05-11T11:44:21.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The more I think about it, the less I care *which* of these two variables we change.  I do want to make sure we are making an intentional choice between them though.",
+      "createdAt": "2021-05-11T11:47:17.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The EIP as published right now makes it so that if the parent `gasLimit` is `40000000`, then the next block can bump it to `40039063`. With the changes I proposed, they can bump it to `40039061`",
+      "createdAt": "2021-05-11T11:47:31.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm... that doesn't make sense to me.",
+      "createdAt": "2021-05-11T11:48:33.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The `<=` to `<` change I get and agree with.",
+      "createdAt": "2021-05-11T11:49:08.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is the change of `gas_target` to `block.gas_limit` that makes me question that. 🤔",
+      "createdAt": "2021-05-11T11:49:29.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Previously they could bump `(gasLimit/2)` by a factor of `/1024`, but it was the taken `x2` to make up the gasLimit. Now they can bump `gasLimit/1024`, but it's directly the gasLimit, not the target",
+      "createdAt": "2021-05-11T11:49:39.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "They could bump the thing which was half the gaslimit, now they bump it directly",
+      "createdAt": "2021-05-11T11:49:51.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔 (I think I am starting to get it... wheels are turning ⚙️)",
+      "createdAt": "2021-05-11T11:50:17.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "OK, I believe you!",
+      "createdAt": "2021-05-11T11:51:16.959000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Would still be nice to get an official answer to the question of which behavior we want to change (throughput or block size).",
+      "createdAt": "2021-05-11T11:51:33.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah I haven't been able to formulate it in words very well, hence why I've been trying to examplify with testcases instead 🙂",
+      "createdAt": "2021-05-11T11:51:33.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`assert((a < b) == (a/2 < b/2) == (a*2 < b*2))`",
+      "createdAt": "2021-05-11T11:52:08.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, once you get it already, intuitively that makes sense, but it doesn't help when explaining to someone who hasn't internalized it yet  🙂",
+      "createdAt": "2021-05-11T11:53:31.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unrelated to your PR then, do you have thoughts on whether we should be changing the rate at which miners can change the block size, or the rate at which miners can change the throughput?",
+      "createdAt": "2021-05-11T11:54:16.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't have an opinion, really, I think",
+      "createdAt": "2021-05-11T11:55:17.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why did we introduced the first change:\n \"1. Checks based on limit, not target\n 2. Checks use <,> rather than <=, >=\"?\nIs it because of the mentioned asymmetry?",
+      "createdAt": "2021-05-11T12:30:38.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The `<` vs `<=` I think was just an accident.",
+      "createdAt": "2021-05-11T12:35:17.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the first change was more or less accidental aswell (as in, I don't think there was an intention in 1559 to change it, just the py ref implementation happened to do that)",
+      "createdAt": "2021-05-11T12:45:55.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I also assume this was an accident",
+      "createdAt": "2021-05-11T12:47:24.659000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess we are waiting until these EIP changes get merged and then we can launch Geth again with the \"new\" consensus for 1559?",
+      "createdAt": "2021-05-11T12:48:45.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I've updated the geth base PR, but the txpool PR needs a rebase, then the miner PR needs a rebase. And besu needs an update aswell",
+      "createdAt": "2021-05-11T12:49:49.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is a PR for Besu and the tests are ok. I am waiting for  your PR to be merged to update the node",
+      "createdAt": "2021-05-11T12:52:57.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the geth code is kind of ready to start up again, but let's wait until the EIP is officially updated",
+      "createdAt": "2021-05-11T14:15:17.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You may want to ping some of the authors in here.  That EIP has really struggled historically with getting timely reviews.",
+      "createdAt": "2021-05-11T14:20:56.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Gotcha, done (off-channel)",
+      "createdAt": "2021-05-11T14:23:21.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well, I guess cc <@!273808422753796097> here too, discussion is above ^",
+      "createdAt": "2021-05-11T14:23:59.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ethereum/EIPs/pull/3560 This one also",
+      "createdAt": "2021-05-11T15:17:41.006000+00:00",
+      "attachments": []
+    }
+  ]
+}

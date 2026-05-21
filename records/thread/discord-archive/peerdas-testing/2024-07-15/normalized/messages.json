@@ -1,0 +1,752 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2024-07-15",
+  "messageCount": 89,
+  "sourceHash": "dd38c8d014fe06295cbcd3c1c03b5e832418eedfe3b0c5191458f855e949a8ec",
+  "searchText": "Hey Barnabas, we're still working on sync, but just in case you're launching today, please use the `das-devnet-2` branch <@425907307621122049> <@476250636548308992> any branch changes from teku/prysm? <@785811170387951616> what the nimbus branch to be used? go with `peerdas-p2p` `kzgpeerdas` and `wip-peerdas` branches no longer need to be auto built? nope ok how often does this auto-build btw? cron every hour 45 but this branch wasn't setup before (it is enabled now) I just manually triggered one now got it, thanks feel free to make a pr next time, if you branch changes: https://github.com/ethpandaops/eth-client-docker-image-builder/commit/ded163f2408e9c0e47600c84689718fc27faca85 okay sure does nimbus has a flag to run in supernode mode? not as of yet, it's supernode by default for now currently wip on the flag <@412614104222531604> can you use this one on our end ? https://github.com/prysmaticlabs/prysm/pull/14208 just pull latest for the same branch <@412614104222531604> trigger subscribeAllSubnets with the `--subscribe-all-subnets=true` flag, to make it a supernode so now by default it won't be a supernode? nope made a latest push <@466006586477772831> did you change how health api endpoint works in LH? it took almost a minute for LH CL to report that its healthy - while previously it was done sub 1 second `Jul 15 08:27:01.395 WARN Error processing HTTP API request method: GET, path: /eth/v1/node/health, status: 503 Service Unavailable, elapsed: 248.585µs` also CL reported that the API endpoint is unavailable Current testing config: ```yaml participants: # Supernodes - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync cl_extra_params: [--subscribe-all-subnets] - cl_type: lighthouse cl_image: ethpandaops/lighthouse:das-devnet-2 cl_extra_params: [--subscribe-all-data-column-subnets] - cl_type: teku cl_image: ethpandaops/teku:nashatyrev-das cl_extra_params: [--p2p-subscribe-all-custody-subnets-enabled] - cl_type: nimbus cl_image: ethpandaops/nimbus-eth2:peerdas-p2p cl_extra_params: [--subscribe-all-subnets=true] # Non supernodes - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync - cl_type: lighthouse cl_image: ethpandaops/lighthouse:das-devnet-2 - cl_type: teku cl_image: ethpandaops/teku:nashatyrev-das - cl_type: nimbus cl_image: ethpandaops/nimbus-eth2:peerdas-p2p - cl_type: lodestar cl_image: ethpandaops/lodestar:peerDAS cl_extra_params: [--persistNetworkIdentity] network_params: eip7594_fork_epoch: 0 eip7594_fork_version: \"0x50000038\" snooper_enabled: true global_log_level: debug additional_services: - dora - goomy_blob ``` <@466006586477772831> non supernode lh node has an overflow issue Unfortunately I couldn't reproduce it again <@531934490826768418> <@476250636548308992> prysm is forking away from the canonical chain Is the devnet already live or are you testing locally? testing locally for now with the above config ok, will try with the same config No point really going into a public devnet till we don't iron out issues that can be reproduced locally `kurtosis clean -a && kurtosis run github.com/ethpandaops/ethereum-package --args-file peerdas.yaml --image-download always --verbosity detailed` looks like we have a large number of forks even as early as first epoch looks like I was able to reproduce the stack overflow in lh supernode now. I'm trying to reduce the number of nodes/clients type to see if I can get a stable configuration. looks like there is a mem leak in prysm ? just assuming as I got an oom 127 exit for prysm. allocated ram is 1GB btw 1GB per client? yes each participant https://github.com/ethpandaops/ethereum-package/blob/main/src/package_io/constants.star#L392-L418 grandine/lodestar/teku/nethermind has 2GB limit. I can also bump prysm limit to 2gb Shouldnt be an issue if we have a small validator set running it also on my end each participant has 64 vals I tried with only Prysm/LH/Teku, 1 supernode each (3 nodes in total) After 2.5 epochs I lost LH. Prysm and Teku are on the same fork. can you check if the lh container is still up? `kurtosis enclave inspect <enclave-name>` About LH: ``` d683947a4658 ethpandaops/lighthouse:das-devnet-2 \"lighthouse beacon_n…\" 16 minutes ago Exited (134) 3 minutes ago cl-2-lighthouse-geth--26cbe5d81d69464ba37a0727d373af29 ``` No, LH exited can you run `docker logs -f cl-2-lighthouse-geth--26cbe5d81d69464ba37a0727d373af29` Curious if its SO``` thread '<unknown>' has overflowed its stack fatal runtime error: stack overflow ``` Yes: SO ``` Jul 15 10:03:55.007 DEBG Fork choice successfully updated before block production, fork_choice_slot: 60, slot: 60, service: beacon Jul 15 10:03:55.007 DEBG Not attempting re-org reason: head not late, service: beacon Jul 15 10:03:55.008 ERRO No valid eth1_data votes, `votes_to_consider` empty, outcome: casting `state.eth1_data` as eth1 vote, genesis_time: 1721037115, earliest_block_timestamp: 1721037095, lowest_block_number: 0, service: deposit_contract_rpc Jul 15 10:03:55.008 DEBG Produced vote for eth1 chain block_hash: 0xcc93bda48e1227e94e768ee757160974267c72c872f4c89213fbee552bb2ecf2, deposit_count: 0, deposit_root: 0xd70a234731285c6804c2a4f56711ddb8c82c99740f207854891028af34e27e5e, service: deposit_contract_rpc Jul 15 10:03:55.008 DEBG Issuing engine_getPayload parent_hash: 0xd32b8265b9e5694d48a42d14175d2692fdb918d305b91d336f2fd2c3167a8df5, timestamp: 1721037835, prev_randao: 0x4c74c85276c06a77410fb641d54224b09045bd03cf19c131ac158b534cd31ad6, suggested_fee_recipient: 0x8943545177806ed17b9f23f0a21ee5948ecaa776, service: exec Jul 15 10:03:55.011 DEBG Processed HTTP API request method: GET, path: /eth/v1/node/version, status: 200 OK, elapsed: 86.916µs Jul 15 10:03:55.103 DEBG Produced block on state block_size: 2141, service: beacon Jul 15 10:03:55.115 DEBG Processed HTTP API request method: GET, path: /eth/v2/validator/blocks/60, status: 200 OK, elapsed: 108.519167ms Jul 15 10:03:55.115 DEBG Processed HTTP API request method: GET, path: /eth/v1/config/spec, status: 200 OK, elapsed: 104.2355ms Jul 15 10:03:55.117 DEBG Processed HTTP API request method: GET, path: /eth/v1/node/syncing, status: 200 OK, elapsed: 199.834µs Jul 15 10:03:55.257 DEBG Signed block received in HTTP API slot: 60 thread '<unknown>' has overflowed its stack fatal runtime error: stack overflow ``` <@466006586477772831> <@688748669268132001> For information, the config I used: ```yaml participants: # Supernodes - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync cl_extra_params: [--subscribe-all-subnets] - cl_type: lighthouse cl_image: ethpandaops/lighthouse:das-devnet-2 cl_extra_params: [--subscribe-all-data-column-subnets] - cl_type: teku cl_image: ethpandaops/teku:nashatyrev-das cl_extra_params: [--p2p-subscribe-all-custody-subnets-enabled] # - cl_type: nimbus # cl_image: ethpandaops/nimbus-eth2:peerdas-p2p # cl_extra_params: [--subscribe-all-subnets=true] # Non supernodes # - cl_type: prysm # cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync # - cl_type: lighthouse # cl_image: ethpandaops/lighthouse:das-devnet-2 # - cl_type: teku # cl_image: ethpandaops/teku:nashatyrev-das # - cl_type: nimbus # cl_image: ethpandaops/nimbus-eth2:peerdas-p2p # - cl_type: lodestar # cl_image: ethpandaops/lodestar:peerDAS # cl_extra_params: [--persistNetworkIdentity] network_params: eip7594_fork_epoch: 0 eip7594_fork_version: \"0x50000038\" snooper_enabled: true global_log_level: debug additional_services: - dora - goomy_blob ``` memory creep in prysm. starting at 384MB climbing to 800+ MB both prysm instances (supernode and non supernode) btw can I yeet peerdas-devnet-1? I don't think its of much use anymore. looks like a ckzg related issue most likely from past experience. This is the `das-devnet-2` branch for lighthouse right? yes OK, ran for a few epochs 2x Super nodes Teku + 2x Super nodes Prysm ==> OK (But prysm memory leak) Also as said previously ran 1xSuper node Teku + 1x Super node Prysm + 1x Super node LH ==> OK (But prysm memory leak + LH Stack Overflow) Will try to introduce lodestar again. lodestar has a activation epoch bug <@792822129019584562> pls ping us when it’s fixed What is this tool grafana Oh oops you can enable by adding prometheus_grafana in the additional services and add ethereum_metrics_exporter_enabled: true Thanks teku peer serving missing columns seems like ```ts ul-15 13:19:30.776[network] verbose: Req done method=data_column_sidecars_by_root, version=1, encoding=ssz_snappy, client=Teku, peer=16...Ws5nTx, requestId=26 matchBlockWithDataColumns { blobKzgCommitmentsLen: 3 } matchBlockWithDataColumns Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAkudUhjvg4BA9vPF938QccfuzPQLWGBGDXRBeKuCWs5nTx for blockSlot=5 with numColumns=4 dataColumnSidecars=3 requestedColumnsPresent=false received dataColumnIndexes=47,79,111 requested=15,47,79,111 { allBlocks: 1, allDataColumnSidecars: 3, peerEnr: undefined, blobKzgCommitmentsLen: 3 } ``` out of 4, it gave only 3 cc <@412614104222531604> Interesting, will look into the issue was Teku a supernode? not sure, but it must have the columns lodestar requested because lodestar first filters out the columns the peer has as per their nodeid/published subnets (defaults to custody requirement if inbound connection) if since min custody is 1 subnet=4 columns i would assume it would be having these columns since 3 of them have been returned most likely there could be something off It seems Prysm is by default subscribed to all subnets, even when the `--subscribe-to-all-subnets` flag it not set in the YAML configuration file. `docker ps --no-trunc` shows: ``` c6c99cad3be49bbd52e4f2c8c40e580efbcacaa1a1684624c1ebeb4428f3ea94 peerdas-bn:latest \"/beacon-chain --accept-terms-of-use=true <...> --subscribe-all-subnets=true <...>\" ``` Probably because of https://github.com/ethpandaops/ethereum-package/blob/c8b9b19c045f6075fa02f9abf8f761a5a8056ba3/src/cl/prysm/prysm_launcher.star#L265 ? ah damn, good catch I can remove that I would expect prysm to throw an error and crash if a flag is defined twice. I cannot say I do not agree. fixed now. I'm pretty sure `das-devnet-2` is using peerdas-kzg (the Rust lib) now. Right? Prysm memory leak",
+  "excerpts": [
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hey Barnabas, we're still working on sync, but just in case you're launching today, please use the `das-devnet-2` branch",
+      "createdAt": "2024-07-15T06:58:22.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@425907307621122049> <@476250636548308992> any branch changes from teku/prysm?",
+      "createdAt": "2024-07-15T06:58:55.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@785811170387951616> what the nimbus branch to be used?",
+      "createdAt": "2024-07-15T07:49:10.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "go with `peerdas-p2p`",
+      "createdAt": "2024-07-15T07:52:32.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`kzgpeerdas` and `wip-peerdas` branches no longer need to be auto built?",
+      "createdAt": "2024-07-15T07:53:28.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "nope",
+      "createdAt": "2024-07-15T07:53:40.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2024-07-15T07:53:56.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "how often does this auto-build btw?",
+      "createdAt": "2024-07-15T07:54:20.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "cron every hour 45",
+      "createdAt": "2024-07-15T07:54:31.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "but this branch wasn't setup before (it is enabled now)",
+      "createdAt": "2024-07-15T07:54:41.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I just manually triggered one now",
+      "createdAt": "2024-07-15T07:54:45.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "got it, thanks",
+      "createdAt": "2024-07-15T07:55:04.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "feel free to make a pr next time, if you branch changes: https://github.com/ethpandaops/eth-client-docker-image-builder/commit/ded163f2408e9c0e47600c84689718fc27faca85",
+      "createdAt": "2024-07-15T07:55:19.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay sure",
+      "createdAt": "2024-07-15T07:55:40.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "does nimbus has a flag to run in supernode mode?",
+      "createdAt": "2024-07-15T08:00:05.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "not as of yet, it's supernode by default for now",
+      "createdAt": "2024-07-15T08:00:29.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "currently wip on the flag",
+      "createdAt": "2024-07-15T08:00:43.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> can you use this one on our end ?\nhttps://github.com/prysmaticlabs/prysm/pull/14208",
+      "createdAt": "2024-07-15T08:05:01.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "just pull latest for the same branch",
+      "createdAt": "2024-07-15T08:06:35.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> trigger subscribeAllSubnets with the `--subscribe-all-subnets=true` flag, to make it a supernode",
+      "createdAt": "2024-07-15T08:21:14.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "so now by default it won't be a supernode?",
+      "createdAt": "2024-07-15T08:21:33.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "nope made a latest push",
+      "createdAt": "2024-07-15T08:21:42.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> did you change how health api endpoint works in LH?",
+      "createdAt": "2024-07-15T08:28:15.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "it took almost a minute for LH CL to report that its healthy - while previously it was done sub 1 second",
+      "createdAt": "2024-07-15T08:28:45.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`Jul 15 08:27:01.395 WARN Error processing HTTP API request       method: GET, path: /eth/v1/node/health, status: 503 Service Unavailable, elapsed: 248.585µs`",
+      "createdAt": "2024-07-15T08:29:10.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "also CL reported that the API endpoint is unavailable",
+      "createdAt": "2024-07-15T08:29:25.399000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Current testing config: \n```yaml\nparticipants:\n# Supernodes\n  - cl_type: prysm\n    cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync\n    cl_extra_params: [--subscribe-all-subnets]\n  - cl_type: lighthouse\n    cl_image: ethpandaops/lighthouse:das-devnet-2\n    cl_extra_params: [--subscribe-all-data-column-subnets]\n  - cl_type: teku\n    cl_image: ethpandaops/teku:nashatyrev-das\n    cl_extra_params: [--p2p-subscribe-all-custody-subnets-enabled]\n  - cl_type: nimbus\n    cl_image: ethpandaops/nimbus-eth2:peerdas-p2p\n    cl_extra_params: [--subscribe-all-subnets=true]\n# Non supernodes\n  - cl_type: prysm\n    cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync\n  - cl_type: lighthouse\n    cl_image: ethpandaops/lighthouse:das-devnet-2\n  - cl_type: teku\n    cl_image: ethpandaops/teku:nashatyrev-das\n  - cl_type: nimbus\n    cl_image: ethpandaops/nimbus-eth2:peerdas-p2p\n  - cl_type: lodestar\n    cl_image: ethpandaops/lodestar:peerDAS\n    cl_extra_params: [--persistNetworkIdentity]\nnetwork_params:\n  eip7594_fork_epoch: 0\n  eip7594_fork_version: \"0x50000038\"\nsnooper_enabled: true\nglobal_log_level: debug\nadditional_services:\n  - dora\n  - goomy_blob\n```",
+      "createdAt": "2024-07-15T09:13:13.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> \nnon supernode lh node has an overflow issue",
+      "createdAt": "2024-07-15T09:15:46.296000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "20f2f64f33eb4ae9e35913ac79f0f8cb0233b8cb8d6aff76ba32dfb09a3e216c"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Unfortunately I couldn't reproduce it again",
+      "createdAt": "2024-07-15T09:23:22.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@531934490826768418> <@476250636548308992> prysm is forking away from the canonical chain",
+      "createdAt": "2024-07-15T09:26:18.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is the devnet already live or are you testing locally?",
+      "createdAt": "2024-07-15T09:27:27.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "testing locally for now",
+      "createdAt": "2024-07-15T09:27:32.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "with the above config",
+      "createdAt": "2024-07-15T09:27:36.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok, will try with the same config",
+      "createdAt": "2024-07-15T09:27:40.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "No point really going into a public devnet till we don't iron out issues that can be reproduced locally",
+      "createdAt": "2024-07-15T09:28:02.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`kurtosis clean -a && kurtosis run github.com/ethpandaops/ethereum-package --args-file peerdas.yaml --image-download always --verbosity detailed`",
+      "createdAt": "2024-07-15T09:29:14.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2024-07-15T09:33:48.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like we have a large number of forks even as early as first epoch",
+      "createdAt": "2024-07-15T09:35:28.061000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-07-15_at_11.35.10.png",
+          "content": "9944a544b03fd3171ce2fc35b46e9fadfd1c04b3cfbe25be606abbe5660dbc16"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like I was able to reproduce the stack overflow in lh supernode now.",
+      "createdAt": "2024-07-15T09:46:15.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm trying to reduce the number of nodes/clients type to see if I can get a stable configuration.",
+      "createdAt": "2024-07-15T09:46:43.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like there is a mem leak in prysm ?",
+      "createdAt": "2024-07-15T09:47:04.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "just assuming as I got an oom 127 exit for prysm.",
+      "createdAt": "2024-07-15T09:48:35.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "allocated ram is 1GB btw",
+      "createdAt": "2024-07-15T09:49:46.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "1GB per client?",
+      "createdAt": "2024-07-15T09:50:28.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2024-07-15T09:51:18.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "each participant",
+      "createdAt": "2024-07-15T09:51:24.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ethpandaops/ethereum-package/blob/main/src/package_io/constants.star#L392-L418",
+      "createdAt": "2024-07-15T09:51:34.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "grandine/lodestar/teku/nethermind has 2GB limit. I can also bump prysm limit to 2gb",
+      "createdAt": "2024-07-15T09:52:03.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Shouldnt be an issue if we have a small validator set",
+      "createdAt": "2024-07-15T10:02:25.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "running it also on my end",
+      "createdAt": "2024-07-15T10:02:39.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "each participant has 64 vals",
+      "createdAt": "2024-07-15T10:02:47.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I tried with only Prysm/LH/Teku, 1 supernode each (3 nodes in total)\n\nAfter 2.5 epochs I lost LH. Prysm and Teku are on the same fork.",
+      "createdAt": "2024-07-15T10:06:55.149000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "6c2264fc12c1aac6ca87c8208359b5522e3e945556481b4938a566f526c6212a"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you check if the lh container is still up? `kurtosis enclave inspect <enclave-name>`",
+      "createdAt": "2024-07-15T10:08:09.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "About LH:\n```\nd683947a4658   ethpandaops/lighthouse:das-devnet-2                   \"lighthouse beacon_n…\"   16 minutes ago   Exited (134) 3 minutes ago                                                                                                                                                             cl-2-lighthouse-geth--26cbe5d81d69464ba37a0727d373af29\n```",
+      "createdAt": "2024-07-15T10:08:17.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "No, LH exited",
+      "createdAt": "2024-07-15T10:08:27.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you run `docker logs -f cl-2-lighthouse-geth--26cbe5d81d69464ba37a0727d373af29`",
+      "createdAt": "2024-07-15T10:08:35.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Curious if its SO```\nthread '<unknown>' has overflowed its stack\nfatal runtime error: stack overflow\n```",
+      "createdAt": "2024-07-15T10:08:50.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes: SO\n\n```\nJul 15 10:03:55.007 DEBG Fork choice successfully updated before block production, fork_choice_slot: 60, slot: 60, service: beacon\nJul 15 10:03:55.007 DEBG Not attempting re-org                   reason: head not late, service: beacon\nJul 15 10:03:55.008 ERRO No valid eth1_data votes, `votes_to_consider` empty, outcome: casting `state.eth1_data` as eth1 vote, genesis_time: 1721037115, earliest_block_timestamp: 1721037095, lowest_block_number: 0, service: deposit_contract_rpc\nJul 15 10:03:55.008 DEBG Produced vote for eth1 chain            block_hash: 0xcc93bda48e1227e94e768ee757160974267c72c872f4c89213fbee552bb2ecf2, deposit_count: 0, deposit_root: 0xd70a234731285c6804c2a4f56711ddb8c82c99740f207854891028af34e27e5e, service: deposit_contract_rpc\nJul 15 10:03:55.008 DEBG Issuing engine_getPayload               parent_hash: 0xd32b8265b9e5694d48a42d14175d2692fdb918d305b91d336f2fd2c3167a8df5, timestamp: 1721037835, prev_randao: 0x4c74c85276c06a77410fb641d54224b09045bd03cf19c131ac158b534cd31ad6, suggested_fee_recipient: 0x8943545177806ed17b9f23f0a21ee5948ecaa776, service: exec\nJul 15 10:03:55.011 DEBG Processed HTTP API request              method: GET, path: /eth/v1/node/version, status: 200 OK, elapsed: 86.916µs\nJul 15 10:03:55.103 DEBG Produced block on state                 block_size: 2141, service: beacon\nJul 15 10:03:55.115 DEBG Processed HTTP API request              method: GET, path: /eth/v2/validator/blocks/60, status: 200 OK, elapsed: 108.519167ms\nJul 15 10:03:55.115 DEBG Processed HTTP API request              method: GET, path: /eth/v1/config/spec, status: 200 OK, elapsed: 104.2355ms\nJul 15 10:03:55.117 DEBG Processed HTTP API request              method: GET, path: /eth/v1/node/syncing, status: 200 OK, elapsed: 199.834µs\nJul 15 10:03:55.257 DEBG Signed block received in HTTP API       slot: 60\n\nthread '<unknown>' has overflowed its stack\nfatal runtime error: stack overflow\n```",
+      "createdAt": "2024-07-15T10:09:09.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@466006586477772831> <@688748669268132001>",
+      "createdAt": "2024-07-15T10:09:38.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "For information, the config I used:\n```yaml\nparticipants:\n# Supernodes\n  - cl_type: prysm\n    cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync\n    cl_extra_params: [--subscribe-all-subnets]\n  - cl_type: lighthouse\n    cl_image: ethpandaops/lighthouse:das-devnet-2\n    cl_extra_params: [--subscribe-all-data-column-subnets]\n  - cl_type: teku\n    cl_image: ethpandaops/teku:nashatyrev-das\n    cl_extra_params: [--p2p-subscribe-all-custody-subnets-enabled]\n  # - cl_type: nimbus\n  #   cl_image: ethpandaops/nimbus-eth2:peerdas-p2p\n  #   cl_extra_params: [--subscribe-all-subnets=true]\n# Non supernodes\n  # - cl_type: prysm\n  #   cl_image: ethpandaops/prysm-beacon-chain:peerdas-initial-sync\n  # - cl_type: lighthouse\n  #   cl_image: ethpandaops/lighthouse:das-devnet-2\n  # - cl_type: teku\n  #   cl_image: ethpandaops/teku:nashatyrev-das\n  # - cl_type: nimbus\n  #   cl_image: ethpandaops/nimbus-eth2:peerdas-p2p\n  # - cl_type: lodestar\n  #   cl_image: ethpandaops/lodestar:peerDAS\n  #   cl_extra_params: [--persistNetworkIdentity]\nnetwork_params:\n  eip7594_fork_epoch: 0\n  eip7594_fork_version: \"0x50000038\"\nsnooper_enabled: true\nglobal_log_level: debug\nadditional_services:\n  - dora\n  - goomy_blob\n```",
+      "createdAt": "2024-07-15T10:10:35.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "memory creep in prysm. starting at 384MB climbing to 800+ MB",
+      "createdAt": "2024-07-15T10:25:43.459000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-07-15_at_12.25.27.png",
+          "content": "a7f7713d1f7e51ab96936af6c2a1a43ec911785af1c7d96ebe73dfeab8c46d9f"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "both prysm instances (supernode and non supernode)",
+      "createdAt": "2024-07-15T10:26:03.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "btw can I yeet peerdas-devnet-1? I don't think its of much use anymore.",
+      "createdAt": "2024-07-15T10:26:55.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like a ckzg related issue most likely from past experience. This is the `das-devnet-2` branch for lighthouse right?",
+      "createdAt": "2024-07-15T10:40:09.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2024-07-15T10:44:10.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "OK, ran for a few epochs 2x Super nodes Teku + 2x Super nodes Prysm ==> OK (But prysm memory leak)\n\nAlso as said previously ran 1xSuper node Teku + 1x Super node Prysm + 1x Super node LH ==> OK (But prysm memory leak + LH Stack Overflow)\n\nWill try to introduce lodestar again.",
+      "createdAt": "2024-07-15T10:46:11.221000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "446c2781fbbff7906a2b5980dc7568240798bad87bdf3486b4ad75f0f76272bb"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar has a activation epoch bug",
+      "createdAt": "2024-07-15T10:50:10.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562> pls ping us when it’s fixed",
+      "createdAt": "2024-07-15T10:50:26.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "What is this tool",
+      "createdAt": "2024-07-15T10:55:39.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "grafana",
+      "createdAt": "2024-07-15T10:58:49.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh oops",
+      "createdAt": "2024-07-15T10:59:04.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can enable by adding prometheus_grafana in the additional services and add ethereum_metrics_exporter_enabled: true",
+      "createdAt": "2024-07-15T10:59:34.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks",
+      "createdAt": "2024-07-15T10:59:53.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "teku peer serving missing columns seems like\n\n```ts\nul-15 13:19:30.776[network]       verbose: Req  done method=data_column_sidecars_by_root, version=1, encoding=ssz_snappy, client=Teku, peer=16...Ws5nTx, requestId=26\n\nmatchBlockWithDataColumns { blobKzgCommitmentsLen: 3 }\nmatchBlockWithDataColumns Missing or mismatching dataColumnSidecars from peerId=16Uiu2HAkudUhjvg4BA9vPF938QccfuzPQLWGBGDXRBeKuCWs5nTx for blockSlot=5 with numColumns=4 dataColumnSidecars=3 requestedColumnsPresent=false received dataColumnIndexes=47,79,111 requested=15,47,79,111 {\n  allBlocks: 1,\n  allDataColumnSidecars: 3,\n  peerEnr: undefined,\n  blobKzgCommitmentsLen: 3\n}\n\n```",
+      "createdAt": "2024-07-15T13:41:43.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "out of 4, it gave only 3",
+      "createdAt": "2024-07-15T13:42:15.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@412614104222531604>",
+      "createdAt": "2024-07-15T13:42:27.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Interesting, will look into the issue",
+      "createdAt": "2024-07-15T13:44:19.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "was Teku a supernode?",
+      "createdAt": "2024-07-15T13:45:47.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "not sure, but it must have the columns lodestar requested because lodestar first filters out the columns the peer has as per their nodeid/published subnets (defaults to custody requirement if inbound connection) if",
+      "createdAt": "2024-07-15T14:01:09.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "since min custody is 1 subnet=4 columns i would assume it would be having these columns since 3 of them have been returned",
+      "createdAt": "2024-07-15T14:01:55.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "most likely there could be something off",
+      "createdAt": "2024-07-15T14:02:07.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "It seems Prysm is by default subscribed to all subnets, even when the `--subscribe-to-all-subnets` flag it not set in the YAML configuration file.\n\n`docker ps --no-trunc` shows:\n\n```\nc6c99cad3be49bbd52e4f2c8c40e580efbcacaa1a1684624c1ebeb4428f3ea94   peerdas-bn:latest                              \"/beacon-chain --accept-terms-of-use=true <...> --subscribe-all-subnets=true <...>\"\n```\n\nProbably because of https://github.com/ethpandaops/ethereum-package/blob/c8b9b19c045f6075fa02f9abf8f761a5a8056ba3/src/cl/prysm/prysm_launcher.star#L265 ?",
+      "createdAt": "2024-07-15T14:17:34.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah damn, good catch",
+      "createdAt": "2024-07-15T14:18:17.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can remove that",
+      "createdAt": "2024-07-15T14:18:20.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I would expect prysm to throw an error and crash if a flag is defined twice.",
+      "createdAt": "2024-07-15T14:29:02.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I cannot say I do not agree.",
+      "createdAt": "2024-07-15T14:33:23.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "fixed now.",
+      "createdAt": "2024-07-15T14:39:11.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm pretty sure `das-devnet-2` is using peerdas-kzg (the Rust lib) now. Right?",
+      "createdAt": "2024-07-15T14:45:06.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Testing",
+      "parent": "",
+      "content": "Prysm memory leak",
+      "createdAt": "2024-07-15T16:33:05.101000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,592 @@
+{
+  "schemaVersion": 1,
+  "channel": "future-eoa",
+  "date": "2020-11-02",
+  "messageCount": 72,
+  "sourceHash": "1b30cea6e42901181bb63d8465b2dbbdc6700333c2f98731af7364fae2e59ff3",
+  "searchText": "<@350513362423250945> that doesn't help... why does this person think the memory allocation is quadratic? <@!301186049323958275> this is the gas cost for memory expansion, note that it is quadratic in the size of the memory `a` Where/when is that used? it's used in the cost formula each step of evm execution I mean what opcode(s) will result in that gas costing function being applied? `C_mem(u') - C_mem(u)` Page 26 in the worst paper ever written. 😖 it is painful to read! any opcode that writes to uninitialized memory e.g. I believe if you mstore8 something to mem[1024] on the first step of execution, you would pay `C_mem(1024)` for it How does it determine whether memory size changed? If I write a single word to memory address 0xffff, does that charge me for expanding memory from 0x0000 to 0xffff? Or will I only be charged for writing one word at 0xffff? yes i believe it charges you for the latter (expanding from 0x0 to 0xffff) Any idea what this means? > Referencing a zero length range (e.g. by attempting to pass it as the input range to a CALL) does not require memory to be extended to the beginning of the range. μ′i is defined as this new maximum number of words of active memory; special-cases are given where these two are not equal. i'm guessing suppose your memory has been expanded to 0x1024 and you call revert(2048, 0) it will not charge memory expansion to 2048 Also, it is only sort of quadratic. 😬 > linear up to 724B of memoryused, after which it costs substantially more. Does each call frame get its own memory page? I think it does, but I can't remember. yes Does that include internal calls in Solidity? I want to say that internal calls would share memory with their caller... but I have never actually tested. i'm not very familiar with solidity, but i don't believe EVM supports shared memory across *CALLs Solidity internal calls are just jumps. ahh gotcha I'm just not sure if they do some magic to get a new block of memory or not. I wonder if there is value in having an opcode that gives access to `tx.calldata`? It certainly seems like a huge waste and quite the pain for layer 2 transactions to have to copy that data through every call frame. Alternatively, perhaps two new opcodes: one to write to a shared memory space and another to read from that shared space. For layer 2 stuff and merkle proof stuff, tx.calldata would be ideal I think. You could then pass a single word down to your callees indicating the offset in `tx.calldata` or the offset in shared memory they need to read to gain access to the data of interest to them. Advantage of `tx.calldata` is that you save from even having to do that first copy into memory. I'm not sure exposing `tx.calldata` would help though, as the `call` would still need be retrieving arguments from memory Yes, but only a single word (calldata offset). ohh you mean `tx.calldata` through every frame Meaning the 12th frame deep can reference the transaction's `data` member (effectively). Without having to copy it through all 12 call frames (which is massively wasteful). I see. Is this useful outside optimism's version of an ORU? I wrote a storage proof validator library a bit ago and sadly we had to tell people \"you must process this in the first call frame because copying it between call frames is way too expensive). This made the usability of the library quite terrible. This would be useful for most optimistic rollups. It also works toward the general goal of making contract wallets first class citizens in the ecosystem. Right now, contract wallets wanting to participate in ORs will have at least one additional call frame. And contract wallets can't reasonably use the storage proof thing I mentioned above due to prohibitive gas costs. i believe abitrums fraud proofs are much smaller as they focus on the exact point where execution diverged, whereas OVM simply replays everything and checks the roots so the issue with the storage proof library is that passing the calldata further down in calls was very expensive? Mainnet storage proofs are *huge* (for Ethereum). Almost 7kb for a single proof that includes block header, account proof, and two storage slots. That all comes in as transaction calldata, and if you wanted to pass that along to another call frame for validation you would be paying for nearly 7kb of memory expansion. Which is frustrating because all you are doing is duplicating something that is already in memory, it is just that the EVM doesn't provide a mechanism for accessing it in deeper call frames. I like this idea, and it is a very simple change. Will have to think more if it can cause any problems My main concern is it potentially gives people one more way to differentiate between contract callers and EOA callers. I think both a shared memory space and access to tx.data are valuable though, in different contexts. They both solve a similar problem but need different solutions depending on data source. 🤔 Maybe the solution could be generalized to give access to any call frame's call data (including the first)? If call frame 5 generated and passed some big blob of data to call frame 6, call frame 6 could then make that calldata accessible to call frame 7 without having to copy it. Then we could have a single mechanism for making both call frame `1` calldata and call frame `n` calldata available to all descendent call frames by only passing one or two words down the stack. what about something like `CALLANDFORWARD`? It would be *nice* if we didn't need a new `CALL` opcode. We would then also need `STATICCALLANDFORWARD` and `DELEGATECALLANDFORWARD`, and if we introduce other calling conventions we would need to duplicate for that as well. What is going through my head is an opcode that flags a certain range of calldata as `shared` and gets some identifier for looking that up from any call frame below the current in the stack. `SHARE offset1 length` would make this call frame's calldata from `offset1` until `offset1+length` available to every call frame down the stack. It would return some `id` (unique for the entire callstack) that could be passed down the call stack. There would be a second opcode for `READSHARED id offset2` which would read 32 bytes from `offset2` into the shared data (which means it would read 32 bytes from the original calldata at `offset1+offset2`). Modeled off of `MLOAD` and `CALLDATALOAD`, which read 32 byte chunks at a time. why not duplicate the functionality of the evm's memory to create a shared scratch pad and add a `SHARECALLDATA` function? I'm trying to avoid having to copy the calldata at all, which includes copying it from CALLDATA into the shared scratch pad. I suppose there could be an internal optimization where the copy is virtual, but I'm concerned that increases client complexity quite a bit (optimizations usually do). hmm, in that case why share certain parts of the calldata at all? why not have the entire tx.calldata always accessable (by a `TXDATALOAD` and a `TXDATACOPY`)? is it too difficult to encode in calldata where certain things are? My thinking was that one may not want to share all of the calldata, some portion may be \"private\". Also, it would be nice if this worked for any call frame, not only the first. yeah intuitively that makes sense, it's best to share the least amount of data to get the job done but given that everything onchain is public, i'm not sure it is that important can you think of an example where that might be an issue? Also, you would still need to pass along offsets in most cases, since you may have stuff in the calldata that the first call frame uses, and the descendent call frame will need to know where to look for *its* data (which may not be at the front). you'd need to do that for id's too though, right? The data privacy thing is more of just a defensive thing. Needing to offset I think is a hard requirement for usability. I believe if we solve the offset problem, we can also solve the privacy problem with essentially zero extra effort so might as well. i'm about to be afk for a while, but will continue thinking about this A call frame can specify a block of its calldata that it wants to share (or multiple non-contiguous blocks!) and it would only need to pass along a single ID to descendent call frames to give access to that block. Block length would be available via `SHAREDLENGTH(id)` or something (like `CALLDATALENGTH`) so you don't need to pass that along. Also, the ids could likely be uint8 or uint16, which is nice that we don't need a full word for them. You can then bit pack them to further save if you are passing along multiple of them.",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@350513362423250945> that doesn't help... why does this person think the memory allocation is quadratic?",
+      "createdAt": "2020-11-02T00:07:23.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> this is the gas cost for memory expansion, note that it is quadratic in the size of the memory `a`",
+      "createdAt": "2020-11-02T00:46:29.034000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "2020-11-01-1604277787_memory_gas.jpg",
+          "content": "0b9014364956007a8fdc90e85b61afe66823bc6dbcdbf21a66f505e51e8e6ab1"
+        }
+      ]
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Where/when is that used?",
+      "createdAt": "2020-11-02T00:46:56.856000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's used in the cost formula each step of evm execution",
+      "createdAt": "2020-11-02T00:47:27.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I mean what opcode(s) will result in that gas costing function being applied?",
+      "createdAt": "2020-11-02T00:47:47.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`C_mem(u') - C_mem(u)`",
+      "createdAt": "2020-11-02T00:47:48.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Page 26 in the worst paper ever written.  😖",
+      "createdAt": "2020-11-02T00:48:22.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is painful to read!",
+      "createdAt": "2020-11-02T00:48:36.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "any opcode that writes to uninitialized memory",
+      "createdAt": "2020-11-02T00:49:00.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "e.g. I believe if you mstore8 something to mem[1024] on the first step of execution, you would pay `C_mem(1024)` for it",
+      "createdAt": "2020-11-02T00:49:57.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "How does it determine whether memory size changed?  If I write a single word to memory address 0xffff, does that charge me for expanding memory from 0x0000 to 0xffff?",
+      "createdAt": "2020-11-02T00:50:31.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or will I only be charged for writing one word at 0xffff?",
+      "createdAt": "2020-11-02T00:50:47.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes i believe it charges you for the latter (expanding from 0x0 to 0xffff)",
+      "createdAt": "2020-11-02T00:51:06.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Any idea what this means?\n> Referencing a zero length range (e.g.  by attempting to pass it as the input range to a CALL) does not require memory to be extended to the beginning of the range.  μ′i is defined as this new maximum number of words of active memory; special-cases are given where these two are not equal.",
+      "createdAt": "2020-11-02T00:51:52.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i'm guessing suppose your memory has been expanded to 0x1024 and you call revert(2048, 0) it will not charge memory expansion to 2048",
+      "createdAt": "2020-11-02T00:53:19.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, it is only sort of quadratic.   😬 \n> linear up to 724B of memoryused, after which it costs substantially more.",
+      "createdAt": "2020-11-02T00:53:29.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Does each call frame get its own memory page?  I think it does, but I can't remember.",
+      "createdAt": "2020-11-02T00:54:05.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2020-11-02T00:54:16.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Does that include internal calls in Solidity?",
+      "createdAt": "2020-11-02T00:54:24.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I want to say that internal calls would share memory with their caller... but I have never actually tested.",
+      "createdAt": "2020-11-02T00:55:14.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i'm not very familiar with solidity, but i don't believe EVM supports shared memory across *CALLs",
+      "createdAt": "2020-11-02T01:02:32.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Solidity internal calls are just jumps.",
+      "createdAt": "2020-11-02T01:06:55.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ahh gotcha",
+      "createdAt": "2020-11-02T01:07:05.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm just not sure if they do some magic to get a new block of memory or not.",
+      "createdAt": "2020-11-02T01:07:24.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I wonder if there is value in having an opcode that gives access to `tx.calldata`?",
+      "createdAt": "2020-11-02T01:08:09.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It certainly seems like a huge waste and quite the pain for layer 2 transactions to have to copy that data through every call frame.",
+      "createdAt": "2020-11-02T01:08:38.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Alternatively, perhaps two new opcodes: one to write to a shared memory space and another to read from that shared space.",
+      "createdAt": "2020-11-02T01:09:21.258000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For layer 2 stuff and merkle proof stuff, tx.calldata would be ideal I think.  You could then pass a single word down to your callees indicating the offset in `tx.calldata` or the offset in shared memory they need to read to gain access to the data of interest to them.",
+      "createdAt": "2020-11-02T01:10:16.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Advantage of `tx.calldata` is that you save from even having to do that first copy into memory.",
+      "createdAt": "2020-11-02T01:10:36.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not sure exposing `tx.calldata` would help though, as the `call` would still need be retrieving arguments from memory",
+      "createdAt": "2020-11-02T01:10:36.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, but only a single word (calldata offset).",
+      "createdAt": "2020-11-02T01:10:53.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ohh you mean `tx.calldata` through every frame",
+      "createdAt": "2020-11-02T01:10:55.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Meaning the 12th frame deep can reference the transaction's `data` member (effectively).",
+      "createdAt": "2020-11-02T01:11:11.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Without having to copy it through all 12 call frames (which is massively wasteful).",
+      "createdAt": "2020-11-02T01:11:25.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I see. Is this useful outside optimism's version of an ORU?",
+      "createdAt": "2020-11-02T01:11:53.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I wrote a storage proof validator library a bit ago and sadly we had to tell people \"you must process this in the first call frame because copying it between call frames is way too expensive).  This made the usability of the library quite terrible.",
+      "createdAt": "2020-11-02T01:12:19.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This would be useful for most optimistic rollups.",
+      "createdAt": "2020-11-02T01:12:31.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It also works toward the general goal of making contract wallets first class citizens in the ecosystem.  Right now, contract wallets wanting to participate in ORs will have at least one additional call frame.",
+      "createdAt": "2020-11-02T01:13:34.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And contract wallets can't reasonably use the storage proof thing I mentioned above due to prohibitive gas costs.",
+      "createdAt": "2020-11-02T01:13:56.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i believe abitrums fraud proofs are much smaller as they focus on the exact point where execution diverged, whereas OVM simply replays everything and checks the roots",
+      "createdAt": "2020-11-02T01:14:10.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so the issue with the storage proof library is that passing the calldata further down in calls was very expensive?",
+      "createdAt": "2020-11-02T01:14:49.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Mainnet storage proofs are *huge* (for Ethereum).",
+      "createdAt": "2020-11-02T01:15:03.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Almost 7kb for a single proof that includes block header, account proof, and two storage slots.",
+      "createdAt": "2020-11-02T01:16:46.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That all comes in as transaction calldata, and if you wanted to pass that along to another call frame for validation you would be paying for nearly 7kb of memory expansion.",
+      "createdAt": "2020-11-02T01:17:39.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which is frustrating because all you are doing is duplicating something that is already in memory, it is just that the EVM doesn't provide a mechanism for accessing it in deeper call frames.",
+      "createdAt": "2020-11-02T01:17:59.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I like this idea, and it is a very simple change. Will have to think more if it can cause any problems",
+      "createdAt": "2020-11-02T01:18:59.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My main concern is it potentially gives people one more way to differentiate between contract callers and EOA callers.",
+      "createdAt": "2020-11-02T01:20:41.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think both a shared memory space and access to tx.data are valuable though, in different contexts.  They both solve a similar problem but need different solutions depending on data source.",
+      "createdAt": "2020-11-02T01:21:35.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "🤔  Maybe the solution could be generalized to give access to any call frame's call data (including the first)?",
+      "createdAt": "2020-11-02T01:22:18.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If call frame 5 generated and passed some big blob of data to call frame 6, call frame 6 could then make that calldata accessible to call frame 7 without having to copy it.",
+      "createdAt": "2020-11-02T01:23:01.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Then we could have a single mechanism for making both call frame `1` calldata and call frame `n` calldata available to all descendent call frames by only passing one or two words down the stack.",
+      "createdAt": "2020-11-02T01:23:58.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "what about something like `CALLANDFORWARD`?",
+      "createdAt": "2020-11-02T01:26:04.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It would be *nice* if we didn't need a new `CALL` opcode.  We would then also need `STATICCALLANDFORWARD` and `DELEGATECALLANDFORWARD`, and if we introduce other calling conventions we would need to duplicate for that as well.",
+      "createdAt": "2020-11-02T01:27:01.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What is going through my head is an opcode that flags a certain range of calldata as `shared` and gets some identifier for looking that up from any call frame below the current in the stack.",
+      "createdAt": "2020-11-02T01:27:40.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`SHARE offset1 length` would make this call frame's calldata from `offset1` until `offset1+length` available to every call frame down the stack.  It would return some `id` (unique for the entire callstack) that could be passed down the call stack.  There would be a second opcode for `READSHARED id offset2` which would read 32 bytes from `offset2` into the shared data (which means it would read 32 bytes from the original calldata at `offset1+offset2`).",
+      "createdAt": "2020-11-02T01:33:11.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Modeled off of `MLOAD` and `CALLDATALOAD`, which read 32 byte chunks at a time.",
+      "createdAt": "2020-11-02T01:33:52.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "why not duplicate the functionality of the evm's memory to create a shared scratch pad and add a `SHARECALLDATA` function?",
+      "createdAt": "2020-11-02T01:40:41.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm trying to avoid having to copy the calldata at all, which includes copying it from CALLDATA into the shared scratch pad.",
+      "createdAt": "2020-11-02T01:41:39.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I suppose there could be an internal optimization where the copy is virtual, but I'm concerned that increases client complexity quite a bit (optimizations usually do).",
+      "createdAt": "2020-11-02T01:42:07.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmm, in that case why share certain parts of the calldata at all? why not have the entire tx.calldata always accessable (by a `TXDATALOAD` and a `TXDATACOPY`)?",
+      "createdAt": "2020-11-02T01:43:44.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "is it too difficult to encode in calldata where certain things are?",
+      "createdAt": "2020-11-02T01:44:34.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My thinking was that one may not want to share all of the calldata, some portion may be \"private\".",
+      "createdAt": "2020-11-02T01:44:34.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, it would be nice if this worked for any call frame, not only the first.",
+      "createdAt": "2020-11-02T01:44:51.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah intuitively that makes sense, it's best to share the least amount of data to get the job done",
+      "createdAt": "2020-11-02T01:45:34.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but given that everything onchain is public, i'm not sure it is that important",
+      "createdAt": "2020-11-02T01:46:12.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "can you think of an example where that might be an issue?",
+      "createdAt": "2020-11-02T01:46:22.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, you would still need to pass along offsets in most cases, since you may have stuff in the calldata that the first call frame uses, and the descendent call frame will need to know where to look for *its* data (which may not be at the front).",
+      "createdAt": "2020-11-02T01:46:23.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you'd need to do that for id's too though, right?",
+      "createdAt": "2020-11-02T01:46:53.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The data privacy thing is more of just a defensive thing.  Needing to offset I think is a hard requirement for usability.  I believe if we solve the offset problem, we can also solve the privacy problem with essentially zero extra effort so might as well.",
+      "createdAt": "2020-11-02T01:47:18.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i'm about to be afk for a while, but will continue thinking about this",
+      "createdAt": "2020-11-02T01:48:08.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "A call frame can specify a block of its calldata that it wants to share (or multiple non-contiguous blocks!) and it would only need to pass along a single ID to descendent call frames to give access to that block.  Block length would be available via `SHAREDLENGTH(id)` or something (like `CALLDATALENGTH`) so you don't need to pass that along.",
+      "createdAt": "2020-11-02T01:48:30.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, the ids could likely be uint8 or uint16, which is nice that we don't need a full word for them.  You can then bit pack them to further save if you are passing along multiple of them.",
+      "createdAt": "2020-11-02T01:49:20.004000+00:00",
+      "attachments": []
+    }
+  ]
+}

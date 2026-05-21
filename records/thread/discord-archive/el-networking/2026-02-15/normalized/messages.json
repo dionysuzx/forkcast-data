@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "channel": "el-networking",
+  "date": "2026-02-15",
+  "messageCount": 6,
+  "sourceHash": "8a728982f599655ac0b3e4ceb493fde1f29c9491f7dd11c3ae12884ae1e58d58",
+  "searchText": "<@194432762315407360> regarding eth/70 I was wondering, EIP states: \"Partial receipt lists cannot be verified against the block header, so in responses with lastBlockIncomplete = 1, the last receipts list must be validated in a different way:\" Why can't we verify partial receipt lists? We can do so by reconstructing the trie and just attaching a range proof there. We don't need a left proof because we assume that all values requested before or on \"firstBlockReceiptIndex\" are known. If we want we can even extend this to omit the hashes already known by the receiver. The downside of this is obviously that we have to reconstruct the trie, which might be somewhat expensive for the tries in question (> 10 mb data because we have to split them up). I'm thinking if there is a smarter way to do this, because we can derive the trie size (amount of transactions), and because we know the trie structure we could maybe use that to lower the data size required, or maybe even the trie calculation necessary (need specific nodes to prove it, so might not need to compute the entire trie) And actually this would be mitigated too then: > For a Receipts message, each block receipts list is validated by checking the full list against the tree root stored in the block header. When downloading a paginated list across multiple requests, the client must potentially buffer more than 10MB of unvalidated input. This cannot be avoided, since the protocol allows receipt lists of such size at a high block gas limit. However, we can at least bound the input size by applying sanity checks as recommended in the specification section. With the proof we would directly validate it Instead of using lastBlockIncomplete, we'd change to a list. If the list is empty, then the returned receipts are complete. If not, then it includes the nodes necessary to prove the trie items. (This is nontrivial because for responses which include key 0 and a key <= 127 we need proof for 0 and for the highest key returned. Because of RLP encoding 0x80 = 0. For >= 128 we thus assume all proof nodes were retrieved from previous requests and we thus include only the proof of the final value (this thus includes the 0x80 node proof)). Since we initially return 0-N based on these rules we know which paths the given nodes belong to as we know how the final trie structure will look like. (or the order does not matter, we hash the proof nodes and then build the trie up from the trie root, we can then directly see if items belong or not) We considered this, and the range proving primitive from snapsync could even be used. But the downside of attaching a proof is that it slows down the delivery. The receipt trie is not stored by any client, it always has to be reconstructed in memory for hashing. Another issue is complexity. With the current approach, where we only validate complete lists, we can use the same verifier that we use for all the other block body constituents. If we add a proof to the receipts, we have to make a custom verifier. Ok cool 🙂 That makes sense. Also realized the trie recalculation is a lot more work than just sending partial receipts. This is simpler and less viable for DoS. Is sending partial receipts expected to happen a lot in practice (to make the devp2p messages \"full\"?), or is it mostly intended to solve the 10 MiB receipt problem? If messages have partial results often then it will create extra load for the node on the validation part (especially I/O) In the validation part: > Verify the total number of delivered receipts matches the count of transactions. > Verify the size of each receipt against the gas limit of the corresponding transaction, i.e. reject if it is larger than gaslimit/8. > Verify the total downloaded receipts size is no larger than allowed by the block gas limit. This requires looking up the block and also the transactions inside it to check these things 🤔 Not sure how big the extra load is on the node. I guess can just request the next message and meanwhile attempt to verify the current one against these rules. Also, how does Geth handle if a target node responds with super small messages, 1 receipt at the time? Just replace the peer? Ah ok the block body is stored in Geth, guess it is stored in all clients for devp2p, that makes the data readily available",
+  "excerpts": [
+    {
+      "author": "jochembrouwer",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<@194432762315407360> regarding eth/70 I was wondering, EIP states:\n\"Partial receipt lists cannot be verified against the block header, so in responses with lastBlockIncomplete = 1, the last receipts list must be validated in a different way:\"\n\nWhy can't we verify partial receipt lists? We can do so by reconstructing the trie and just attaching a range proof there. We don't need a left proof  because we assume that all values requested before or on \"firstBlockReceiptIndex\" are known.\nIf we want we can even extend this to omit the hashes already known by the receiver.\n\nThe downside of this is obviously that we have to reconstruct the trie, which might be somewhat expensive for the tries in question (> 10 mb data because we have to split them up).\n\nI'm thinking if there is a smarter way to do this, because we can derive the trie size (amount of transactions), and because we know the trie structure we could maybe use that to lower the data size required, or maybe even the trie calculation necessary (need specific nodes to prove it, so might not need to compute the entire trie)",
+      "createdAt": "2026-02-15T03:52:09.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "And actually this would be mitigated too then: \n> For a Receipts message, each block receipts list is validated by checking the full list against the tree root stored in the block header. When downloading a paginated list across multiple requests, the client must potentially buffer more than 10MB of unvalidated input. This cannot be avoided, since the protocol allows receipt lists of such size at a high block gas limit. However, we can at least bound the input size by applying sanity checks as recommended in the specification section.\n\nWith the proof we would directly validate it",
+      "createdAt": "2026-02-15T03:54:03.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Instead of using lastBlockIncomplete, we'd change to a list. If the list is empty, then the returned receipts are complete. If not, then it includes the nodes necessary to prove the trie items. (This is nontrivial because for responses which include key 0 and a key <= 127 we need proof for 0 and for the highest key returned. Because of RLP encoding 0x80 = 0. For >= 128 we thus assume all proof nodes were retrieved from previous requests and we thus include only the proof of the final value (this thus includes the 0x80 node proof)). Since we initially return 0-N based on these rules we know which paths the given nodes belong to as we know how the final trie structure will look like. (or the order does not matter, we hash the proof nodes and then build the trie up from the trie root, we can then directly see if items belong or not)",
+      "createdAt": "2026-02-15T07:18:13.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "We considered this, and the range proving primitive from snapsync could even be used. But the downside of attaching a proof is that it slows down the delivery. The receipt trie is not stored by any client, it always has to be reconstructed in memory for hashing.\n\nAnother issue is complexity. With the current approach, where we only validate complete lists, we can use the same verifier that we use for all the other block body constituents. If we add a proof to the receipts, we have to make a custom verifier.",
+      "createdAt": "2026-02-15T08:40:30.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Ok cool 🙂 That makes sense. Also realized the trie recalculation is a lot more work than just sending partial receipts. This is simpler and less viable for DoS.\n\nIs sending partial receipts expected to happen a lot in practice (to make the devp2p messages \"full\"?), or is it mostly intended to solve the 10 MiB receipt problem? If messages have partial results often then it will create extra load for the node on the validation part (especially I/O)\n\nIn the validation part:\n\n> Verify the total number of delivered receipts matches the count of transactions.\n> Verify the size of each receipt against the gas limit of the corresponding transaction, i.e. reject if it is larger than gaslimit/8.\n> Verify the total downloaded receipts size is no larger than allowed by the block gas limit.\n\nThis requires looking up the block and also the transactions inside it to check these things 🤔  Not sure how big the extra load is on the node. I guess can just request the next message and meanwhile attempt to verify the current one against these rules.\n\nAlso, how does Geth handle if a target node responds with super small messages, 1 receipt at the time? Just replace the peer?",
+      "createdAt": "2026-02-15T09:45:42.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Ah ok the block body is stored in Geth, guess it is stored in all clients for devp2p, that makes the data readily available",
+      "createdAt": "2026-02-15T15:31:54.635000+00:00",
+      "attachments": []
+    }
+  ]
+}

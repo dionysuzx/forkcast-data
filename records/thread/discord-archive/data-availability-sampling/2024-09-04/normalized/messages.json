@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "channel": "data-availability-sampling",
+  "date": "2024-09-04",
+  "messageCount": 21,
+  "sourceHash": "f12c88fe24b4b89d3df19cbcb1040cf412fd21add7ff1efc180bb3be55d94820",
+  "searchText": "``` # Supernodes - cl_type: prysm cl_image: gcr.io/prysmaticlabs/prysm/beacon-chain:peerDAS cl_extra_params: [--subscribe-all-subnets, --pprof] cl_max_cpu: 0 # # Non supernodes - cl_type: prysm cl_image: gcr.io/prysmaticlabs/prysm/beacon-chain:peerDAS cl_max_cpu: 0 network_params: eip7594_fork_epoch: 0 eip7594_fork_version: \"0x50000038\" snooper_enabled: true global_log_level: debug additional_services: - dora - goomy_blob ``` This is the kurtosis config We did run it single-threaded before and the performance was worse, which is why we changed it to run it on its own thread individually This isn't an issue for signature verification in mainnet for all the attestations, seems specific to peerDAS. Thanks for the config. I'll test it out myself tomorrow morning. How would I take a profiling snapshot? Gotcha. Kev mentioned that performance seems to be better with gokzg. Is that correct? I suspect ckzg is having issues because of cgo & I'm not sure what we could do to fix that. ``` go tool pprof -http=localhost:7070 127.0.0.1:$PORT/debug/pprof/profile ``` where `PORT` is the profiling port assigned by kurtosis Yeah definitely seems to be an issue with cgo, possibly the large amount of data being sent back and forth across cgo might be causing some issues since it is a completely separate stack. How is performance if you configure `cl_max_cpu` to half of your system's cores? For an 8-core CPU, 4 for each. This could prevent computation overlap. Is it possible these two nodes are computing cell proofs at the same time? I can try but, each node is only computing cell proofs when its their time to propose. Since each slot only has 1 proposer its very unlikely to have them intersect with each other <@476250636548308992> Hey. Can you please provide rough benchmarks for Prysm when its using gokzg? Like how much time does it take to call `compute_cells_and_kzg_proofs()` N times? Curious to see how close we get to the optimal time with gokzg (compared to the terrible performance of ckzg with golang). Thanks! Hello all! In Tuesday's PeerDAS call we discussed the amount of blobs that local block builders have time to prepare before they propose a block. At the moment, the CL \"prepares\" the blobs by calling `compute_cells_and_kzg_proofs()` during the critical block building window of four seconds. This essentially computes the blob KZG proofs and it's a process that takes between 170ms and 300ms per blob on a single core of a decent CPU. This means that a 4-core decent CPU can prepare 32 blobs in two seconds. Two seconds is already too slow for just proof generation during block building. Hence, If PeerDAS launches with a MAX_BLOBS_PER_BLOCK of 32 blobs (or possibly even 16) there is not enough time for actors with limited resources (i.e. few cores, or older CPUs) to prepare all those blobs. Here are three ways to look at this problem: 1) Keep the status quo: Most local block builders will be using a multi-core machine that can process a good amount of blocks in the allowed window. An eight core CPU can prepare 32 blobs in one second. Acknowledge that it's OK for local block builders with low resources to not be able to fill the maximum amount of blobs. 2) Pre-prepare blobs on the EL: The EL actually sees the blobs in the mempool **well before** the new slot. This allows the EL to pre-prepare the blobs as it sees them, and then pass them already prepared to the CL. For this approach to work: 1) the EL needs to know when the CL is gonna propose 2) the EL needs to know which blobs it should prepare 3) the EL must run the PeerDAS cryptography library to prepare the blobs 4) the engine API must be enhanced to allow the cells/proofs to be passed to the CL 3) Pre-prepare blobs on the CL: The CL knows when its gonna propose. Some seconds before it proposes, the CL asks the EL for the blobs floating in the mempool. The EL passes the list of blobs to CL, and the CL prepares them ahead of the new slot. This means that the engine API needs to be enhanced to allow this communication to take place. I won't go deeper into the various options and the pros/cons of each, so as to not drag this message longer. Alex will allocate a slot on tomorrow's ACDC to discuss this matter. Thanks! <dankrad> I would strongly favour option 3 over option 2, because 2 breaks the separation of concerns between EL and CL. Sample proofs are a detail of data availability implementation (that is also subject to more future changes) and the EL should not be concerned with it <@476250636548308992> So we figured out the problem. Setting `max_cl_cpu: 0` does not use all CPU cores. When I set it to 6000 (millicores) the performance is much better (exactly what I would expect). We added some debug prints and it was clear that computation time scaled with the number of blobs. I'll share some screenshots. This is with `max_cl_cpu: 0` And this is with `max_cl_cpu: 6000` It's a little strange that `runtime.NumCPU()` reports 20 in both cases. Checking out `ethereum-package` (the kurtosis package), using 0 will use the default value for that client. See this code: https://github.com/ethpandaops/ethereum-package/blob/main/src/cl/prysm/prysm_launcher.star#L84-L88 ```python cl_max_cpu = ( int(cl_max_cpu) if int(cl_max_cpu) > 0 else constants.RAM_CPU_OVERRIDES[network_name][\"prysm_max_cpu\"] ) ``` And for devnets, `prysm_max_cpu` is 1000: https://github.com/ethpandaops/ethereum-package/blob/94dc531e332f4fd4466a9473dfec328a3a681b01/src/package_io/constants.star#L355",
+  "excerpts": [
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```\n# Supernodes\n  - cl_type: prysm\n    cl_image: gcr.io/prysmaticlabs/prysm/beacon-chain:peerDAS\n    cl_extra_params: [--subscribe-all-subnets, --pprof]\n    cl_max_cpu: 0\n# # Non supernodes\n  - cl_type: prysm\n    cl_image: gcr.io/prysmaticlabs/prysm/beacon-chain:peerDAS\n    cl_max_cpu: 0\nnetwork_params:\n  eip7594_fork_epoch: 0\n  eip7594_fork_version: \"0x50000038\"\nsnooper_enabled: true\nglobal_log_level: debug\nadditional_services:\n  - dora\n  - goomy_blob\n```\nThis is the kurtosis config",
+      "createdAt": "2024-09-04T02:40:13.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "We did run it single-threaded before and the performance was worse, which is why we changed it to run it on its own thread individually",
+      "createdAt": "2024-09-04T02:41:18.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "This isn't an issue for signature verification in mainnet for all the attestations, seems specific to peerDAS.",
+      "createdAt": "2024-09-04T02:42:16.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Thanks for the config. I'll test it out myself tomorrow morning. How would I take a profiling snapshot?",
+      "createdAt": "2024-09-04T03:12:43.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Gotcha. Kev mentioned that performance seems to be better with gokzg. Is that correct? I suspect ckzg is having issues because of cgo & I'm not sure what we could do to fix that.",
+      "createdAt": "2024-09-04T03:14:33.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```\ngo tool pprof -http=localhost:7070 127.0.0.1:$PORT/debug/pprof/profile\n```\nwhere `PORT` is the profiling port assigned by kurtosis",
+      "createdAt": "2024-09-04T03:15:04.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yeah definitely seems to be an issue with cgo, possibly the large amount of data being sent back and forth across cgo might be causing some issues since it is a completely separate stack.",
+      "createdAt": "2024-09-04T03:18:24.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "How is performance if you configure `cl_max_cpu` to half of your system's cores? For an 8-core CPU, 4 for each. This could prevent computation overlap. Is it possible these two nodes are computing cell proofs at the same time?",
+      "createdAt": "2024-09-04T03:28:09.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I can try but, each node is only computing cell proofs when its their time to propose. Since each slot only has 1 proposer its very unlikely to have them intersect with each other",
+      "createdAt": "2024-09-04T03:30:53.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "asn_d6",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@476250636548308992> Hey. Can you please provide rough benchmarks for Prysm when its using gokzg? Like how much time does it take to call `compute_cells_and_kzg_proofs()` N times? Curious to see how close we get to the optimal time with gokzg (compared to the terrible performance of ckzg with golang). Thanks!",
+      "createdAt": "2024-09-04T15:31:31.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "asn_d6",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Hello all!\n\nIn Tuesday's PeerDAS call we discussed the amount of blobs that local block builders have time to prepare before they propose a block.\n\nAt the moment, the CL \"prepares\" the blobs by calling `compute_cells_and_kzg_proofs()` during the critical block building window of four seconds. This essentially computes the blob KZG proofs and it's a process that takes between 170ms and 300ms per blob on a single core of a decent CPU. This means that a 4-core decent CPU can prepare 32 blobs in two seconds. Two seconds is already too slow for just proof generation during block building.\n\nHence, If PeerDAS launches with a MAX_BLOBS_PER_BLOCK of 32 blobs (or possibly even 16) there is not enough time for actors with limited resources (i.e. few cores, or older CPUs) to prepare all those blobs.",
+      "createdAt": "2024-09-04T20:18:44.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "asn_d6",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Here are three ways to look at this problem:\n\n1) Keep the status quo: Most local block builders will be using a multi-core machine that can process a good amount of blocks in the allowed window. An eight core CPU can prepare 32 blobs in one second.  Acknowledge that it's OK for local block builders with low resources to not be able to fill the maximum amount of blobs.\n\n2) Pre-prepare blobs on the EL: The EL actually sees the blobs in the mempool **well before** the new slot. This allows the EL to pre-prepare the blobs as it sees them, and then pass them already prepared to the CL. For this approach to work:\n   1) the EL needs to know when the CL is gonna propose\n   2) the EL needs to know which blobs it should prepare\n   3) the EL must run the PeerDAS cryptography library to prepare the blobs\n   4) the engine API must be enhanced to allow the cells/proofs to be passed to the CL\n\n3) Pre-prepare blobs on the CL: The CL knows when its gonna propose. Some seconds before it proposes, the CL asks the EL for the blobs floating in the mempool. The EL passes the list of blobs to CL, and the CL prepares them ahead of the new slot. This means that the engine API needs to be enhanced to allow this communication to take place.\n\nI won't go deeper into the various options and the pros/cons of each, so as to not drag this message longer.\n\nAlex will allocate a slot on tomorrow's ACDC to discuss this matter.\n\nThanks!",
+      "createdAt": "2024-09-04T20:18:47.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<dankrad> I would strongly favour option 3 over option 2, because 2 breaks the separation of concerns between EL and CL. Sample proofs are a detail of data availability implementation (that is also subject to more future changes) and the EL should not be concerned with it",
+      "createdAt": "2024-09-04T21:00:27.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@476250636548308992> So we figured out the problem. Setting `max_cl_cpu: 0` does not use all CPU cores. When I set it to 6000 (millicores) the performance is much better (exactly what I would expect). We added some debug prints and it was clear that computation time scaled with the number of blobs. I'll share some screenshots.",
+      "createdAt": "2024-09-04T21:49:28.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "This is with `max_cl_cpu: 0`",
+      "createdAt": "2024-09-04T21:49:48.995000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "da0127d9d1994a3c65feb1679082f73d52ee5ae40ebdc790e303260acbf94769"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "And this is with `max_cl_cpu: 6000`",
+      "createdAt": "2024-09-04T21:53:11.488000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "4e790d35913d4b11a6e83805a38611645b8334aa37cfc886f569e70465cddeed"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It's a little strange that `runtime.NumCPU()` reports 20 in both cases.",
+      "createdAt": "2024-09-04T21:53:47.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Checking out `ethereum-package` (the kurtosis package), using 0 will use the default value for that client. See this code:",
+      "createdAt": "2024-09-04T21:57:46.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "https://github.com/ethpandaops/ethereum-package/blob/main/src/cl/prysm/prysm_launcher.star#L84-L88",
+      "createdAt": "2024-09-04T21:57:49.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```python\ncl_max_cpu = (\n    int(cl_max_cpu)\n    if int(cl_max_cpu) > 0\n    else constants.RAM_CPU_OVERRIDES[network_name][\"prysm_max_cpu\"]\n)\n```",
+      "createdAt": "2024-09-04T21:58:08.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "And for devnets, `prysm_max_cpu` is 1000:\nhttps://github.com/ethpandaops/ethereum-package/blob/94dc531e332f4fd4466a9473dfec328a3a681b01/src/package_io/constants.star#L355",
+      "createdAt": "2024-09-04T21:58:32.005000+00:00",
+      "attachments": []
+    }
+  ]
+}

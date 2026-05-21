@@ -1,0 +1,296 @@
+{
+  "schemaVersion": 1,
+  "channel": "apis",
+  "date": "2020-10-06",
+  "messageCount": 35,
+  "sourceHash": "ddbc651a375e280e5a988d29f7f97e25f5f20a951be1cb3d9d213d3b2dc057c2",
+  "searchText": "<@!144468805697929216> So <@!680234424037670912> and I have worked through the events API and how to get a validator client working with them. There's a *lot* of ambiguity in what the events actually mean and when they should fire. Ultimately we've settled on an interpretation of the `head` event which would preserve a lot of the simplicity we had from having slot/epoch events without explicitly needing them and which avoids a nasty scheduling issue we've previously encountered. I've written it up since it's a bit long for Discord: https://hackmd.io/kutQ7smJRZ-sJNSuY1WWVA I'd also add, that we need to make the descriptions for all of the events a lot more precise if we're going to achieve meaningful interoperability. That's also true for a lot of the other APIs I've seen - often the descriptions are a very short summary but that leaves a lot of room for different interpretations. <@!340345049063882753> thanks for the write-up. Totally agree that we need to define many items more strongly. Also agree with the definitions you have provided. Having read through the doc, I'm wondering if we need to drop the \"head\" event in favor of a more generic \"state\" event. It would have the fields of the existing event, plus a \"distance\" field that is the number of slots between the slot of the head block root and the current slot. This would be less confusing for users and implementors, and provide the additional information as to if the state was updated due to a block or not. The latter could be used by clients to fetch information but consider it provisional until a block has been received (either back-filling the missed slot and causing a chain re-org, or ahead of the missing slot and continuing the existing chain). A more radical option could be to combine the current \"head\" and \"chain reorg\" events in to a single \"state\" event that describes the state of the chain including the \"reorg distance\" when reorgs happen. Thinking behind this is that the reorg will always result in a new state, so we'd be pushing out two events at current and that would require end users to handle both, or just ignore the reorg and follow the head events. Thoughts? <@!144468805697929216> I'd like to avoid the validator having to make difficult decisions about whether filling in empty slots is a reorg or not if possible, so I'm not a real fan of the first option. I really like the second option, and that's exactly the direction the events internally to Teku are going to work. https://github.com/PegaSysEng/teku/blob/2b904e80818d94b2d92d558b4f3db89f5c153c41/storage/api/src/main/java/tech/pegasys/teku/storage/api/ChainHeadChannel.java is the event definition. Couldn't we just include number of skip slots since parent block in head event and than we can handle everything? You'd still need reorg events for when the chain switches to a different fork. reorg from different head is fine and we do that, but reorg from skip slots requires modifying forkchoice and event itself Well fork choice just chooses the best block so that doesn't change, and the `Store` defined in the fork choice spec includes the current time so knows the current slot which is the only other part. Just fork choice spec doesn't include any notifications for events because that's out of scope. So I don't really think you need to be modifying fork choice itself. This feels like one of those areas you move out of the spec and into the realm of extra things real world clients have to do/track to be useful beyond just implementing the consensus spec itself. I think both solutions are pretty similar, it just saves on user (and developer) effort to have a unified \"state\" event. I guess it ultimately depends on whether we view the beacon node as tracking a chain of slots, or a chain of blocks. If we consistently view the chain head as the latest block and ignore empty slots, the validator client can decide that the slot must be empty if it hasn't received a head update some time after the start of the slot, then if it later does receive a head update for that slot knows it has to recalculate. Just to me it feels weird that the validator client is picking up responsibilities for tracking the state of the chain. My world view is that the beacon node tracks the state of the chain, and the validator client responds to and operates on that. So naturally I see the chain as a sequence of slots, some of which have blocks. Yep agree with the \"tracking slots\" piece. My bad for selecting a block-based event. I _think_ this also tidies up the issues that we were talking about last week, as well, so we don't have to have \"slot time\" style events. One thing I'm wondering about is the delay until publishing a new state event if there is no block. I'm wondering if we want to make that 8 seconds rather than 4. Reasoning (possibly poor reasoning) is that we will fetch attester duties at the earlier of receiving the state update notification or the wall time of the start of the next epoch (assuming we have no event at all for whatever reason). We want to give the chain as much chance as possible to build the state with a block, but also have to allow for the time taken to generate the epoch transition so that the state event is pushed out in a timely fashion. 4 seconds for this seems like more than enough, so we could wait 8 seconds rather than 4 for the block to show up. So my reasoning for updating the head at 1/3rd through the slot is that then it doubles as the perfect event to tell the validator client to create attestations, because it will be received either when the block is imported or 1/3rd through - precisely when validators should produce attestations. The validator just has to make sure they don't produce a second attestation if the block is received late, but they should have that kind of guard in place anyway. But the VC could trigger attestation creation purely on timing - the beacon node would likely want to ensure it had recently updated fork choice when the request to create an attestation comes in so that if it's going to swap to a different fork, the attestation it creates points to that. Is that overloading the event? Receiving a state event allows for the early creation of attestations, but the 4 second barrier should be managed internally by the VC, as you say. I'd rather avoid \"gratuitous reorgs\" if possible, and having the state event for an empty slot generated later should cut down on these. I could live with it either way I think. Here is a breakdown of delay from start of slot to time block received, for my local validator client. A fair number do show up after the 4 seconds mark, which would result in quite a few reorgs (don't have the data for how many of those show up after 8 seconds, so still a bit of a guess, but I'd be happy in asserting the number of reorgs would be lower). (It's worth reiterating that I look at the API as still very much in flux until we have 2-3 working implementations out there. So any tweaks we do now could be untweaked, or retweaked, depending on how they work in the wild). I'm just struggling to think through what the knock on effects would be inside the Teku beacon node. We'd have to run fork choice 1/3rd through the slot in response to requests to create attestations, but at that point we'd ignore any new empty slots being added to the end, and only add those empty blocks at the later point in the slot. I think if I were going to do that, I'd likely just delay until the end of the slot (ie start of the next one) and only then consider it empty. I don't see an advantage to doing that update 2/3rds of the way through the slot. It's doable, and I suspect there's a bunch of teku-specific stuff there which is probably handled quite differently in other clients. Actually, I take it back - the advantage of not waiting until the end of the slot, is that you can get a head start on calculating the block creation duties which you may need at the very start of the next slot. Block proposal duties are set an additional epoch in advance, so there shouldn't be any need to rush there. Attestation duties can be calculated one epoch ahead, but block proposal duties can only be calculated for the current epoch (this came as a surprise to me fairly recently). Sorry, yeah, I was thinking wrong way round. Given this is non-final, let's go with the 4 second delay and see how it pans out. If it causes problems we can re-evaluate. is there some reason why there are no slots and no previous_justived checkpoint in the response of https://ethereum.github.io/eth2.0-APIs/#/Beacon/getStateFinalityCheckpoints ? > is there some reason why there are no slots and no previous_justived checkpoint in the response of https://ethereum.github.io/eth2.0-APIs/#/Beacon/getStateFinalityCheckpoints ? <@514429265001971732> there is previous justified in response. What slot would we include there? waah i looked at the wrong tab or something, nvm but yes basically it would be the finalized slot most of the time though I think this is not always the case > but yes basically it would be the finalized slot most of the time <@514429265001971732> but thats first slot of epoch? Last* Last Proposed* but actually I am super confused again *going back reading the spec once again* Afaik epoch boundary slot is is last slot wether it has block or not",
+  "excerpts": [
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@!144468805697929216> So <@!680234424037670912> and I have worked through the events API and how to get a validator client working with them.  There's a *lot* of ambiguity in what the events actually mean and when they should fire.  Ultimately we've settled on an interpretation of the `head` event which would preserve a lot of the simplicity we had from having slot/epoch events without explicitly needing them and which avoids a nasty scheduling issue we've previously encountered.  I've written it up since it's a bit long for Discord: https://hackmd.io/kutQ7smJRZ-sJNSuY1WWVA",
+      "createdAt": "2020-10-06T04:20:13.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'd also add, that we need to make the descriptions for all of the events a lot more precise if we're going to achieve meaningful interoperability.  That's also true for a lot of the other APIs I've seen - often the descriptions are a very short summary but that leaves a lot of room for different interpretations.",
+      "createdAt": "2020-10-06T04:49:55.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@!340345049063882753> thanks for the write-up.  Totally agree that we need to define many items more strongly.  Also agree with the definitions you have provided.\n\nHaving read through the doc, I'm wondering if we need to drop the \"head\" event in favor of a more generic \"state\" event.  It would have the fields of the existing event, plus a \"distance\" field that is the number of slots between the slot of the head block root and the current slot.  This would be less confusing for users and implementors, and provide the additional information as to if the state was updated due to a block or not.  The latter could be used by clients to fetch information but consider it provisional until a block has been received (either back-filling the missed slot and causing a chain re-org, or ahead of the missing slot and continuing the existing chain).\n\nA more radical option could be to combine the current \"head\" and \"chain reorg\" events in to a single \"state\" event that describes the state of the chain including the \"reorg distance\" when reorgs happen.  Thinking behind this is that the reorg will always result in a new state, so we'd be pushing out two events at current and that would require end users to handle both, or just ignore the reorg and follow the head events.\n\nThoughts?",
+      "createdAt": "2020-10-06T06:25:50.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@!144468805697929216> I'd like to avoid the validator having to make difficult decisions about whether filling in empty slots is a reorg or not if possible, so I'm not a real fan of the first option.\n\nI really like the second option, and that's exactly the direction the events internally to Teku are going to work.  https://github.com/PegaSysEng/teku/blob/2b904e80818d94b2d92d558b4f3db89f5c153c41/storage/api/src/main/java/tech/pegasys/teku/storage/api/ChainHeadChannel.java is the event definition.",
+      "createdAt": "2020-10-06T06:30:56.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Couldn't we just include number of skip slots since parent block in head event and than we can handle everything?",
+      "createdAt": "2020-10-06T06:37:02.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "You'd still need reorg events for when the chain switches to a different fork.",
+      "createdAt": "2020-10-06T06:39:55.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "reorg from different head is fine and we do that, but reorg from skip slots requires modifying forkchoice and event itself",
+      "createdAt": "2020-10-06T06:40:39.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Well fork choice just chooses the best block so that doesn't change, and the `Store` defined in the fork choice spec includes the current time so knows the current slot which is the only other part.  Just fork choice spec doesn't include any notifications for events because that's out of scope.  So I don't really think you need to be modifying fork choice itself.",
+      "createdAt": "2020-10-06T06:42:28.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "This feels like one of those areas you move out of the spec and into the realm of extra things real world clients have to do/track to be useful beyond just implementing the consensus spec itself.",
+      "createdAt": "2020-10-06T06:43:14.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think both solutions are pretty similar, it just saves on user (and developer) effort to have a unified \"state\" event.",
+      "createdAt": "2020-10-06T06:45:18.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I guess it ultimately depends on whether we view the beacon node as tracking a chain of slots, or a chain of blocks.  If we consistently view the chain head as the latest block and ignore empty slots, the validator client can decide that the slot must be empty if it hasn't received a head update some time after the start of the slot, then if it later does receive a head update for that slot knows it has to recalculate.\n\nJust to me it feels weird that the validator client is picking up responsibilities for tracking the state of the chain.  My world view is that the beacon node tracks the state of the chain, and the validator client responds to and operates on that.  So naturally I see the chain as a sequence of slots, some of which have blocks.",
+      "createdAt": "2020-10-06T06:48:53.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Yep agree with the \"tracking slots\" piece.  My bad for selecting a block-based event.  I _think_ this also tidies up the issues that we were talking about last week, as well, so we don't have to have \"slot time\" style events.\n\nOne thing I'm wondering about is the delay until publishing a new state event if there is no block.  I'm wondering if we want to make that 8 seconds rather than 4.  Reasoning (possibly poor reasoning) is that we will fetch attester duties at the earlier of receiving the state update notification or the wall time of the start of the next epoch (assuming we have no event at all for whatever reason).  We want to give the chain as much chance as possible to build the state with a block, but also have to allow for the time taken to generate the epoch transition so that the state event is pushed out in a timely fashion.  4 seconds for this seems like more than enough, so we could wait 8 seconds rather than 4 for the block to show up.",
+      "createdAt": "2020-10-06T06:59:23.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So my reasoning for updating the head at 1/3rd through the slot is that then it doubles as the perfect event to tell the validator client to create attestations, because it will be received either when the block is imported or 1/3rd through - precisely when validators should produce attestations.  The validator just has to make sure they don't produce a second attestation if the block is received late, but they should have that kind of guard in place anyway.",
+      "createdAt": "2020-10-06T07:02:33.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But the VC could trigger attestation creation purely on timing - the beacon node would likely want to ensure it had recently updated fork choice when the request to create an attestation comes in so that if it's going to swap to a different fork, the attestation it creates points to that.",
+      "createdAt": "2020-10-06T07:05:03.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Is that overloading the event?  Receiving a state event allows for the early creation of attestations, but the 4 second barrier should be managed internally by the VC, as you say.\n\nI'd rather avoid \"gratuitous reorgs\" if possible, and having the state event for an empty slot generated later should cut down on these.",
+      "createdAt": "2020-10-06T07:08:14.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I could live with it either way I think.",
+      "createdAt": "2020-10-06T07:09:03.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Here is a breakdown of delay from start of slot to time block received, for my local validator client.  A fair number do show up after the 4 seconds mark, which would result in quite a few reorgs (don't have the data for how many of those show up after 8 seconds, so still a bit of a guess, but I'd be happy in asserting the number of reorgs would be lower).",
+      "createdAt": "2020-10-06T07:09:58.895000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "screenshot_2020-10-06-080119.png",
+          "content": "1254840d5cf2abffbd830d813cce951a80794e07f6d1940bf4853ac7eda5af7a"
+        }
+      ]
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "(It's worth reiterating that I look at the API as still very much in flux until we have 2-3 working implementations out there.  So any tweaks we do now could be untweaked, or retweaked, depending on how they work in the wild).",
+      "createdAt": "2020-10-06T07:11:28.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'm just struggling to think through what the knock on effects would be inside the Teku beacon node.  We'd have to run fork choice 1/3rd through the slot in response to requests to create attestations, but at that point we'd ignore any new empty slots being added to the end, and only add those empty blocks at the later point in the slot.  I think if I were going to do that, I'd likely just delay until the end of the slot (ie start of the next one) and only then consider it empty.  I don't see an advantage to doing that update 2/3rds of the way through the slot.",
+      "createdAt": "2020-10-06T07:16:16.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "It's doable, and I suspect there's a bunch of teku-specific stuff there which is probably handled quite differently in other clients.",
+      "createdAt": "2020-10-06T07:16:41.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Actually, I take it back - the advantage of not waiting until the end of the slot, is that you can get a head start on calculating the block creation duties which you may need at the very start of the next slot.",
+      "createdAt": "2020-10-06T07:22:58.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Block proposal duties are set an additional epoch in advance, so there shouldn't be any need to rush there.",
+      "createdAt": "2020-10-06T07:31:05.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Attestation duties can be calculated one epoch ahead, but block proposal duties can only be calculated for the current epoch (this came as a surprise to me fairly recently).",
+      "createdAt": "2020-10-06T07:32:01.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Sorry, yeah, I was thinking wrong way round.",
+      "createdAt": "2020-10-06T07:33:54.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Given this is non-final, let's go with the 4 second delay and see how it pans out.  If it causes problems we can re-evaluate.",
+      "createdAt": "2020-10-06T07:34:32.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "is there some reason why there are no slots and no previous_justived checkpoint in the response of https://ethereum.github.io/eth2.0-APIs/#/Beacon/getStateFinalityCheckpoints ?",
+      "createdAt": "2020-10-06T14:04:13.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> is there some reason why there are no slots and no previous_justived checkpoint in the response of https://ethereum.github.io/eth2.0-APIs/#/Beacon/getStateFinalityCheckpoints ?\n<@514429265001971732> there is previous justified in response. What slot would we include there?",
+      "createdAt": "2020-10-06T14:07:05.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "waah i looked at the wrong tab or something, nvm",
+      "createdAt": "2020-10-06T14:08:00.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "but yes basically it would be the finalized slot most of the time",
+      "createdAt": "2020-10-06T14:10:30.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "though I think this is not always the case",
+      "createdAt": "2020-10-06T14:11:30.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> but yes basically it would be the finalized slot most of the time\n<@514429265001971732> but thats first slot of epoch?",
+      "createdAt": "2020-10-06T14:11:39.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Last*",
+      "createdAt": "2020-10-06T14:12:44.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Last Proposed*",
+      "createdAt": "2020-10-06T14:18:49.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ppf.",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "but actually I am super confused again *going back reading the spec once again*",
+      "createdAt": "2020-10-06T14:19:41.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mpetrunic",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Afaik epoch boundary slot is is last slot wether it has block or not",
+      "createdAt": "2020-10-06T14:20:52.446000+00:00",
+      "attachments": []
+    }
+  ]
+}

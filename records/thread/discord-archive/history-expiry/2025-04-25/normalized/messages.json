@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "channel": "history-expiry",
+  "date": "2025-04-25",
+  "messageCount": 37,
+  "sourceHash": "66676efc8e5544fb7dec55203806bed553e01615e13e9321201e52e438e3ec09",
+  "searchText": "Follow up on ACD call today; Sepolia history drop was merged to Nethermind master 2 days ago https://github.com/NethermindEth/nethermind/pull/8469 Can I make a thread here for testing? Tried expiry by pruning an existing full DB with Geth and Nimbus on Sepolia - it's not happy, Nimbus keeps following chain but Geth says it's not getting updates from consensus and does not import blocks as a result. Replacing Nimbus with Teku resolved it, so I'll point a very, very cautious finger at Nimbus here The current history expiry is basically an EL exercise CLs have done \"history expiry\" for a long time I am saying that when I am expiring this for Geth, it throws Nimbus for a loop from what I can see, and then Geth doesn't get FCUs any more and stops following chain I saw these logs on Geth during: ``` execution-1 | INFO [04-25|20:06:04.959] Log index head rendering in progress \"first block\"=5,843,907 \"last block\"=8,194,733 processed=88 remaining=0 elapsed=7.381s execution-1 | INFO [04-25|20:06:04.959] Log index head rendering finished \"first block\"=5,843,907 \"last block\"=8,194,733 processed=88 elapsed=7.381s execution-1 | WARN [04-25|20:07:00.730] Served eth_feeHistory conn=172.23.0.5:43552 reqid=3950 duration=\"115.303µs\" err=\"request beyond head block: requested 8194830, head 8194733\" execution-1 | WARN [04-25|20:07:00.730] Served eth_call conn=172.23.0.5:43556 reqid=3951 duration=\"376.427µs\" err=\"header for hash not found\" execution-1 | WARN [04-25|20:07:00.730] Served eth_feeHistory conn=172.23.0.5:43552 reqid=3952 duration=\"43.245µs\" err=\"request beyond head block: requested 8194830, head 8194733\" execution-1 | INFO [04-25|20:07:09.491] New local node record seq=1,737,642,312,626 id=b6485ff2b2809f01 ip=152.53.47.180 udp=23617 tcp=30313 execution-1 | WARN [04-25|20:08:06.576] Beacon client online, but no consensus updates received in a while. Please fix your beacon client to follow the chain! execution-1 | WARN [04-25|20:09:01.293] Served eth_feeHistory conn=172.23.0.5:53624 reqid=3953 duration=\"77.687µs\" err=\"request beyond head block: requested 8194840, head 8194733\" execution-1 | WARN [04-25|20:09:01.294] Served eth_getLogs conn=172.23.0.5:53640 reqid=3954 duration=\"273.614µs\" err=\"unknown block\" execution-1 | WARN [04-25|20:09:01.294] Served eth_call conn=172.23.0.5:53650 reqid=3955 duration=\"364.431µs\" err=\"header for hash not found\" execution-1 | WARN [04-25|20:09:01.294] Served eth_feeHistory conn=172.23.0.5:53624 reqid=3956 duration=\"63.687µs\" err=\"request beyond head block: requested 8194840, head 8194733\" ``` Yes it's an EL exercise, and it interacts with what CLs expect / how they talk to the EL Replace Nimbus with Teku and all is well Separate question: When pruning history from an existing Geth DB, am I expecting Pebble to release disk space? And in what time frame? Because so far, it hasn't <:harold:1019414542075297892> can you provide (ideally debug) logs of what Nimbus is doing? I think __feeHistory above is another app,, but _getLogs may have been Nimbus ... still trying to get deposit data that way despite 6110 Nimbus doesn't ever call feeHistory Yes I can one sec Yep that's another app it is, yeah, it's one of the things we'll address, but not in the mainnet release the eth1 chain syncer is separate code which runs regardless it's more interesting that its not getting the responses it wants is causing issues though Yeah give me like 5-10 minutes to make sure I have a good reproduction, and then I'll upload debug logs OK I have \"beacon client online but no consensus updates\" warning from Geth ... let me grab Nimbus logs to date Nimbus is still backfilling but that should not, I hope, kill things ... it didn't before pruning Geth history Can you get <https://www.dropbox.com/scl/fi/j9bkbmirqjfbdgn2r095x/nimbus-dbg-geth-expiry.log?rlkey=ikwd6pvj6227hcgx9bdljr5qf&st=3ooznjr0&dl=0> <@654267572107083777> ? yeah, got it it's hard to say, under certain circumstances backfill monopolizes bandwidth. But there's a more interesting, maybe, thing going on in that log. In the slot where it goes from something like 5 to 1 peers: ``` consensus-1 | DBG 2025-04-25 20:24:23.231+00:00 Failed to get block data topics=\"overseer\" peer=16U*XpQqtK peer_score=150 peer_speed=2588.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main consensus-1 | DBG 2025-04-25 20:24:23.467+00:00 Failed to get block data topics=\"overseer\" peer=16U*XpQqtK peer_score=0 peer_speed=2383.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main consensus-1 | DBG 2025-04-25 20:24:23.823+00:00 Failed to get block data topics=\"overseer\" peer=16U*XpQqtK peer_score=-150 peer_speed=2167.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main consensus-1 | DBG 2025-04-25 20:24:25.928+00:00 Failed to get block data topics=\"overseer\" peer=16U*TBWEvv peer_score=400 peer_speed=387130.0 index=1 reason=\"Failed to receive blocks on request, reason: (kind: InvalidResponseCode)\" direction=backward sync_ident=main ``` The syncing happening here is CL not EL syncing, it's trying to get information from CL peers about CL blocks which are presumably in the 5 month retention window, and the responses it's getting are \"Execution layer not synced\" once it loses the CL peers it stops syncing entirely, and that's the proximate cause of what Geth sees/doesn't see. What I don't yet know is how to interpret those logs (the next step is it descores the peers in each case leading to disconnection) Roger. If you have a PR to try at some point, or a config change, @ me here and I'll deploy and test This `Execution layer not synced` message doesn't appear to be something Nimbus can generate: ``` nimbus-eth2$ rg \"Execution layer not synced\" | wc -l 0 ``` I can try and resync Nimbus to make sure this isn't a red herring ... it could be entirely unrelated to history expiry well, partly it starts out in your logs having not that many peers, too, but maybe it dropped from a more usual amount I am doing a lot of testing and restarting, so this is low to start anyway, peer count seems to be the most direct antecedent of the issues, it was low then it went to 0 and I'm not sure how \"Execution layer not synced\" is even a sensical answer to a CL block request even as an error the direction=backward there does indicate it's while doing backfill OK so I resynced Nimbus. Same thing, I see peers ... it goes to 0 but then back up to 2 and 1, that might just be what happens after restart. But Geth doesn't get to follow the chain \"no consensus updates received\" from Geth, and Nimbus has 5 peers is Nimbus following its chain You know what, a thousand apologies. Red herring. Fresh sync of Geth without expiry, same issue. Let's take it out of this channel Yes it appears to be. Hopping over to your Discord",
+  "excerpts": [
+    {
+      "author": "ben_a_adams",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Follow up on ACD call today; Sepolia history drop was merged to Nethermind master 2 days ago https://github.com/NethermindEth/nethermind/pull/8469",
+      "createdAt": "2025-04-25T00:49:10.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Can I make a thread here for testing? Tried expiry by pruning an existing full DB with Geth and Nimbus on Sepolia - it's not happy, Nimbus keeps following chain but Geth says it's not getting updates from consensus and does not import blocks as a result. \nReplacing Nimbus with Teku resolved it, so I'll point a very, very cautious finger at Nimbus here",
+      "createdAt": "2025-04-25T20:14:19.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The current history expiry is basically an EL exercise",
+      "createdAt": "2025-04-25T20:15:50.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "CLs have done \"history expiry\" for a long time",
+      "createdAt": "2025-04-25T20:16:09.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I am saying that when I am expiring this for Geth, it throws Nimbus for a loop from what I can see, and then Geth doesn't get FCUs any more and stops following chain\n\nI saw these logs on Geth during:\n```\nexecution-1  | INFO [04-25|20:06:04.959] Log index head rendering in progress     \"first block\"=5,843,907 \"last block\"=8,194,733 processed=88 remaining=0 elapsed=7.381s\nexecution-1  | INFO [04-25|20:06:04.959] Log index head rendering finished        \"first block\"=5,843,907 \"last block\"=8,194,733 processed=88 elapsed=7.381s\nexecution-1  | WARN [04-25|20:07:00.730] Served eth_feeHistory                    conn=172.23.0.5:43552 reqid=3950 duration=\"115.303µs\" err=\"request beyond head block: requested 8194830, head 8194733\"\nexecution-1  | WARN [04-25|20:07:00.730] Served eth_call                          conn=172.23.0.5:43556 reqid=3951 duration=\"376.427µs\" err=\"header for hash not found\"\nexecution-1  | WARN [04-25|20:07:00.730] Served eth_feeHistory                    conn=172.23.0.5:43552 reqid=3952 duration=\"43.245µs\" err=\"request beyond head block: requested 8194830, head 8194733\"\nexecution-1  | INFO [04-25|20:07:09.491] New local node record                    seq=1,737,642,312,626 id=b6485ff2b2809f01 ip=152.53.47.180 udp=23617 tcp=30313\nexecution-1  | WARN [04-25|20:08:06.576] Beacon client online, but no consensus updates received in a while. Please fix your beacon client to follow the chain!\nexecution-1  | WARN [04-25|20:09:01.293] Served eth_feeHistory                    conn=172.23.0.5:53624 reqid=3953 duration=\"77.687µs\" err=\"request beyond head block: requested 8194840, head 8194733\"\nexecution-1  | WARN [04-25|20:09:01.294] Served eth_getLogs                       conn=172.23.0.5:53640 reqid=3954 duration=\"273.614µs\" err=\"unknown block\"\nexecution-1  | WARN [04-25|20:09:01.294] Served eth_call                          conn=172.23.0.5:53650 reqid=3955 duration=\"364.431µs\" err=\"header for hash not found\"\nexecution-1  | WARN [04-25|20:09:01.294] Served eth_feeHistory                    conn=172.23.0.5:53624 reqid=3956 duration=\"63.687µs\" err=\"request beyond head block: requested 8194840, head 8194733\"\n```",
+      "createdAt": "2025-04-25T20:17:22.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes it's an EL exercise, and it interacts with what CLs expect / how they talk to the EL",
+      "createdAt": "2025-04-25T20:17:40.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Replace Nimbus with Teku and all is well",
+      "createdAt": "2025-04-25T20:18:02.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Separate question: When pruning history from an existing Geth DB, am I expecting Pebble to release disk space? And in what time frame? Because so far, it hasn't <:harold:1019414542075297892>",
+      "createdAt": "2025-04-25T20:19:09.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "can you provide (ideally debug) logs of what Nimbus is doing?",
+      "createdAt": "2025-04-25T20:21:26.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think __feeHistory above is another app,, but _getLogs may have been Nimbus ... still trying to get deposit data that way despite 6110",
+      "createdAt": "2025-04-25T20:21:29.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Nimbus doesn't ever call feeHistory",
+      "createdAt": "2025-04-25T20:21:41.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes I can one sec",
+      "createdAt": "2025-04-25T20:21:44.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yep that's another app",
+      "createdAt": "2025-04-25T20:21:49.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is, yeah, it's one of the things we'll address, but not in the mainnet release",
+      "createdAt": "2025-04-25T20:22:44.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the eth1 chain syncer is separate code which runs regardless",
+      "createdAt": "2025-04-25T20:23:06.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's more interesting that its not getting the responses it wants is causing issues though",
+      "createdAt": "2025-04-25T20:23:35.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah give me like 5-10 minutes to make sure I have a good reproduction, and then I'll upload debug logs",
+      "createdAt": "2025-04-25T20:25:11.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "OK I have \"beacon client online but no consensus updates\" warning from Geth ... let me grab Nimbus logs to date",
+      "createdAt": "2025-04-25T20:25:37.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Nimbus is still backfilling but that should not, I hope, kill things ... it didn't before pruning Geth history",
+      "createdAt": "2025-04-25T20:26:16.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Can you get <https://www.dropbox.com/scl/fi/j9bkbmirqjfbdgn2r095x/nimbus-dbg-geth-expiry.log?rlkey=ikwd6pvj6227hcgx9bdljr5qf&st=3ooznjr0&dl=0> <@654267572107083777> ?",
+      "createdAt": "2025-04-25T20:28:32.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah, got it",
+      "createdAt": "2025-04-25T20:30:32.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's hard to say, under certain circumstances backfill monopolizes bandwidth. But there's a more interesting, maybe, thing going on in that log.\n\nIn the slot where it goes from something like 5 to 1 peers:\n```\nconsensus-1  | DBG 2025-04-25 20:24:23.231+00:00 Failed to get block data                   topics=\"overseer\" peer=16U*XpQqtK peer_score=150 peer_speed=2588.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main\nconsensus-1  | DBG 2025-04-25 20:24:23.467+00:00 Failed to get block data                   topics=\"overseer\" peer=16U*XpQqtK peer_score=0 peer_speed=2383.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main\nconsensus-1  | DBG 2025-04-25 20:24:23.823+00:00 Failed to get block data                   topics=\"overseer\" peer=16U*XpQqtK peer_score=-150 peer_speed=2167.0 index=0 reason=\"Failed to receive blocks on request, reason: (kind: ReceivedErrorResponse, responseCode: ResourceUnavailable, errorMsg: \\\"Execution layer not synced\\\")\" direction=backward sync_ident=main\nconsensus-1  | DBG 2025-04-25 20:24:25.928+00:00 Failed to get block data                   topics=\"overseer\" peer=16U*TBWEvv peer_score=400 peer_speed=387130.0 index=1 reason=\"Failed to receive blocks on request, reason: (kind: InvalidResponseCode)\" direction=backward sync_ident=main\n```\n\nThe syncing happening here is CL not EL syncing, it's trying to get information from CL peers about CL blocks which are presumably in the 5 month retention window, and the responses it's getting are \"Execution layer not synced\"",
+      "createdAt": "2025-04-25T20:37:26.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "once it loses the CL peers it stops syncing entirely, and that's the proximate cause of what Geth sees/doesn't see. What I don't yet know is how to interpret those logs (the next step is it descores the peers in each case leading to disconnection)",
+      "createdAt": "2025-04-25T20:38:41.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Roger. If you have a PR to try at some point, or a config change, @ me here and I'll deploy and test",
+      "createdAt": "2025-04-25T20:39:39.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This `Execution layer not synced` message doesn't appear to be something Nimbus can generate:\n```\nnimbus-eth2$ rg \"Execution layer not synced\" | wc -l\n0\n```",
+      "createdAt": "2025-04-25T20:39:42.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can try and resync Nimbus to make sure this isn't a red herring ... it could be entirely unrelated to history expiry",
+      "createdAt": "2025-04-25T20:41:07.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "well, partly it starts out in your logs having not that many peers, too, but maybe it dropped from a more usual amount",
+      "createdAt": "2025-04-25T20:41:38.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I am doing a lot of testing and restarting, so this is low to start",
+      "createdAt": "2025-04-25T20:41:58.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "anyway, peer count seems to be the most direct antecedent of the issues, it was low then it went to 0",
+      "createdAt": "2025-04-25T20:42:09.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and I'm not sure how \"Execution layer not synced\" is even a sensical answer to a CL block request",
+      "createdAt": "2025-04-25T20:42:40.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "even as an error",
+      "createdAt": "2025-04-25T20:42:51.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the direction=backward there does indicate it's while doing backfill",
+      "createdAt": "2025-04-25T20:43:34.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "OK so I resynced Nimbus. Same thing, I see peers ... it goes to 0 but then back up to 2 and 1, that might just be what happens after restart. But Geth doesn't get to follow the chain",
+      "createdAt": "2025-04-25T20:45:24.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"no consensus updates received\" from Geth, and Nimbus has 5 peers",
+      "createdAt": "2025-04-25T20:45:48.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "is Nimbus following its chain",
+      "createdAt": "2025-04-25T20:48:12.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You know what, a thousand apologies. Red herring. Fresh sync of Geth without expiry, same issue. Let's take it out of this channel",
+      "createdAt": "2025-04-25T20:48:56.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yorickdowne",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes it appears to be. Hopping over to your Discord",
+      "createdAt": "2025-04-25T20:49:30.791000+00:00",
+      "attachments": []
+    }
+  ]
+}

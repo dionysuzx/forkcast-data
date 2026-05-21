@@ -45,12 +45,13 @@ const ingestOptions = (args: Args) => ({
   pmRoot: str(args, "pm-root", process.env.PM_ROOT ?? "/Users/lucy/fun/pm"),
   pmLeanOut: str(args, "pm-lean-out", process.env.PM_LEAN_OUT ?? "/Users/lucy/fun/pm-lean/out"),
   forkcastRoot: str(args, "forkcast-root", process.env.FORKCAST_ROOT ?? "/Users/lucy/fun/forkcast"),
+  eipsRoot: str(args, "eips-root", process.env.EIPS_ROOT ?? "/Users/lucy/fun/acd-process/EIPs"),
   ethRndArchiveRoot: str(args, "eth-rnd-archive-root", process.env.ETH_RND_ARCHIVE_ROOT ?? "/Users/lucy/fun/ro-repos/eth-rnd-archive")
 });
 
 const help = (): void => {
   console.log(`forkcast-data commands:
-  ingest --source live|all|forkcast|pm|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
+  ingest --source canonical|all|eips|forkcast|pm|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
   derive
   backfill
   validate

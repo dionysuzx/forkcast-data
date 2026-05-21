@@ -1,0 +1,95 @@
+{
+  "id": 8141,
+  "title": "EIP-8141: Frame Transaction",
+  "status": "Draft",
+  "description": "Add frame abstraction for transaction validation, execution, and gas payment",
+  "laymanDescription": "A new transaction type that lets smart accounts verify transactions themselves instead of relying on traditional signatures. This enables post-quantum security, flexible wallet features like social recovery, and native gas sponsorship.",
+  "author": "Vitalik Buterin (@vbuterin), lightclient (@lightclient), Felix Lange (@fjl), Yoav Weiss (@yoavw), Alex Forshtat (@forshtat), Dror Tirosh (@drortirosh), Shahaf Nacson (@shahafn), Derek Chiang (@derekchiang)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2026-01-29",
+  "discussionLink": "https://ethereum-magicians.org/t/frame-transaction/27617",
+  "requires": [
+    "2718",
+    "4844"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Hegota",
+      "statusHistory": [
+        {
+          "status": "Considered",
+          "call": "acde/233",
+          "date": "2026-03-26",
+          "timestamp": 5871
+        }
+      ],
+      "isHeadliner": false,
+      "wasHeadlinerCandidate": true,
+      "champions": [
+        {
+          "name": "Felix Lange",
+          "discord": "fjl"
+        },
+        {
+          "name": "lightclient",
+          "discord": "lightclient"
+        }
+      ],
+      "presentationHistory": [
+        {
+          "type": "headliner_proposal",
+          "link": "https://ethereum-magicians.org/t/hegota-headliner-proposal-frame-transaction/27618",
+          "date": "2026-01-29"
+        },
+        {
+          "type": "headliner_presentation",
+          "call": "acde/229",
+          "date": "2026-01-29"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Better wallet UX with flexible security options, gas sponsorship, and future-proof post-quantum protection."
+    },
+    "appDevs": {
+      "description": "Native AA infrastructure simplifies onboarding flows and enables new transaction patterns."
+    },
+    "walletDevs": {
+      "description": "Must implement new transaction type and frame-based validation; provides path to advanced wallet features."
+    },
+    "toolingInfra": {
+      "description": "Block explorers and indexers need to parse new transaction format and per-frame receipts."
+    },
+    "layer2s": {
+      "description": "Can adopt same transaction type for cross-layer AA consistency."
+    },
+    "stakersNodes": {
+      "description": "Mempool implementations need validation rules per ERC-7562 to prevent DoS."
+    },
+    "clClients": {
+      "description": "No direct changes required."
+    },
+    "elClients": {
+      "description": "Significant implementation: new tx type, APPROVE opcode, TXPARAM opcodes, frame execution loop, and receipt changes."
+    }
+  },
+  "benefits": [
+    "Provides off-ramp from ECDSA to post-quantum secure signature schemes",
+    "Enables native account abstraction without separate mempool or bundlers",
+    "Allows gas sponsorship where third parties pay transaction fees",
+    "Supports flexible wallet features like social recovery and multi-sig"
+  ],
+  "tradeoffs": [
+    "Introduces new DoS vectors requiring ERC-7562 style mempool restrictions",
+    "Changes ORIGIN opcode behavior for frame transactions"
+  ],
+  "abstract": "",
+  "bodyPreview": "## Abstract Add a new transaction whose validity and gas payment can be defined abstractly. Instead of relying solely on a single ECDSA signature, accounts may freely define and interpret their signature scheme using any cryptographic system. ## Motivation This new transaction provides a native off-ramp from the elliptic curve based cryptographic system used to authenticate transactions today, to post-quantum (PQ) secure systems. In doing so, it realizes the original vision of account abstraction: unlinking accounts from a prescribed ECDSA key and support alternative fee payment schemes. The assumption of an account simply becomes an address with code. It leverages the EVM to support arbitrary *user-defined* definitions of validation and gas payment. ## Specification ### Constants | Name | Value | |---------------------------|-----------------| | `FRAME_TX_TYPE` | `0x06` | | `FRAME_TX_INTRINSIC_COST` | `15000` | | `ENTRY_POINT` | `address(0xaa)` | | `MAX_FRAMES` | `10^3` | ### Opcodes | Name | Value | |-----------------|--------| | `APPROVE` | `0xaa` | | `TXPARAM` | `0xb0` | | `FRAMEDATALOAD` | `0xb1` | | `FRAMEDATACOPY` | `0xb2` | ### New Transaction Type A new [EIP-2718](./eip-2718.md) transaction with type `FRAME_TX_TYPE` is introduced. Transactions of this type are referred to as \"Frame transactions\". The payload is defined as the RLP serialization of the following: ``` [chain_id, nonce, sender, frames, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes] frames = [[mode, target, gas_limit, data], ...] ``` If no blobs are included, `blob_versioned_hashes` must be an empty list and `max_fee_per_blob_gas` must be `0`. #### Frame Modes The `mode` of each frame sets the context of execution. It allows the protocol to identify the purpose of the frame within the execution loop. The execution mode of a frame is identified by the lower bits (<= 8) of the `mode` field. The modes are explained in detail below. | `mode & 0xFF` | Name | Summary | |---------------|----------------|--------------------------------------------| | 0 | `DEFAULT` mode | Execute frame as `ENTRY_POINT` | | 1 | `VERIFY` mode | Frame identifies as transaction validation | | 2 | `SENDER` mode | Execute frame as `sender` | | 3..255 | reserved | ##### `DEFAULT` Mode Frame executes as regular call where the caller address is `ENTRY_POINT`. ##### `VERIFY` Mode Identifies the frame as a validation frame. Its purpose is to *verify* that a sender and/or payer authorized the transaction. It must call `APPROVE` during execution. Failure to do so will result in the whole transaction being invalid. The execution behaves the same as `STATICCALL`, state cannot be modified. Frames in this mode will have their data elided from signature hash calculation and from introspection by other frames. ##### `SENDER` Mode Frame executes as regular call where the caller address is `sender`. This mode effectively acts on behalf of the transaction sender and can only be used after explicitly approved. ##### Approval Bits The upper bits (> 8) of `mode` configure the execution environment. | Mode bit | Meaning | |----------|------------------------------| | 9 | APPROVE of execution allowed | | 10 | APPROVE of payment allowed | #### Constraints Some validity constraints can be determined statically. They are outlined below: ```python assert tx.chain_id < 2**256 assert tx.nonce < 2**64 assert len(tx.frames) > 0 and len(tx.frames) <= MAX_FRAMES assert len(tx.sender) == 20 assert tx.frames[n].mode < 3 assert len(tx.frames[n].target) == 20 or tx.frames[n].target is None ``` #### Receipt The `ReceiptPayload` is defined as: ``` [cumulative_gas_used, payer, [frame_receipt, ...]] frame_receipt = [status, gas_used, logs] ``` `payer` is the address of the account that paid the fees for the transaction. `status` is the return code of the top-level call. #### Signature Hash With the frame transaction, the signature may be at an arbitrary location in the frame list. In the canonical signature hash any frame with mode `VERIFY` will have its data elided: ```python def compute_sig_hash(tx: FrameTx) -> Hash: for i, frame in enumerate(tx.frames): if frame.mode == VERIFY: tx.frames[i].data = Bytes() return keccak(rlp(tx)) ``` ### New Opcodes #### `APPROVE` opcode (`0xaa`) The `APPROVE` opcode is like `RETURN (0xf3)`. It exits the current context successfully and updates the transaction-scoped approval context based on the `scope` operand. If the currently executing account is not `frame.target` (i.e. if `ADDRESS != frame.target`), `APPROVE` reverts. ##### Stack | Stack | Value | | ---------- | ------------ | | `top - 0` | `offset` | | `top - 1` | `length` | | `top - 2` | `scope` | ##### Scope Operand The `scope` operand must be one of the following values: 1. `0x0`: Approval of execution - the sender contract approves future frames calling on its behalf. - Note this is only valid when `frame.target` equals `tx.sender`. 2. `0x1`: Approval of payment - the contract approves paying the total gas cost for the transaction. 3. `0x2`: Approval of execution and payment - combines both `0x0` and `0x1`. Any other value results in an exceptional halt. Usabe `scope` operands are constrained by bits 9 and 10 of the `frame.mode`, and using a non-allowed scope also results in an exceptional halt. - If `(frame.mode>>8) & 3 == 1`, only scope `0x0` can be used. - If `(frame.mode>>8) & 3 == 2`, only scope `0x1` can be used. - If `(frame.mode>>8) & 3 == 3`, scope `0x0`, `0x1` or `0x2` can be used. ##### Behavior The behavior of `APPROVE` is defined as follows: - If `ADDRESS != frame.target`, revert. - For scopes `0`,`1`, and `2`, execute the following: - `0x0`: Set `sender_approved = true`. - If `sender_approved` was already set, revert the frame. - If `frame.target` != `tx.sender`, revert the frame. - `0x1`: Increment the sender's nonce, collect the total gas cost of the transaction from the account, and set `payer_approved = true`. - If `payer_approved` "
+}

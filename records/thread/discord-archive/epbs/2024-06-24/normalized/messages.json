@@ -1,0 +1,704 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2024-06-24",
+  "messageCount": 86,
+  "sourceHash": "2c4d50acebf576ba41c26c4b1d96c864383f058b3e7703cc6c0624f86bc68db3",
+  "searchText": "Opened a new issue, we didn't discuss the issue of bypasseability that some people wanted raised at the end of the breakout 2, added it again to the agenda. If you're interested in this please show up. I'm not particularly interested in the topic which is probably why I forgot to bring it up in the last meeting. https://github.com/ethereum/pm/issues/1083 ok so we would go from around `9 sec` (MEV boost) to around `6 sec` (ePBS) for building + broadcasting ILs, and the builder would have to be the one including the IL_agg. Good to know! That's seems to be the only solution I can see for this issue, the problem here is that ILs on a centralized player aren't really effective I think it would be better to delay validation of the IL by one slot and allow the proposer to submit it But anyway with the committee approach I think it's fine if it's the builder Yeah if the builder is constrained by the committee like in FOCIL it might be fine... So the other option would be to increase the time between broadcast and attest for the beacon block and allow ILs to be included by the proposer. - t-6: payload is broadcast, IL committee can start building local ILs - t=0: Deadline, locals ILs have to be broadcast before then - t=2: CL block is broadcast and includes the IL aggregate - t=3-5: Attesters check also check validity conditions associated with ILs Catching up on the discussion, just a quick thought (maybe dumb): in FOCIL, what if the IL proposers for the IL of slot `n+1` were sampled from the PTC of slot `n`, and the PTC members of slot `n+1` are responsible for checking that `IL_agg` (as included by the builder of slot `n+1`) is consistent with the local ILs released by the IL proposers? So making the PTC the only locus for IL decisions. Anyway the PTC is all about overloading the fork choice, so might as well keep going instead of overloading it both with the PTC and the beacon attesters. Definitely worth considering, the only obvious trade-off I see is: the PTC for a given slot would now be in charge of both proposing local ILs (for n), and enforcing the IL_agg (from n-1). So as an adversary if you manage to control enough PTC members, you could effectively invalidate both slot n-1 and slot n ILs? No it would be different PTCs, the one from slot `n` makes the IL (IL proposers are sampled from there) and the one from slot `n+1` enforces the IL ah right right ok, so the only weaker part comes from the fact that a (PTC) committee is now enforcing the IL rather than all attesters yes but the committee is already enforcing builder payload validity. I agree that it's weaker though. Or you could say \"beacon attesters of slot `n+2` are the enforcers too\" but anyways the PTC would have to decide validity of the block for themselves with respect to the IL satisfaction wait, but we agree the PTC for one slot is still involved in two tasks right? (just not on the same IL) - Making the IL for slot n - Enforcing the IL made during slot n-1 Right, that's correct ok so one, single corrupted PTC could \"affect\" two ILs Oooh ok then I see what you meant with your previous comment yeah agreed a saving grace is that there would be subsampling of the PTC to choose the IL proposers, and with FOCIL you really only need a couple of honest proposers to be almost maximally effective, so even if the PTC had a high proportion of adversary, it might only be able to invalidate the enforcement of the previous IL, but not the production of the next IL I agree! Ah but in the latest version. We dont want PTC to enforce payload validity. We only want PTC to enforce timlieness that is if the builder has revealed the payload or withheld message on time So then you make the attesters of slot `n+2` enforce block validity right? It means that they'd have to be listening for local ILs produced at the tail end of slot `n` or during slot `n+1` (after the slot `n` builder has released their payload in any case). I think it's stronger for attesters to do the enforcement so I like that, but it means that it expands their \"active span\" from (between the end of `n+1` PTC to their vote at `n+2`) to (between the end of `n` PTC to their vote at `n+2`). If the active span expansion is not an issue then I think it's a stronger design perhaps Sorry working in a hotel that doesn't have internet in my room, late to this discussion so not sure if this has been covered below, but this doesn't work cause this imposses the PTC has to validate the payload in a hot path. These are the constrains on any IL system for next slot, no matter if it's committee based or not: - The IL builder, that entity or entities that have to decide which txs have to be in the next payload, need to have validated the last payload they build on, therefore they can only start working on this list after the payload has been revealed. - The IL validity enforcers, namely those that need to check that the receiving IL should be actually enforcing the next payload validity, would have to have the parent blockhash of this IL already validated by the time they start checking the validity condition, and will need to execute the IL itself to check it's valid. Both of these paths **should not** be hot in my opinion. I do not think there is a clean solution to these problems at all. Here is what I think it's kinda forced for FOCIL + ePBS and I think this may not really work: The first point I think forces the IL senders to start at second zero of the slot. This is because the payload is revealed at second 6 and any time before second 12 (zero of the next slot) diminishes the 6 seconds that we give today proposers. This would be the committee in the FOCIL design, they would send the ILs they want to force for slot N during second zero of slot N. The second point, is not so problematic if the builder reveals the IL aggregate, since the attesters are the ones enforcing validity and they will do so 9 seconds after the payload reveal. The bigest problem is for builders: they are seeing an IL that they need to satisfy at N, during the start of slot N. This is impossible. Therefore I think the only way I can imagine to solve this conundrum is to lose the property that FOCIL brings and fallback to the same problem that 7547 has. I propose the following variation of FOCIL, this is the timeline for the IL. Second 0 of slot N: the IL committee submits their txs for slot N+1. This list consists of addresses and not the full txs. Second 0 The proposer gathers bids and sends a CL block with a payload committed. Second 6 payload is revealed, together with the IL aggregate for N+1. This aggregate may have addresses that were invalidated by it's own payload! Second 3 of N+1 attesters vote on the validity of the payload for N and the validity of the aggregate included. Why cant IL senders to start at second 11, you dont think that is enough time? Yeah I think that makes sense to me. The delay is still one slot as opposed to two slots in fork inlcusion list version In that version the IL proposers don't know the payload of slot `n` before they make a list for slot `n+1`. I don't see what's in the hot path in the following: - Second 9 of slot `n`: Some IL proposers are sampled from the set of validators to make a list that applies to slot `n+1`, after the payload of `n` was revealed. - Second 0 of slot `n+1`: The IL proposers release their local ILs - Second 6 of slot `n+1`: The builder releases the payload which includes `IL_agg` - Second 4 of slot `n+2`: The attesters check payload `n+1` validity, including whether `IL_agg` is consistent with the local ILs and whether the payload satisfies `IL_agg` That makes the PTC be in a hot path: they need to validate the payload and this makes ePBS lose one of it's best features: going from validators needing 2 seconds to validate a block to needing 9 (or 6 when they propose) Maybe I don't understand what \"the hot path\" is then, but I am not even mentioning the PTC doing anything in the four bullet points above Oh wait, your IL proposers release their local ILs in second 0, that' s exactly what I propose in the version I propose the second zero of slot N is proposing an IL to be included in N, in your version this is N+1 The problem is the builder of N+1 You're proposing that they release for `n+1` without seeing the payload of `n`, but I think it's best if they know the payload of `n` to propose for `n+1` no, I am proposing they release for n+1 after seeing n Essentially you're proposing a forward IL, whereas I'd like to achieve a spot IL we are proposing the exact same thing You just shifted N -> N+1 > Second 0 of slot N: the IL committee submits their txs for slot N+1. How can the committee submit transactions for `n+1` having seen the payload of slot `n` if they submit at second 0 of slot `n`? At second zero of N they submit the IL that will have to be satisfied by the builder of N+1 it is the exact same thing as you, and we both have the same problem. Using your notation, here is the problem: the builder of N+1, at second 6 may be invalidating some of the txs that are in its own aggregate this doesn' t happen in the original FOCIL proposal Do the IL proposers know the payload of slot `n` at second zero of `n`? no the IL proposers of second zero in N in my post have already synced the N-1 block and are proposing an IL that has to be included (as an aggregate) in the payload of N and that has to be satisfied by N+1 instead of focusing on how we are or not proposing the same thing, here's the issue with your proposal (regardless if it is equal to mine or not) It seems the only difference between this design (by Potuz and Barnabé) and the original is that the original design cannot invalidate IL transactions. However, this design has a gap because IL aggregate transactions could conflict with payload transactions, similar to the previous forward inclusion list. I believe this issue persists regardless of whether it's EPBS or not. this is correct, but the beauty of FOCIL without ePBS is that it doesn' t have this issue guys I'm a bit lost ^^ what's \"the original design\"? FOCIL without ePBS? https://ethresear.ch/t/fork-choice-enforced-inclusion-lists-focil-a-simple-committee-based-inclusion-list-proposal/19870 I think that' s what Terence says, and me too But I don' t think this is there without ePBS <@363800010518822915> I think FOCIL doesn't have this issue, cause the IL committee can guarantee it' s validity for N+1 Ok, regardless of hot path or not, can we agree that this preserves the property that the IL constraining block `n+1` is built with the knowledge of what block `n` is, and thus that there is no tx invalidation problems here? No, we don't agree here. Let me go through your proposal as in your message: > Second 9 of slot n: Some IL proposers are sampled from the set of validators to make a list that applies to slot n+1, after the payload of n was revealed. Ok, so these people have just seen the payload for `N` and start building an IL > Second 0 of slot n+1: The IL proposers release their local ILs Perfect, this is an IL that has tx that could be executed in N+1. However, in second 0 of N+1 the proposer in ePBS is already gathering bids for N+1 and the builder of N+1 hasn't seen these IL submitted yet. They can't therefore submit a bid If OTOH the IL is to be satisfied in N+2 then the builder of N+1 will invalidate some of the tx in the IL Oh ok I see, that's a different issue then, the builder at `n+1` needs to know the IL to commit to a bid. Yeah I guess I had the slot auction model in mind here, my bad. Slot auctions I think this works, but in that case we don' t even need FOCIL: we can do propsoers without the invalidation issue and require for the current slot, but I agree that slot auction solves this even for N+1 and there is no way to make builders wait until they see local ILs to start biding? not really, this makes an attack on builders by the IL committee and also constrains blocks to be built by x seconds and proposer have ",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Opened a new issue, we didn't discuss the issue of bypasseability that some people wanted raised at the end of the breakout 2, added it again to the agenda. If you're interested in this please show up. I'm not particularly interested in the topic which is probably why I forgot to bring it up in the last meeting. https://github.com/ethereum/pm/issues/1083",
+      "createdAt": "2024-06-24T10:47:34.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok so we would go from around `9 sec` (MEV boost)  to around `6 sec` (ePBS) for building + broadcasting ILs, and the builder would have to be the one including the IL_agg. Good to know!",
+      "createdAt": "2024-06-24T11:03:40.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's seems to be the only solution I can see for this issue, the problem here is that ILs on a centralized player aren't really effective",
+      "createdAt": "2024-06-24T11:08:17.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think it would be better to delay validation of the IL by one slot and allow the proposer to submit it",
+      "createdAt": "2024-06-24T11:08:44.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But anyway with the committee approach I think it's fine if it's the builder",
+      "createdAt": "2024-06-24T11:09:23.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah if the builder is constrained by the committee like in FOCIL it might be fine... So the other option would be to increase the time between broadcast and attest for the beacon block and allow ILs to  be included by the proposer. \n- t-6: payload is broadcast, IL committee can start building local ILs\n- t=0: Deadline, locals ILs have to be broadcast before then\n- t=2: CL block is broadcast and includes the IL aggregate\n- t=3-5: Attesters check also check validity conditions associated with ILs",
+      "createdAt": "2024-06-24T12:20:05.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Catching up on the discussion, just a quick thought (maybe dumb): in FOCIL, what if the IL proposers for the IL of slot `n+1` were sampled from the PTC of slot `n`, and the PTC members of slot `n+1` are responsible for checking that `IL_agg` (as included by the builder of slot `n+1`) is consistent with the local ILs released by the IL proposers? So making the PTC the only locus for IL decisions. Anyway the PTC is all about overloading the fork choice, so might as well keep going instead of overloading it both with the PTC and the beacon attesters.",
+      "createdAt": "2024-06-24T12:33:29.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Definitely worth considering, the only obvious trade-off I see is: the PTC for a given slot would now be in charge of both proposing local ILs (for n), and enforcing the IL_agg (from n-1). So as an adversary if you manage to control enough PTC members, you could effectively invalidate both slot n-1 and slot n ILs?",
+      "createdAt": "2024-06-24T12:41:14.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No it would be different PTCs, the one from slot `n` makes the IL (IL proposers are sampled from there) and the one from slot `n+1` enforces the IL",
+      "createdAt": "2024-06-24T12:42:16.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah right right ok, so the only weaker part comes from the fact that a (PTC) committee is now enforcing the IL rather than all attesters",
+      "createdAt": "2024-06-24T12:44:00.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes but the committee is already enforcing builder payload validity. I agree that it's weaker though. Or you could say \"beacon attesters of slot `n+2` are the enforcers too\" but anyways the PTC would have to decide validity of the block for themselves with respect to the IL satisfaction",
+      "createdAt": "2024-06-24T12:45:12.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "wait, but we agree the PTC for one slot is still involved in two tasks right? (just not on the same IL)\n- Making the IL for slot n\n- Enforcing the IL made during slot n-1",
+      "createdAt": "2024-06-24T12:47:05.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Right, that's correct",
+      "createdAt": "2024-06-24T12:47:34.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok so one, single corrupted PTC could \"affect\" two ILs",
+      "createdAt": "2024-06-24T12:47:56.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oooh ok then I see what you meant with your previous comment",
+      "createdAt": "2024-06-24T12:47:57.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah agreed",
+      "createdAt": "2024-06-24T12:48:04.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "a saving grace is that there would be subsampling of the PTC to choose the IL proposers, and with FOCIL you really only need a couple of honest proposers to be almost maximally effective, so even if the PTC had a high proportion of adversary, it might only be able to invalidate the enforcement of the previous IL, but not the production of the next IL",
+      "createdAt": "2024-06-24T12:50:33.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree!",
+      "createdAt": "2024-06-24T12:53:08.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah but in the latest version. We dont want PTC to enforce payload validity. We only want PTC to enforce timlieness that is if the builder has revealed the payload or withheld message on time",
+      "createdAt": "2024-06-24T13:19:03.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So then you make the attesters of slot `n+2` enforce block validity right? It means that they'd have to be listening for local ILs produced at the tail end of slot `n` or during slot `n+1` (after the slot `n` builder has released their payload in any case). I think it's stronger for attesters to do the enforcement so I like that, but it means that it expands their \"active span\" from (between the end of `n+1` PTC to their vote at `n+2`) to (between the end of `n` PTC to their vote at `n+2`). If the active span expansion is not an issue then I think it's a stronger design perhaps",
+      "createdAt": "2024-06-24T13:28:47.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry working in a hotel that doesn't have internet in my room, late to this discussion so not sure if this has been covered below, but this doesn't work cause this imposses the PTC has to validate the payload in a hot path.",
+      "createdAt": "2024-06-24T13:38:52.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "These are the constrains on any IL system for next slot, no matter if it's committee based or not:\n- The IL builder, that entity or entities that have to decide which txs have to be in the next payload, need to have validated the last payload they build on, therefore they can only start working on this list after the payload has been revealed. \n- The IL validity enforcers, namely those that need to check that the receiving IL  should be actually enforcing the next payload validity, would have to have the parent blockhash of this IL already validated by the time they start checking the validity condition, and will need to execute the IL itself to check it's valid. \n\nBoth of these paths **should not** be hot in my opinion. I do not think there is a clean solution to these problems at all. Here is what I think it's kinda forced for FOCIL + ePBS and I think this may not really work:\n\nThe first point I think forces the IL senders to start at second zero of the slot. This is because the payload is revealed at second 6 and any time before second 12 (zero of the next slot) diminishes the 6 seconds that we give today proposers. This would be the committee in the FOCIL design, they would send the ILs they want to force for slot N during second zero of slot N. \n\nThe second point, is not so problematic if the builder reveals the IL aggregate, since the attesters are the ones enforcing validity and they will do so 9 seconds after the payload reveal. \n\nThe bigest problem is for builders: they are seeing an IL that they need to satisfy at N, during the start of slot N. This is impossible. Therefore I think the only way I can imagine to solve this conundrum is to lose the property that FOCIL brings and fallback to the same problem that 7547 has. I propose the following variation of FOCIL, this is the timeline for the IL.",
+      "createdAt": "2024-06-24T13:52:51.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Second 0 of slot N: the IL committee submits their txs for slot N+1. This list consists of addresses and not the full txs.  \nSecond 0 The proposer gathers bids and sends a CL block with a payload committed. \nSecond 6 payload is revealed, together with the IL aggregate for N+1. This aggregate may have addresses that were invalidated by it's own payload!\nSecond 3 of N+1 attesters vote on the validity of the payload for N and the validity of the aggregate included.",
+      "createdAt": "2024-06-24T13:52:53.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why cant IL senders to start at second 11, you dont think that is enough time?",
+      "createdAt": "2024-06-24T13:58:45.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I think that makes sense to me. The delay is still one slot as opposed to two slots in fork inlcusion list version",
+      "createdAt": "2024-06-24T14:00:38.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In that version the IL proposers don't know the payload of slot `n` before they make a list for slot `n+1`.  I don't see what's in the hot path in the following:\n- Second 9 of slot `n`: Some IL proposers are sampled from the set of validators to make a list that applies to slot `n+1`, after the payload of `n` was revealed.\n- Second 0 of slot `n+1`: The IL proposers release their local ILs\n- Second 6 of slot `n+1`: The builder releases the payload which includes `IL_agg`\n- Second 4 of slot `n+2`: The attesters check payload `n+1` validity, including whether `IL_agg` is consistent with the local ILs and whether the payload satisfies `IL_agg`",
+      "createdAt": "2024-06-24T14:01:01.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That makes the PTC be in a hot path: they need to validate the payload and this makes ePBS lose one of it's best features: going from validators needing 2 seconds to validate a block to needing 9 (or 6 when they propose)",
+      "createdAt": "2024-06-24T14:02:18.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Maybe I don't understand what \"the hot path\" is then, but I am not even mentioning the PTC doing anything in the four bullet points above",
+      "createdAt": "2024-06-24T14:03:25.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh wait, your IL proposers release their local ILs in second 0, that' s exactly what I propose",
+      "createdAt": "2024-06-24T14:04:37.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in the version I propose the second zero of slot N is proposing an IL to be included in N, in your version this is N+1",
+      "createdAt": "2024-06-24T14:05:10.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem is the builder of N+1",
+      "createdAt": "2024-06-24T14:05:29.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You're proposing that they release for `n+1` without seeing the payload of `n`, but I think it's best if they know the payload of `n` to propose for `n+1`",
+      "createdAt": "2024-06-24T14:05:41.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, I am proposing they release for n+1 after seeing n",
+      "createdAt": "2024-06-24T14:05:59.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Essentially you're proposing a forward IL, whereas I'd like to achieve a spot IL",
+      "createdAt": "2024-06-24T14:06:07.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we are proposing the exact same thing",
+      "createdAt": "2024-06-24T14:06:24.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You just shifted N -> N+1",
+      "createdAt": "2024-06-24T14:06:41.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> Second 0 of slot N: the IL committee submits their txs for slot N+1.\nHow can the committee submit transactions for `n+1` having seen the payload of slot `n` if they submit at second 0 of slot `n`?",
+      "createdAt": "2024-06-24T14:07:41.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "At second zero of N they submit the IL that will have to be satisfied by the builder of N+1",
+      "createdAt": "2024-06-24T14:08:26.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it is the exact same thing as you, and we both have the same problem. Using your notation, here is the problem:",
+      "createdAt": "2024-06-24T14:08:46.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the builder of N+1, at second 6 may be invalidating some of the txs that are in its own aggregate",
+      "createdAt": "2024-06-24T14:09:13.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this doesn' t happen in the original FOCIL proposal",
+      "createdAt": "2024-06-24T14:09:24.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do the IL proposers know the payload of slot `n` at second zero of `n`?",
+      "createdAt": "2024-06-24T14:09:44.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no the IL proposers of second zero in N in my post have already synced the N-1 block and are proposing an IL that has to be included (as an aggregate) in the payload of N and that has to be satisfied by N+1",
+      "createdAt": "2024-06-24T14:10:45.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "instead of focusing on how we are or not proposing the same thing, here's the issue with your proposal (regardless if it is equal to mine or not)",
+      "createdAt": "2024-06-24T14:11:23.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It seems the only difference between this design (by Potuz and Barnabé) and the original is that the original design cannot invalidate IL transactions. However, this design has a gap because IL aggregate transactions could conflict with payload transactions, similar to the previous forward inclusion list. I believe this issue persists regardless of whether it's EPBS or not.",
+      "createdAt": "2024-06-24T14:13:53.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is correct, but the beauty of FOCIL without ePBS is that it doesn' t have this issue",
+      "createdAt": "2024-06-24T14:14:26.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "guys I'm a bit lost ^^ what's \"the original design\"?",
+      "createdAt": "2024-06-24T14:14:35.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "FOCIL without ePBS?",
+      "createdAt": "2024-06-24T14:14:50.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://ethresear.ch/t/fork-choice-enforced-inclusion-lists-focil-a-simple-committee-based-inclusion-list-proposal/19870",
+      "createdAt": "2024-06-24T14:14:58.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think that' s what Terence says, and me too",
+      "createdAt": "2024-06-24T14:15:00.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I don' t think this is there without ePBS <@363800010518822915>",
+      "createdAt": "2024-06-24T14:15:16.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think FOCIL doesn't have this issue, cause the IL committee can guarantee it' s validity for N+1",
+      "createdAt": "2024-06-24T14:15:35.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, regardless of hot path or not, can we agree that this preserves the property that the IL constraining block `n+1` is built with the knowledge of what block `n` is, and thus that there is no tx invalidation problems here?",
+      "createdAt": "2024-06-24T14:16:01.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, we don't agree here. Let me go through your proposal as in your message:\n> Second 9 of slot n: Some IL proposers are sampled from the set of validators to make a list that applies to slot n+1, after the payload of n was revealed.\nOk, so these people have just seen the payload for `N`  and start building an IL\n> Second 0 of slot n+1: The IL proposers release their local ILs\nPerfect, this is an IL that has tx that could be executed in N+1. \n\nHowever, in second 0 of N+1 the proposer in ePBS is already gathering bids for N+1 and the builder of N+1 hasn't seen these IL submitted yet. They can't therefore submit a bid",
+      "createdAt": "2024-06-24T14:18:48.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If OTOH the IL is to be satisfied in N+2 then the builder of N+1 will invalidate some of the tx in the IL",
+      "createdAt": "2024-06-24T14:19:19.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh ok I see, that's a different issue then, the builder at `n+1` needs to know the IL to commit to a bid. Yeah I guess I had the slot auction model in mind here, my bad.",
+      "createdAt": "2024-06-24T14:20:24.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Slot auctions I think this works, but in that case we don' t even need FOCIL: we can do propsoers without the invalidation issue and require for the current slot, but I agree that slot auction solves this even for N+1",
+      "createdAt": "2024-06-24T14:21:50.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and there is no way to make builders wait until they see local ILs to start biding?",
+      "createdAt": "2024-06-24T14:22:24.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not really, this makes an attack on builders by the IL committee and also constrains blocks to be built by x seconds and proposer have 6-x. This contention is innevitable",
+      "createdAt": "2024-06-24T14:23:31.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think FOCIL is still nice in slot auctions, the main upside is not relying on a single party that has full agency for doing the aggregation",
+      "createdAt": "2024-06-24T14:23:56.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I love the fact that proposers get 6 seconds and attesters 9, I would not want to lose this because this is scaling Ethereum",
+      "createdAt": "2024-06-24T14:24:09.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree with this, and also I'm bullish on slot auctions",
+      "createdAt": "2024-06-24T14:24:35.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "just on the IL committee attack: in FOCIL there is a deadline after which local ILs should not be considered",
+      "createdAt": "2024-06-24T14:24:47.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, but the attack here is that IL can include very tough txs that are likely to invalidate many txs in the block",
+      "createdAt": "2024-06-24T14:25:25.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and force a recomputation of the block by the builder",
+      "createdAt": "2024-06-24T14:25:33.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "example: The IL member sends an obvious frontrunnable tx and then sends in the IL a tx that invalidates it",
+      "createdAt": "2024-06-24T14:26:04.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but not statically, rather that invalidates the frontrun opportunity",
+      "createdAt": "2024-06-24T14:26:37.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah agree that it should account for builder \"recomputation time\" 👍",
+      "createdAt": "2024-06-24T14:27:39.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I never replied to you sorry, It's part of the same problem above of x vs 6-x, in this case x = 1",
+      "createdAt": "2024-06-24T14:28:14.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also agree we're generally trying to fit more into the same time duration so contention shouldn't come as a surprise",
+      "createdAt": "2024-06-24T14:28:20.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The only way to make this work is to fit everything under a more aggressive timeline. Given what we know today:\n1. My local node can get 50% of the current slot attestations in under 800 ms when subscribed well.\n2. The builder needs less than 500 ms to build a block.\n\nWe will have to fit another round into the 12-second slot:\n\n- Slot 0: Proposer release\n- Slot 3: Beacon attestation release\n- Slot 5: Builder release\n- Slot 6: PTC release\n- Slot 9: Local ILs release\n\nI dont feel good about this though",
+      "createdAt": "2024-06-24T14:31:54.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My general take is that we have a feature that actually scales Ethereum in the presence of statlessnes, losing this and putting hard requirements on validators would go against it. We do not have a theorem but so far every IL design we have points to a contention between this scalability and censorship resistance. I like both 7547 or FOCIL with a delayed block in that I rather move the computation time to the 6 seconds we now have, and deal with tx invalidation, than to have to  commit Ethereum forever on a hot  path of validation",
+      "createdAt": "2024-06-24T14:36:03.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "“Forever” or until we get to a slot auction-based thing (could be APS too), then I think things can be much more asynchronous",
+      "createdAt": "2024-06-24T14:44:19.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Have we put more thoughts on applying slot auction to current epbs design? I know there was some discussions during the retreat which I missed",
+      "createdAt": "2024-06-24T14:45:24.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I posted in Twitter this thing of epoch auctions instead of slot auctions. I honestly think this is as far as we could get in the near term. It does not look like a big leap from ePBS.",
+      "createdAt": "2024-06-24T14:49:39.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I’m still a bit confused by what “epoch auctions” mean though, is there a spec?",
+      "createdAt": "2024-06-24T14:50:31.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah. Why is epoch auction better than slot auction?",
+      "createdAt": "2024-06-24T14:50:51.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have been thinking about it, and I can't find strong arguments against JIT slot auctions. There is one attack in which a builder can equivocate and try to reorg the next block, but it's not clear if this attack leads to anything or if we even want to be protected against it. But I think I can formally prove that we are FFG safe, or better put just as fucked as we are today",
+      "createdAt": "2024-06-24T14:51:22.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That is simple to explain, a quick call would work better, but in the lack of it: JIT  slot auctions is essentially a few lines of difference from ePBS: just don't commit to a blockhash, just the builder. validity of the payload  header does not require to check the blockhash. \n\nEpoch auctions, the simples design (obviously unfair) would be that the slot 0 proposer, not only auctions the slot 0 payload but the next 32. The only requirement of the payload is that the first one has a parent blockhash being the parent of the slot 0 proposer and that any of the remaining ones has to be a descendant of the slot 0 post-state. That is, that they cannot reorg the target vote of attesters.  In the case of reorgs across the epoch boundary or simply slot 0 missing, just replace 0 above by \"the target block root\"",
+      "createdAt": "2024-06-24T14:55:34.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this is just as safe or unsafe as JIT slot auctions and has the option of implementing out of band reselling of these slots later on",
+      "createdAt": "2024-06-24T14:56:24.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see, that's a fun idea, would give interesting data about the value of blocks further and further into the future. But would also make the slot 0 proposer extremely pivotal (would accrue the value of the whole epoch) and also make it quite easy to pre-commit to offering sequences of consecutive slots",
+      "createdAt": "2024-06-24T15:23:50.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Slots 0 and 1 get reorged more often too. This might create more incentives for later slots to reorg them out.",
+      "createdAt": "2024-06-24T15:29:02.380000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-06-24_at_8.27.18_AM.png",
+          "content": "0e05d8996f7f6284a6bd902738532e9a159b27d05fb5908d636cc40113c32108"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Definitely, If I'm slot 1 proposer I would definitely want to reorg slot 0. I think making the protocol do the auction is a non-trivial engineering task, but at least it seems to me that it's purely engineering and not a fundamental problem with forkchoice as I see with the ideas of `N+32` floating around",
+      "createdAt": "2024-06-24T15:42:25.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The protocol can lock-in Randao MIX and make the auction reorg resistant as long as the shuffling doesn't change, I think it's a future iteration after ePBS that is highly possible",
+      "createdAt": "2024-06-24T15:43:37.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The issue remains that the auctioneer is still some beacon proposer, whereas APS proposals make the protocol become the credible auctioneer, with the beacon proposer being simply an agent of the protocol",
+      "createdAt": "2024-06-24T16:02:09.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I meant that with:\n>  I think making the protocol do the auction ...",
+      "createdAt": "2024-06-24T16:13:29.104000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,370 @@
+{
+  "schemaVersion": 1,
+  "channel": "typed-transactions",
+  "date": "2021-02-09",
+  "messageCount": 45,
+  "sourceHash": "848815d204575e96db773e4054f552a75ad464bd7d61c0ce326d1b1299b07442",
+  "searchText": "To clarify: ``` { rlpData: \"0xb8a701f8a486796f6c6f763380843b9aca008262d4948a8eafb1cf62bfbeb1741769dae1a9dd479961928080f838f7940000000000000000000000000000000000001337e1a0000000000000000000000000000000000000000000000000000000000000000080a0775101f92dcca278a56bfe4d613428624a1ebfc3cd9e0bcc1de80c41455b9021a06c9deac205afe7b124907d4ba54a9f46161498bd3990b90d175aac12c9a40ee9\", sigHash: common.HexToHash(\"f8eb2089f9add782b02e4c0ce41540817688bf579c14736576cb1d6d562c2f6b\"), fullHash: common.HexToHash(\"212a85be428a85d00fb5335b013bc8d3cf7511ffdd8938de768f4ca8bf1caf50\"), }, ``` These are the expected values, right? If you have some more examples from your codebase, I'll add them to our (internal) testbed What does `rlpData` represent? The raw data from which I parse up a transcation, to later take the sighash and hash of Doesn't look right in that case. It should start with `0x01`. > The `yParity, senderR, senderS` elements of this transaction represent a secp256k1 signature over `keccak256(1 || rlp([chainId, nonce, gasPrice, gasLimit, to, value, data, access_list]))` It's the `raw` from <@!213672586264051717> above Is this a legacy transaction or a 2930 transaction? The object doesn't have access list, which makse me uncertain. Assuming that is a 2930 transaction, then I contend that the JSON-RPC \"raw transaction\" should be \"the thing that is signed\", which starts with `0x01` for a 2930 transaction. What is up with that `v` as well? ~~Is this a legacy transaction with a *huge* chain ID?~~ looks like it is maybe. It begins with `b8a70` because it's a `rlp( 1 || rlp([...]))` Yeah, that isn't what should be signed. `1 || rlp([...])` is what should be signed. I think we're talking about different things.. I'm sanity-checking the sighash + hash of a transaction, in an internal testcase. But you're talking about RPC responses, right? The hash of a 2930 transaction is `keccak256(1 || rlp([chainId, nonce, ...]))`. It is *not* `keccak256(rlp(1 || rlp([chainId, nonce, ...])))`. Right That's what I now changed for geth https://github.com/ethereum/go-ethereum/pull/21502/commits/0fe3130a21de3ea018971f787fe98f9adad79026 It is weird to me that you have `rlp(transaction2930)` somewhere in your code, but 🤷 maybe you have a reason. We can't just call anything \"rlp\". We can call it rlp if it's `rlp(blob-of-opaque-data)`, but `blob-of-opaque-data` isn't rlp So if I want my rlp library to decode data into `AccessListTx`, then I better have proper rlp data for the unmarshalling The only place a 2930 transaction is RLP encoded is when it is part of a transaction list being sent as a `PooledTransactions (0x0a)` devp2p message. In that case, you have `rlp([1||rlp([...]), 1||rlp([...]), ...)` My guess is that perhaps your RLP decoder isn't automatically recursive? I assumed that if you received a `PooledTransactions` message over the wire, you would `rlp_decode(payload)` and from that you would get a vector of byte arrays, so you would never see/deal with the transaction as an RLP encoded byte array directly. At a glance the hashing code looks correct to me. With that change, I get ``` ########## BAD BLOCK ######### Chain config: {ChainID: 133519467574835 Homestead: 0 DAO: <nil> DAOSupport: true EIP150: 0 EIP155: 0 EIP158: 0 Byzantium: 0 Constantinople: 0 Petersburg: 0 Istanbul: 0, Muir Glacier: <nil>, YOLO v3: 0, Engine: clique} Number: 29 Hash: 0xc7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2 Error: could not apply tx 0 [0x212a85be428a85d00fb5335b013bc8d3cf7511ffdd8938de768f4ca8bf1caf50]: insufficient funds for gas * price + value: address 0x0F2D2eA7159C179ef0968DD0F68175eCac46E085 have 0 want 25300000000000 ############################## ``` <@!301186049323958275> yeah it's a bit of a mix-n-match... I left a comment on the PR > When designing a new 2718 transaction type, it is STRONGLY recommended to include the transaction type as the first byte of the signed payload. If you fail to do this, it is possible that your transaction may be signature compatible with transactions of another type which can introduce security vulnerabilities for users. Actually, that security requirement would have been fine, as long as the first element of the rlp list contains the type. I think it's a bit scary that we now sign things that are not rlp-lists. Prior signature-schemes (e.g signing text) could always rely on \"as longs as we prefix with something to make it NOT valid rlp, then at least it cannot be abused to sign a transaction\". Now we're changing that Like, if we ever use a typed transaction with the byte type `0x19` then we're suddenly in the same signing-space as EIP-191/712 > Actually, that security requirement would have been fine, as long as the first element of the rlp list contains the type. This is only true if we have a hard requirement that all future transaction types are rlp encoded. Since moving away from RLP encoding is a long term goal that many people would like to see, requiring that all future typed transactions be RLP encoded would put a hard limit on our ability to do that. You make a good point about type 0x19. Probably worth including in EIP-2718 that type 0x19 is off limits. > NOT valid rlp I believe all bytes are possible with RLP? There are some that are certainly *unlikely* like 1-50 (as that would be a single byte signed payload), but I am a bit loath to bake in such assumptions. This is partly because I don't see a big benefit to it. I agree about that, we should return the 'canon' representation, which is unwrapped for typed txs <@!301186049323958275> is the wire-encoding specified somewhere? EDIT found it: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-2976.md <@!213672586264051717> and <@!429719902363058177> -- what does Besu / OE return over RPC? The opaque blobs or wrapped into a list? It seems besu returns wrapped, OE opaque I might not relaunch yolov3 today. I would like to iron out the quirks from the geth PR, and make rlp marshalling more stringent Yeah, I hadn't thought of that distinction for the rpc. I'm ok with changing besu to return opaque blobs IMO `raw` should be able to be dropped into a `eth_sendRawTransaction` RPC request as the param so should match whatever that RPC accepts, which I assume would be the hex representation of the byte sequence `1 || rlp([..2930 fields])` For legacy transactions the rpc is unchanged right? There's no `type` or `accessList` fields? Yes ...? IMO there shouldn't be an `accessList`, I think we can argue the merit of including `type: \"0x0\"` on legacy transactions if someone can think of a use case this makes easier but so far I've been assuming it won't exist on them.",
+  "excerpts": [
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "To clarify:\n```\n        {\n            rlpData:  \"0xb8a701f8a486796f6c6f763380843b9aca008262d4948a8eafb1cf62bfbeb1741769dae1a9dd479961928080f838f7940000000000000000000000000000000000001337e1a0000000000000000000000000000000000000000000000000000000000000000080a0775101f92dcca278a56bfe4d613428624a1ebfc3cd9e0bcc1de80c41455b9021a06c9deac205afe7b124907d4ba54a9f46161498bd3990b90d175aac12c9a40ee9\",\n            sigHash:  common.HexToHash(\"f8eb2089f9add782b02e4c0ce41540817688bf579c14736576cb1d6d562c2f6b\"),\n            fullHash: common.HexToHash(\"212a85be428a85d00fb5335b013bc8d3cf7511ffdd8938de768f4ca8bf1caf50\"),\n        },\n```\nThese are the expected values, right?",
+      "createdAt": "2021-02-09T07:16:59.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you have some more examples from your codebase, I'll add them to our (internal) testbed",
+      "createdAt": "2021-02-09T07:17:33.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What does `rlpData` represent?",
+      "createdAt": "2021-02-09T07:17:34.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The raw data from which I parse up a transcation, to later take the sighash and hash of",
+      "createdAt": "2021-02-09T07:18:00.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Doesn't look right in that case.  It should start with `0x01`.",
+      "createdAt": "2021-02-09T07:18:31.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> The `yParity, senderR, senderS` elements of this transaction represent a secp256k1 signature over `keccak256(1 || rlp([chainId, nonce, gasPrice, gasLimit, to, value, data, access_list]))`",
+      "createdAt": "2021-02-09T07:19:50.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's the `raw` from <@!213672586264051717> above",
+      "createdAt": "2021-02-09T07:20:31.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is this a legacy transaction or a 2930 transaction?  The object doesn't have access list, which makse me uncertain.",
+      "createdAt": "2021-02-09T07:21:44.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Assuming that is a 2930 transaction, then I contend that the JSON-RPC \"raw transaction\" should be \"the thing that is signed\", which starts with `0x01` for a 2930 transaction.",
+      "createdAt": "2021-02-09T07:22:25.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What is up with that `v` as well?  ~~Is this a legacy transaction with a *huge* chain ID?~~ looks like it is maybe.",
+      "createdAt": "2021-02-09T07:24:00.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It begins with `b8a70` because it's a `rlp( 1 || rlp([...]))`",
+      "createdAt": "2021-02-09T07:25:42.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, that isn't what should be signed.",
+      "createdAt": "2021-02-09T07:29:52.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`1 || rlp([...])` is what should be signed.",
+      "createdAt": "2021-02-09T07:30:01.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think we're talking about different things.. I'm sanity-checking the sighash + hash of a transaction, in an internal testcase. But you're talking about RPC responses, right?",
+      "createdAt": "2021-02-09T07:33:25.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The hash of a 2930 transaction is `keccak256(1 || rlp([chainId, nonce, ...]))`.",
+      "createdAt": "2021-02-09T07:35:46.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is *not* `keccak256(rlp(1 || rlp([chainId, nonce, ...])))`.",
+      "createdAt": "2021-02-09T07:36:10.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right",
+      "createdAt": "2021-02-09T07:36:20.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That's what I now changed for geth",
+      "createdAt": "2021-02-09T07:36:38.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/go-ethereum/pull/21502/commits/0fe3130a21de3ea018971f787fe98f9adad79026",
+      "createdAt": "2021-02-09T07:37:09.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is weird to me that you have `rlp(transaction2930)` somewhere in your code, but 🤷 maybe you have a reason.",
+      "createdAt": "2021-02-09T07:37:36.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We can't just call anything \"rlp\". We can call it rlp if it's `rlp(blob-of-opaque-data)`, but `blob-of-opaque-data` isn't rlp",
+      "createdAt": "2021-02-09T07:38:42.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So if I want my rlp library to decode data into `AccessListTx`, then I better have proper rlp data for the unmarshalling",
+      "createdAt": "2021-02-09T07:39:22.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The only place a 2930 transaction is RLP encoded is when it is part of a transaction list being sent as a `PooledTransactions (0x0a)` devp2p message.  In that case, you have `rlp([1||rlp([...]), 1||rlp([...]), ...)`",
+      "createdAt": "2021-02-09T07:40:44.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My guess is that perhaps your RLP decoder isn't automatically recursive?",
+      "createdAt": "2021-02-09T07:40:58.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I assumed that if you received a `PooledTransactions` message over the wire, you would `rlp_decode(payload)` and from that you would get a vector of byte arrays, so you would never see/deal with the transaction as an RLP encoded byte array directly.",
+      "createdAt": "2021-02-09T07:41:30.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "At a glance the hashing code looks correct to me.",
+      "createdAt": "2021-02-09T07:45:00.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "With that change, I get \n```\n########## BAD BLOCK #########\nChain config: {ChainID: 133519467574835 Homestead: 0 DAO: <nil> DAOSupport: true EIP150: 0 EIP155: 0 EIP158: 0 Byzantium: 0 Constantinople: 0 Petersburg: 0 Istanbul: 0, Muir Glacier: <nil>, YOLO v3: 0, Engine: clique}\n\nNumber: 29\nHash: 0xc7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2\n\n\nError: could not apply tx 0 [0x212a85be428a85d00fb5335b013bc8d3cf7511ffdd8938de768f4ca8bf1caf50]: insufficient funds for gas * price + value: address 0x0F2D2eA7159C179ef0968DD0F68175eCac46E085 have 0 want 25300000000000\n##############################\n```",
+      "createdAt": "2021-02-09T07:47:17.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> yeah it's a bit of a mix-n-match...",
+      "createdAt": "2021-02-09T07:51:47.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I left a comment on the PR",
+      "createdAt": "2021-02-09T07:56:50.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> When designing a new 2718 transaction type, it is STRONGLY recommended to include the transaction type as the first byte of the signed payload. If you fail to do this, it is possible that your transaction may be signature compatible with transactions of another type which can introduce security vulnerabilities for users.\n\nActually, that security requirement would have been fine, as long as the first element of the rlp list contains the type. I think it's a bit scary that we now sign things that are not rlp-lists. Prior signature-schemes (e.g signing text) could always rely on \"as longs as we prefix with something to make it NOT valid rlp, then at least it cannot be abused to sign a transaction\". Now we're changing that",
+      "createdAt": "2021-02-09T08:12:53.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Like, if we ever use a typed transaction with the byte type  `0x19` then we're suddenly in the same signing-space as EIP-191/712",
+      "createdAt": "2021-02-09T08:16:09.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Actually, that security requirement would have been fine, as long as the first element of the rlp list contains the type.\nThis is only true if we have a hard requirement that all future transaction types are rlp encoded.  Since moving away from RLP encoding is a long term goal that many people would like to see, requiring that all future typed transactions be RLP encoded would put a hard limit on our ability to do that.",
+      "createdAt": "2021-02-09T08:21:24.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You make a good point about type 0x19.  Probably worth including in EIP-2718 that type 0x19 is off limits.",
+      "createdAt": "2021-02-09T08:22:45.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> NOT valid rlp\nI believe all bytes are possible with RLP?  There are some that are certainly *unlikely* like 1-50 (as that would be a single byte signed payload), but I am a bit loath to bake in such assumptions.  This is partly because I don't see a big benefit to it.",
+      "createdAt": "2021-02-09T08:24:52.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I agree about that, we should return the 'canon' representation, which is unwrapped for typed txs",
+      "createdAt": "2021-02-09T08:45:05.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> is the wire-encoding specified somewhere? EDIT found it: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-2976.md",
+      "createdAt": "2021-02-09T09:16:35.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!213672586264051717> and <@!429719902363058177> -- what does Besu / OE return over RPC? The opaque blobs or wrapped into a list?",
+      "createdAt": "2021-02-09T10:02:21.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It seems besu returns wrapped, OE opaque",
+      "createdAt": "2021-02-09T10:02:49.769000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I might not relaunch yolov3 today. I would like to iron out the quirks from the geth PR, and make rlp marshalling more stringent",
+      "createdAt": "2021-02-09T10:31:53.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xraino",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, I hadn't thought of that distinction for the rpc. I'm ok with changing besu to return opaque blobs",
+      "createdAt": "2021-02-09T16:07:30.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "IMO `raw` should be able to be dropped into a `eth_sendRawTransaction` RPC request as the param so should match whatever that RPC accepts, which I assume would be the hex representation of the byte sequence `1 || rlp([..2930 fields])`",
+      "createdAt": "2021-02-09T17:20:37.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xraino",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For legacy transactions the rpc is unchanged right? There's no `type` or `accessList` fields?",
+      "createdAt": "2021-02-09T21:07:55.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2021-02-09T21:29:06.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "...?",
+      "createdAt": "2021-02-09T21:29:11.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "IMO there shouldn't be an `accessList`, I think we can argue the merit of including `type: \"0x0\"` on legacy transactions if someone can think of a use case this makes easier but so far I've been assuming it won't exist on them.",
+      "createdAt": "2021-02-09T21:52:01.243000+00:00",
+      "attachments": []
+    }
+  ]
+}

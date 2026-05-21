@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-05-14",
+  "messageCount": 141,
+  "sourceHash": "85458717e24b36efd4484518f50f86da2faacc9a4d35085099d4aedb28434c39",
+  "searchText": "the current tx format is accepted into a 1559 chain. can you get the same behavior in a 1559 formatted tx? would you set the params like this? max: gasPrice priority: <very high number> ```ts maxFeePerGas: gasPrice maxPriorityFeePerGas: gasPrice ``` is there a simulation of 1559 available to hack around on? https://github.com/ethereum/abm1559 ? https://github.com/ethereum/rig/blob/9de2ecbba130fba13011eca2b229979b0adcba52/eip1559/eip1559.ipynb ? curious if these are up to date with the latest eip1559 proposal what are the requirements when replacing an existing tx in the mempool with the same nonce i suppose this could technically vary by client as its not part of the consensus rules <@!188137169905254401> the way i've implemented is if either the `feeCap` or `tip` are bumped more than the min bump amount (i think default is 10%) then it is considered \"better\" and bumps out the other tx what if one parameter is lower and one is higher hey <@!188137169905254401> the simulations are designed to be extensible and model any gas market more generally, but if there is a specific item you want to simulate wrt eip1559 i am happy to help you can also check http://ethereum.github.io/abm1559 for a more human readable version of the notebooks <@!486501030046203915> thanks/ we're iterating on metamask's simple tx fee parameter selection design and its proving to be a challenge to actually make it simple and understandable so i want to have a better idea of how the eip1559 market will behave, especially with certain parameter selection strategies at some point we had discussed this and iirc this rule could be abused by e.g. a low fee cap transaction bumping their tip infinitely often, unless you make a hard constraint that tip must always be smaller or equal to fee cap i had a wallet simulation in the works that I kind of set aside, where users go through a wallet to set their tips etc. if helpful i can make a working version that you can use as a starting point? or if there is any spec you have in mind I can also help you get started yeah i'm currently rejecting txs whose tips are greater than feeCap although, one issue is still that they could keep bumping their feeCap over and over at no cost to the network - it's sort of tricky IMO because if for some reason you don't get a transaction in before your feeCap becomes too low to be included, you'd *want* to just bump your feeCap to be included if either parameter is lower it should be rejected <@!486501030046203915> that would be really cool to see <@!543900561460822016> is that in the spec or is that a reccomendation <@!188137169905254401> it's just how i've implemented it Perhaps only replace the transaction if priorityFee is higher **and** the fee cap is above the latest block base fee? the issue is that you could keep bumping the fee cap infinitely at no cost --- oh you mean also bumping the tip? <@!543900561460822016> this sort of thing is difficult for wallets because we try to be able to connect to any node but we dont know what their tx replacement requirements are You are thinking of an attack vector where someone is just trying to spam the gossip network? understandable, we should definitely try to be reasonable uniform in our handling yes will work on a minimal prototype then and let you know 🙂 Don't need to be uniform, but you do need to have strategies well defined and published. well, if geth implements tx bumping one way and nethermind does it another way - depending on which nodes first see your tx you may not propagate anywhere MetaMask would adopt a strategy that suits both in that case. Essentially, wallets would likely choose a lowest-common-denominator strategy. Which you want anyway so your transaction can gossip. I think to protect against spam vectors you *must* require bumping both. <@!301186049323958275> in practice what would likely happen is metamask just does what geth does bc we primarily talk to geth and then users are pointing to other clients are mad that its not compatible but we have trouble prioritizing the fix for a small number of users which is the reason the replacement requirement should be formalized Never included: ``` maxFee: 1000000000000 priorityFee: 0 ``` Also never included: ``` maxFee: 0 priorityFee: 100000000000 ``` I think what you are actually arguing here is that everyone must conform to what Geth does, because wallets will only support what Geth does. A sad but common situation in Ethereum. Unless we have a mechanism for validating that either the maxFee or the maxPriorityFee is \"reasonable\", we need to assume that one of the two is totally unreasonable (will prevent inclusion) and thus not allow replacement unless they bump both. minority clients will have the same pressures, in order to serve their users. if things are valid for them but not for geth, the tx may not propagate to a miner as far as i understand it <@!486501030046203915> likely ill be digging into the simulations tonight or tomorrow -- let me know if you have any suggestions for how to get started Yeah, I just wish the ecosystem wasn't so willing to bend a knee to Geth. Not because I dislike Geth, but because that policy discourages experimentation. I understand that it is often done by necessity (like here). It just bugs me. can anyone explain the \"next block inclusion guarantee\" people seem to associate with 1559? whenever the effective demand (willing to pay at least basefee + the minimum miner fee) is smaller than the block limit (30 million gas), then you are guaranteed to be included in the next block. since basefee adjusts to target effective demand = 15 million gas, it provides stronger guarantees that should you be willing to pay the basefee, you'll be included in the next block, unless a rapid demand shift ups the effective demand past 30 million gas. see also https://barnabe.substack.com/p/better-bidding-with-eip1559 ok! i'll work on the prototype today (it's friday for me already 🙂 ) but a good place to get started is the first \"interesting\" notebook https://ethereum.github.io/abm1559/notebooks/stationary1559.html the notebooks typically follow the same format always: you define user behaviours, transaction pool behaviour and simulate to see what happens. the library has a few \"default\" behaviours for both, and to build more complex simulations I usually subclass the default behaviours to suit what I want to explore with it ok so equivalent to the \"next block inclusion guarantee\" of the current gas market in the sense of you get next block inclusion if you pay enough but \"paying enough\" is more clearly defined? ill read up exactly, the market price is arrived at objectively (via the basefee update rule and double sized blocks) rather than subjectively (via past and current demand), and on top of that the market price is a reserve price: you have to pay at least that to be included, no getting around it, which makes it binding Most importantly here is that you do not *overpay*. Right now if you set `gasPrice` to 1000 nanoeth because that is what you are *willing* to pay, then you will pay 1000 nanoeth per gas. With 1559 if you set `maxFeePerGas` to 1000 nanoeth, then you will pay the block's `baseFee` plus `maxPriorityFeePerGas`, which is probably a *much* smaller number (e.g., 21 nanoeth). > `maxPriorityFeePerGas`, which is probably a much smaller number <@!301186049323958275> what makes you believe that this number will be small current block utilization (~98%) what do we expect this graph to look like in 1559 world (im sure this is covered in one of the dozen notebooks i was linked, just putting the question here for now) we'd expect this graph to on average have block utilisation equal to 50% (the target size of the block) and users would only need to adjust upwards their `maxPriorityFeePerGas` whenever the congestion increases rapidly and largely be flat? or spikey? probably noisy around 50%, with short periods where it is consistently 100% (ie, these periods where demand increases significantly) note that you can have very high demand and yet block utilisation at 50%. what matters for the block utilisation number is the _rate of change_ of the demand what might happen if for some reason, it was 100% for a long time it cannot be (or define long time) if it is 100% for 6 blocks the base fee doubles which means that the minimum price can double in a minute current gasPrice spikes dont seem to affect block utilization because there is no binding minimum gas price miners can just include anything yeah i dont have a good graph for block gasPrice breakdown but that makes sense btw a block 50% full under eip1559 = a block 100% full right now right in gas terms if there are more people willing to pay the base fee than the 50% target, basefee will increase for the next block, so naturally you will have less people inclined to pay the next time around do we expect 100% block utilization periods to have an increased uncle rate? over time, assuming demand is stable, it will stabilise to target the 15M gas quantile of the demand no it was quite heavily tested and given that basefee increases quite fast, we don't expect long bursts of 30M gas blocks short bursts were totally ok iirc is eip1559 live on a testnet? plans to be? yes! there is a testnet, it was discussed earlier (look for \"baikal\" or \"aleut\" in this thread) The opportunity cost of miners to include a transaction is around 1 nanoeth per gas (a bit less IIRC). In a world of spherical cows, it would be irrational for miners to set a minimum priorityFee higher than that, because they are leaving money on the table for the next miner to take. Of course, miners may be irrational, malicious, vengeful, etc. so we can't say for sure what they'll include. However, any miner that behaves rationally will make more money than those who do not, so there is financial incentive to be rational. The only time you need to increase this number above the miner minimum is if you want a specific position in a block (e.g., first in block) or there is a sudden 2x spike in demand and you have a very strong time preference. does priorityFee actually determine position in block? does a block need to sort txs by some parameter in order to be valid? It does, because the alternative is worse (shotgun for position). No, it is not a consensus rule. > The opportunity cost of miners to include a transaction is around 1 nanoeth per gas <@!301186049323958275> how was this derived? Vitalik has a blog post about it *somewhere*. Might be linked in the 1559 resources hackmd. It is a function of block reward and uncle risk. And uncle risk is a function of block size and block processing time. And gas used is a proxy for block size and block processing time. This is the link: https://www.reddit.com/r/ethereum/comments/lk1rjp/this_is_why_eip_1559_is_good_and_why_vitalik/ A block utilization of 98% might also be caused by miners filling available space with mining gasTokens. So if we get rid of that, which, incidentally will happen in the same hf as 1559, that should also make an impact I might be missing something but what about this principle: If new transaction wants to replace the old one it needs to conform to the: ```assert(new.effective_gas_price(current_block_base_fee) - old.effective_gas_price(current_block_base_fee) > desired_gas_bump) ``` where ```effective_gas_price = min(maxFeePerGas, maxPriorityFeePerGas + current_block_base_fee) // for 1559 txs effective_gas_price = gas_price // for legacy txs ``` And this is how would metamask speed up the tx: ```while new.effective_gas_price(current_block_base_fee) - old.effective_gas_price(current_block_base_fee) < desired_gas_bump { if maxFeePerGas < maxPriorityFeePerGas + current_block_base_fee { //increase maxFeePerGas by 1 gwei } else { //increase maxPriorityFeePerGas by 1 gwei } } ``` <@439883507406340126> this is the most correct way, but it requires the effective price to be recalculated each block for each tx. Since geth stores txs in",
+  "excerpts": [
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the current tx format is accepted into a 1559 chain. can you get the same behavior in a 1559 formatted tx? would you set the params like this?\nmax: gasPrice\npriority: <very high number>",
+      "createdAt": "2021-05-14T01:44:10.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```ts\nmaxFeePerGas: gasPrice\nmaxPriorityFeePerGas: gasPrice\n```",
+      "createdAt": "2021-05-14T01:52:51.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is there a simulation of 1559 available to hack around on?",
+      "createdAt": "2021-05-14T02:04:00.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ethereum/abm1559 ?",
+      "createdAt": "2021-05-14T02:07:30.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ethereum/rig/blob/9de2ecbba130fba13011eca2b229979b0adcba52/eip1559/eip1559.ipynb ?",
+      "createdAt": "2021-05-14T02:08:18.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "curious if these are up to date with the latest eip1559 proposal",
+      "createdAt": "2021-05-14T02:08:26.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what are the requirements when replacing an existing tx in the mempool with the same nonce",
+      "createdAt": "2021-05-14T02:23:39.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i suppose this could technically vary by client as its not part of the consensus rules",
+      "createdAt": "2021-05-14T02:24:16.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!188137169905254401> the way i've implemented is if either the `feeCap` or `tip` are bumped more than the min bump amount (i think default is 10%) then it is considered \"better\" and bumps out the other tx",
+      "createdAt": "2021-05-14T02:28:23.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what if one parameter is lower and one is higher",
+      "createdAt": "2021-05-14T02:28:54.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hey <@!188137169905254401> the simulations are designed to be extensible and model any gas market more generally, but if there is a specific item you want to simulate wrt eip1559 i am happy to help",
+      "createdAt": "2021-05-14T02:30:58.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you can also check http://ethereum.github.io/abm1559 for a more human readable version of the notebooks",
+      "createdAt": "2021-05-14T02:31:20.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!486501030046203915> thanks/ we're iterating on metamask's simple tx fee parameter selection design and its proving to be a challenge to actually make it simple and understandable",
+      "createdAt": "2021-05-14T02:33:56.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so i want to have a better idea of how the eip1559 market will behave, especially with certain parameter selection strategies",
+      "createdAt": "2021-05-14T02:35:11.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "at some point we had discussed this and iirc this rule could be abused by e.g. a low fee cap transaction bumping their tip infinitely often, unless you make a hard constraint that tip must always be smaller or equal to fee cap",
+      "createdAt": "2021-05-14T02:35:41.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i had a wallet simulation in the works that I kind of set aside, where users go through a wallet to set their tips etc. if helpful i can make a working version that you can use as a starting point? or if there is any spec you have in mind I can also help you get started",
+      "createdAt": "2021-05-14T02:37:14.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah i'm currently rejecting txs whose tips are greater than feeCap",
+      "createdAt": "2021-05-14T02:37:59.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "although, one issue is still that they could keep bumping their feeCap over and over at no cost to the network - it's sort of tricky IMO because if for some reason you don't get a transaction in before your feeCap becomes too low to be included, you'd *want* to just bump your feeCap to be included",
+      "createdAt": "2021-05-14T02:39:46.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if either parameter is lower it should be rejected",
+      "createdAt": "2021-05-14T02:40:34.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!486501030046203915> that would be really cool to see",
+      "createdAt": "2021-05-14T02:40:41.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!543900561460822016> is that in the spec or is that a reccomendation",
+      "createdAt": "2021-05-14T02:40:56.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!188137169905254401> it's just how i've implemented it",
+      "createdAt": "2021-05-14T02:41:31.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Perhaps only replace the transaction if priorityFee is higher **and** the fee cap is above the latest block base fee?",
+      "createdAt": "2021-05-14T02:41:31.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the issue is that you could keep bumping the fee cap infinitely at no cost --- oh you mean also bumping the tip?",
+      "createdAt": "2021-05-14T02:41:58.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!543900561460822016> this sort of thing is difficult for wallets because we try to be able to connect to any node but we dont know what their tx replacement requirements are",
+      "createdAt": "2021-05-14T02:42:18.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You are thinking of an attack vector where someone is just trying to spam the gossip network?",
+      "createdAt": "2021-05-14T02:42:35.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "understandable, we should definitely try to be reasonable uniform in our handling",
+      "createdAt": "2021-05-14T02:42:52.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2021-05-14T02:43:02.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "will work on a minimal prototype then and let you know 🙂",
+      "createdAt": "2021-05-14T02:43:10.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Don't need to be uniform, but you do need to have strategies well defined and published.",
+      "createdAt": "2021-05-14T02:43:11.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "well, if geth implements tx bumping one way and nethermind does it another way - depending on which nodes first see your tx you may not propagate anywhere",
+      "createdAt": "2021-05-14T02:44:07.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "MetaMask would adopt a strategy that suits both in that case.",
+      "createdAt": "2021-05-14T02:44:34.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Essentially, wallets would likely choose a lowest-common-denominator strategy.",
+      "createdAt": "2021-05-14T02:44:51.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which you want anyway so your transaction can gossip.",
+      "createdAt": "2021-05-14T02:45:14.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think to protect against spam vectors you *must* require bumping both.",
+      "createdAt": "2021-05-14T02:46:30.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> in practice what would likely happen is metamask just does what geth does bc we primarily talk to geth and then users are pointing to other clients are mad that its not compatible but we have trouble prioritizing the fix for a small number of users",
+      "createdAt": "2021-05-14T02:46:31.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "which is the reason the replacement requirement should be formalized",
+      "createdAt": "2021-05-14T02:47:10.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Never included:\n```\nmaxFee: 1000000000000\npriorityFee: 0\n```\nAlso never included:\n```\nmaxFee: 0\npriorityFee: 100000000000\n```",
+      "createdAt": "2021-05-14T02:47:35.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think what you are actually arguing here is that everyone must conform to what Geth does, because wallets will only support what Geth does.",
+      "createdAt": "2021-05-14T02:48:06.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A sad but common situation in Ethereum.",
+      "createdAt": "2021-05-14T02:48:16.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unless we have a mechanism for validating that either the maxFee or the maxPriorityFee is \"reasonable\", we need to assume that one of the two is totally unreasonable (will prevent inclusion) and thus not allow replacement unless they bump both.",
+      "createdAt": "2021-05-14T02:49:04.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "minority clients will have the same pressures, in order to serve their users. if things are valid for them but not for geth, the tx may not propagate to a miner",
+      "createdAt": "2021-05-14T02:50:51.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "as far as i understand it",
+      "createdAt": "2021-05-14T02:51:33.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!486501030046203915> likely ill be digging into the simulations tonight or tomorrow -- let me know if you have any suggestions for how to get started",
+      "createdAt": "2021-05-14T02:52:31.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, I just wish the ecosystem wasn't so willing to bend a knee to Geth.",
+      "createdAt": "2021-05-14T02:52:55.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not because I dislike Geth, but because that policy discourages experimentation.",
+      "createdAt": "2021-05-14T02:53:27.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I understand that it is often done by necessity (like here).  It just bugs me.",
+      "createdAt": "2021-05-14T02:53:40.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "can anyone explain the \"next block inclusion guarantee\" people seem to associate with 1559?",
+      "createdAt": "2021-05-14T03:07:58.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "whenever the effective demand (willing to pay at least basefee + the minimum miner fee) is smaller than the block limit (30 million gas), then you are guaranteed to be included in the next block. since basefee adjusts to target effective demand = 15 million gas, it provides stronger guarantees that should you be willing to pay the basefee, you'll be included in the next block, unless a rapid demand shift ups the effective demand past 30 million gas. see also https://barnabe.substack.com/p/better-bidding-with-eip1559",
+      "createdAt": "2021-05-14T03:16:16.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok! i'll work on the prototype today (it's friday for me already 🙂 ) but a good place to get started is the first \"interesting\" notebook https://ethereum.github.io/abm1559/notebooks/stationary1559.html\n\nthe notebooks typically follow the same format always: you define user behaviours, transaction pool behaviour and simulate to see what happens. the library has a few \"default\" behaviours for both, and to build more complex simulations I usually subclass the default behaviours to suit what I want to explore with it",
+      "createdAt": "2021-05-14T03:18:23.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok so equivalent to the \"next block inclusion guarantee\" of the current gas market in the sense of you get next block inclusion if you pay enough",
+      "createdAt": "2021-05-14T03:19:13.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but \"paying enough\" is more clearly defined?",
+      "createdAt": "2021-05-14T03:21:45.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ill read up",
+      "createdAt": "2021-05-14T03:21:54.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "exactly, the market price is arrived at objectively (via the basefee update rule and double sized blocks) rather than subjectively (via past and current demand), and on top of that the market price is a reserve price: you have to pay at least that to be included, no getting around it, which makes it binding",
+      "createdAt": "2021-05-14T03:24:01.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Most importantly here is that you do not *overpay*.  Right now if you set `gasPrice` to 1000 nanoeth because that is what you are *willing* to pay, then you will pay 1000 nanoeth per gas.  With 1559 if you set `maxFeePerGas` to 1000 nanoeth, then you will pay the block's `baseFee` plus `maxPriorityFeePerGas`, which is probably a *much* smaller number (e.g., 21 nanoeth).",
+      "createdAt": "2021-05-14T04:36:36.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": ">  `maxPriorityFeePerGas`, which is probably a much smaller number \n<@!301186049323958275>  what makes you believe that this number will be small",
+      "createdAt": "2021-05-14T04:45:13.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "current block utilization (~98%)",
+      "createdAt": "2021-05-14T04:47:09.233000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "ddecd6e97f206a1601d4e5fd4b7a336d496deb06f832510a9f05b169e7c99377"
+        }
+      ]
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what do we expect this graph to look like in 1559 world",
+      "createdAt": "2021-05-14T04:47:40.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(im sure this is covered in one of the dozen notebooks i was linked, just putting the question here for now)",
+      "createdAt": "2021-05-14T04:48:03.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we'd expect this graph to on average have block utilisation equal to 50% (the target size of the block)",
+      "createdAt": "2021-05-14T04:50:46.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and users would only need to adjust upwards their `maxPriorityFeePerGas` whenever the congestion increases rapidly",
+      "createdAt": "2021-05-14T04:51:18.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and largely be flat? or spikey?",
+      "createdAt": "2021-05-14T04:51:22.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "probably noisy around 50%, with short periods where it is consistently 100% (ie, these periods where demand increases significantly)",
+      "createdAt": "2021-05-14T04:51:57.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "note that you can have very high demand and yet block utilisation at 50%. what matters for the block utilisation number is the _rate of change_ of the demand",
+      "createdAt": "2021-05-14T04:52:22.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what might happen if for some reason, it was 100% for a long time",
+      "createdAt": "2021-05-14T04:53:08.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it cannot be (or define long time)",
+      "createdAt": "2021-05-14T04:53:21.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if it is 100% for 6 blocks the base fee doubles",
+      "createdAt": "2021-05-14T04:53:30.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "which means that the minimum price can double in a minute",
+      "createdAt": "2021-05-14T04:53:44.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "current gasPrice spikes dont seem to affect block utilization",
+      "createdAt": "2021-05-14T04:54:08.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "because there is no binding minimum gas price",
+      "createdAt": "2021-05-14T04:54:29.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "miners can just include anything",
+      "createdAt": "2021-05-14T04:54:34.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah i dont have a good graph for block gasPrice breakdown",
+      "createdAt": "2021-05-14T04:55:02.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but that makes sense",
+      "createdAt": "2021-05-14T04:55:33.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "btw a block 50% full under eip1559 = a block 100% full right now",
+      "createdAt": "2021-05-14T04:55:35.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-05-14T04:55:41.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "in gas terms",
+      "createdAt": "2021-05-14T04:55:41.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if there are more people willing to pay the base fee than the 50% target, basefee will increase for the next block, so naturally you will have less people inclined to pay the next time around",
+      "createdAt": "2021-05-14T04:56:17.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "do we expect 100% block utilization periods to have an increased uncle rate?",
+      "createdAt": "2021-05-14T04:56:35.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "over time, assuming demand is stable, it will stabilise to target the 15M gas quantile of the demand",
+      "createdAt": "2021-05-14T04:56:37.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "no it was quite heavily tested and given that basefee increases quite fast, we don't expect long bursts of 30M gas blocks",
+      "createdAt": "2021-05-14T04:57:03.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "short bursts were totally ok iirc",
+      "createdAt": "2021-05-14T04:57:16.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is eip1559 live on a testnet? plans to be?",
+      "createdAt": "2021-05-14T05:00:40.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes! there is a testnet, it was discussed earlier (look for \"baikal\" or \"aleut\" in this thread)",
+      "createdAt": "2021-05-14T05:01:14.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The opportunity cost of miners to include a transaction is around 1 nanoeth per gas (a bit less IIRC).  In a world of spherical cows, it would be irrational for miners to set a minimum priorityFee higher than that, because they are leaving money on the table for the next miner to take.",
+      "createdAt": "2021-05-14T05:06:29.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Of course, miners may be irrational, malicious, vengeful, etc. so we can't say for sure what they'll include.  However, any miner that behaves rationally will make more money than those who do not, so there is financial incentive to be rational.",
+      "createdAt": "2021-05-14T05:07:00.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The only time you need to increase this number above the miner minimum is if you want a specific position in a block (e.g., first in block) or there is a sudden 2x spike in demand and you have a very strong time preference.",
+      "createdAt": "2021-05-14T05:07:50.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "does priorityFee actually determine position in block?",
+      "createdAt": "2021-05-14T05:14:49.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "does a block need to sort txs by some parameter in order to be valid?",
+      "createdAt": "2021-05-14T05:15:44.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It does, because the alternative is worse (shotgun for position).",
+      "createdAt": "2021-05-14T05:16:06.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No, it is not a consensus rule.",
+      "createdAt": "2021-05-14T05:16:17.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> The opportunity cost of miners to include a transaction is around 1 nanoeth per gas\n<@!301186049323958275>  how was this derived?",
+      "createdAt": "2021-05-14T05:20:29.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Vitalik has a blog post about it *somewhere*.  Might be linked in the 1559 resources hackmd.",
+      "createdAt": "2021-05-14T05:20:50.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is a function of block reward and uncle risk.",
+      "createdAt": "2021-05-14T05:21:05.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And uncle risk is a function of block size and block processing time.",
+      "createdAt": "2021-05-14T05:21:16.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And gas used is a proxy for block size and block processing time.",
+      "createdAt": "2021-05-14T05:21:25.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2021-05-14T06:16:28.732000+00:00",
+      "attachments": [
+        {
+          "type": "image/jpeg",
+          "origin_name": "image0.png",
+          "content": "605a42b4b00ab289b23d4d415466ef17482f6448f5ef859e7010bdd1afbf9930"
+        }
+      ]
+    },
+    {
+      "author": "barnabemonnot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is the link: https://www.reddit.com/r/ethereum/comments/lk1rjp/this_is_why_eip_1559_is_good_and_why_vitalik/",
+      "createdAt": "2021-05-14T06:17:21.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A block utilization of 98% might also be caused by miners filling available space with mining gasTokens. So if we get rid of that, which, incidentally will happen in the same hf as 1559, that should also make an impact",
+      "createdAt": "2021-05-14T09:25:21.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I might be missing something but what about this principle: If new transaction wants to replace the old one it needs to conform to the:\n```assert(new.effective_gas_price(current_block_base_fee) - old.effective_gas_price(current_block_base_fee) > desired_gas_bump)\n```\nwhere \n```effective_gas_price = min(maxFeePerGas, maxPriorityFeePerGas + current_block_base_fee) // for 1559 txs\neffective_gas_price  = gas_price // for legacy txs\n```",
+      "createdAt": "2021-05-14T09:33:21.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And this is how would metamask speed up the tx:\n```while new.effective_gas_price(current_block_base_fee) - old.effective_gas_price(current_block_base_fee) < desired_gas_bump {\n  if maxFeePerGas < maxPriorityFeePerGas + current_block_base_fee {\n    //increase maxFeePerGas by 1 gwei\n  } else {\n    //increase maxPriorityFeePerGas by 1 gwei\n  }\n}\n```",
+      "createdAt": "2021-05-14T09:54:39.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@439883507406340126> this is the most correct way, but it requires the effective price to be recalculated each block for each tx. Since geth stores txs in a min heap, we’d have to recalculate the min heap each block to get the lowest paying txs. \n\nSince fee cap is constant, you don’t need to resort all of them, only the dirty accounts need to be updated",
+      "createdAt": "2021-05-14T14:00:13.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is it not acceptable for you to do resorting on each block? is because of the performance? did you try to benchmark it?",
+      "createdAt": "2021-05-14T14:09:09.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't know whether or not it is acceptable, but it would be good to compare. Generally, I try to avoid doing anything that could be considered a degradation. Have you done any analysis on this?",
+      "createdAt": "2021-05-14T14:11:25.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No, i was hoping you did 😆",
+      "createdAt": "2021-05-14T14:12:29.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "haha let me see if i can do some analysis over the weekend",
+      "createdAt": "2021-05-14T14:15:02.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "well, if tx pool behaviour is not right, then either 1) transactions will be over-evicted and this will annoy the users 2) transactions will be under-evicted, which will lead to the ballooning of tx pool overhead for the nodes. So while it is not consensus critical, it is important to get his right before go-live",
+      "createdAt": "2021-05-14T14:49:03.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I highly doubt that recalculating and re-queueing each transaction in each block would even be a noticeable performance hit. Btw what do you think about my dual-queue ordering approach? I'm thinking about implementing it on top of your tx pool branch, it's not that hard to do and it would also allow us to test the cost of tx reordering.",
+      "createdAt": "2021-05-14T17:58:35.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://gist.github.com/zsfelfoldi/9607ad248707a925b701f49787904fd6",
+      "createdAt": "2021-05-14T17:59:56.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!202397237962211328> hey sorry, it's been on my todo list to respond to your post - let me do that now",
+      "createdAt": "2021-05-14T18:08:52.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "thanks",
+      "createdAt": "2021-05-14T18:34:37.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Another though about the price bump: the first version I saw was a replacement condition that required both parameters to be bumped by a minimum percentage. Though I initially disliked this version now I think that maybe it's the best we can do. The purpose of this condition is to avoid spamming the tx propagation bandwidth with irrelevantly small price bumps. You should only update if you are willing to pay some non-negligible extra price. Now it's hard to see which parameter is relevant and if we only require one of them to be bumped then it's still possible to spam the network with a lot of updates, without really paying a price for it because the sender always updates the irrelevant parameter. OTOH requiring both to be updated is not so bad because that is going to mean that you'll pay a bit more regardless of which parameter is going to be the relevant one (and this is really the valid reason to update).",
+      "createdAt": "2021-05-14T18:43:05.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah this is how <@!415548822983278593> initially expected the bumping to work and I thought maybe we didn't need to require both to be updated, but after the discussion yesterday I updated the PR to enforce both to be bumped. *Maybe* we could allow only the tip to be bumped since there is only a small number of tip bumps that could be allowed before either the tip >= feeCap and after each bump, the sender is actually paying more. The issue is with bumping only the fee cap, there is really no cost to spamming fee cap bumps if the base fee is relatively steady",
+      "createdAt": "2021-05-14T18:48:08.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!202397237962211328> your dual-queue ordering seems reasonable. I've been bothered that with the fee cap only approach, because it's *possible* to flood the network with high fee cap, low tip txs and beat out lower fee cap, high tip txs. Although, I'm running the number on the default tx pool size and it seems with 1024 128kb txs (suppose all 0 calldata) it would only cost ~0.5 eth to clear a default nodes tx pool? Seems like I may be making a miscalculation somewhere. But even a factor of 0 greater than that is a bit concerning. I'm not sure what the effects of such an attack would be though, since I believe miners configure their tx pools to store more txs than the default?",
+      "createdAt": "2021-05-14T18:54:32.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I personally now believe for replacement (same sender & same nonce, not eviction!) it is indeed sufficient to enforce a min percentage priority fee bump, together with outright rejecting txs with higher priority fee than fee cap and txs below a minimum tip (likely 1 gwei)",
+      "createdAt": "2021-05-14T19:07:06.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "sufficient = basically equivalent to the current pre-1559 rule",
+      "createdAt": "2021-05-14T19:07:25.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but I think the more practical choice would be to enforce a bump in both, and then after a few months of real world 1559 experience reassess",
+      "createdAt": "2021-05-14T19:09:11.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hm wait, a pure priority fee bump is not actually equivalent for the current situation. if we evict by fee cap, but replace by priority fee, then you can cause quite a bit initial replacement effort basically for free",
+      "createdAt": "2021-05-14T19:11:13.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "okay, so all the more reason to go with a dual bump.",
+      "createdAt": "2021-05-14T19:11:51.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "zsfelfoldi",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what I was worried about is that it can not only happen because of an attack but also because of rational behavior in a usage peak. Also, just miners having large pools won't make things better, actually it can make things worse because the priority fee bids won't propagate to small miners and that can incentivize priority fee bidders to try to communicate with the largest mining pools directly.\nI'll try to implement my version during the weekend just to see how complex it is. If it turns out to be not very complicated then we can consider making it a recommendation.",
+      "createdAt": "2021-05-14T19:12:45.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hm, so for eviction I agree that in the case of \"all of the mempool is currently includable\" pure fee cap ordering is subobtimal.",
+      "createdAt": "2021-05-14T19:20:03.237000+00:00",
+      "attachments": []
+    }
+  ]
+}

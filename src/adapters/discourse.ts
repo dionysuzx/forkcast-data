@@ -4,7 +4,7 @@ import { nowIso, slugify } from "../lib/fs.js";
 
 export const ingestDiscourseLinks = async (repoRoot: string, links: string[], generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const records: RecordManifest[] = [];
-  const unique = links.filter((link, index, values) => values.indexOf(link) === index).slice(0, 8);
+  const unique = links.filter((link, index, values) => values.indexOf(link) === index);
   for (const link of unique) {
     const id = link.match(/\/t\/(?:[^/]+\/)?(\d+)/)?.[1] ?? slugify(link);
     let record = newRecord({

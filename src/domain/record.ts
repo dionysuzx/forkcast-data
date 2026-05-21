@@ -22,8 +22,54 @@ export const recordBasePath = (record: Pick<RecordManifest, "id" | "kind">): str
 export const recordManifestPath = (repoRoot: string, record: Pick<RecordManifest, "id" | "kind">): string =>
   join(repoRoot, recordBasePath(record), "manifest.json");
 
+const sourceKey = (source: RecordManifest["sources"][number]): string =>
+  `${source.type}:${source.ref}:${source.url ?? ""}`;
+
+const mergeSources = (existing: RecordManifest["sources"], incoming: RecordManifest["sources"]): RecordManifest["sources"] =>
+  [...existing, ...incoming].filter((source, index, sources) =>
+    sources.findIndex((candidate) => sourceKey(candidate) === sourceKey(source)) === index
+  );
+
+const mergeArtifacts = (existing: Artifact[], incoming: Artifact[]): Artifact[] =>
+  [
+    ...existing.filter((artifact) => !incoming.some((candidate) => candidate.path === artifact.path)),
+    ...incoming
+  ].sort((a, b) => a.path.localeCompare(b.path));
+
+const mergeMetadata = (
+  existing: RecordManifest["metadata"],
+  incoming: RecordManifest["metadata"]
+): Record<string, unknown> | undefined => {
+  if (!existing && !incoming) return undefined;
+  const merged = { ...(existing ?? {}), ...(incoming ?? {}) };
+  const existingDiscourse = Array.isArray(existing?.discourseLinks) ? existing.discourseLinks : [];
+  const incomingDiscourse = Array.isArray(incoming?.discourseLinks) ? incoming.discourseLinks : [];
+  if (existingDiscourse.length || incomingDiscourse.length) {
+    merged.discourseLinks = [...existingDiscourse, ...incomingDiscourse]
+      .filter((value): value is string => typeof value === "string")
+      .filter((value, index, values) => values.indexOf(value) === index);
+  }
+  return merged;
+};
+
 export const writeRecord = async (repoRoot: string, record: RecordManifest): Promise<void> => {
-  await writeJson(recordManifestPath(repoRoot, record), record);
+  const manifestPath = recordManifestPath(repoRoot, record);
+  const existing = await readJson<RecordManifest>(manifestPath).catch(() => null);
+  if (!existing || existing.id !== record.id || existing.kind !== record.kind) {
+    await writeJson(manifestPath, record);
+    return;
+  }
+  const merged: RecordManifest = {
+    ...existing,
+    ...record,
+    updatedAt: record.updatedAt > existing.updatedAt ? record.updatedAt : existing.updatedAt,
+    sources: mergeSources(existing.sources, record.sources),
+    artifacts: mergeArtifacts(existing.artifacts, record.artifacts)
+  };
+  const metadata = mergeMetadata(existing.metadata, record.metadata);
+  if (metadata) merged.metadata = metadata;
+  else delete merged.metadata;
+  await writeJson(manifestPath, merged);
 };
 
 export const artifactPath = (repoRoot: string, record: Pick<RecordManifest, "id" | "kind">, relativePath: string): string =>

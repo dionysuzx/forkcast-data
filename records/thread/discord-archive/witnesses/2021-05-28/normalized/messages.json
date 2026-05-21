@@ -1,0 +1,554 @@
+{
+  "schemaVersion": 1,
+  "channel": "witnesses",
+  "date": "2021-05-28",
+  "messageCount": 68,
+  "sourceHash": "9d914339a3d91aaf38851989e22bc62e6d31b265c3f5b94c08cb0336a1810b52",
+  "searchText": "In the post verkle trie migration world, is it proposed that witnesses are part of the block or a separate item that allows you to validate a block statelessly? In other words will a miner be allowed to distribute a block without generating and distributing a witness for it? I feel like we're moving toward a more decoupled download-what-you-want system so I expect a good chance we'll see witnesses distributed on a separate subnet I think a fully stateful node can validate a block faster if given a witness. So miners are probably incentivized to generate and distribute witnesses to reduce uncle rates (although if verkle tries ship after the merge this is moot). oh interesting not sure though! validating a witness takes a couple hundred milliseconds as well Reads are O(1) database access or O(d) Kate commitments, so a stateful client is presumably faster to do the disk access. Writes are O(d) Kate commitments or O(d) database access. (d being the depth of the verkle trie). The devil is in the constant factors Oh actually wait nevermind Validating a Verkle witness is pretty easy It's producing the witness that takes a few hundred ms The problem here is that because producing the witness is a massive headache (256x slower than reading or writing to a verkle trie, I think), is there a risk that we are putting lots of work on nodes to produce witnesses on demand for stateless clients that want them. Would we be better off telling the miner that they are required to do that work and then distributing the witness they produce once and for all? POS should largely remove the \"race\" that has long been a burden of POW, so a few hundred ms extra to generate and produce a witness seems like it wouldn't have a significant effect on block proposers profits in the POS world. That said, it isn't clear to me whether we need block proposers/producers to generate and disseminate witnesses. I say this under the presumption that the block header has a canonical access list which would allow for the witness to be independently produced and gossiped. This flexibility may be beneficial/nice I believe that you are correct though in the assertion that a node which receives a block with a bundled witness *should* in most cases be able to validate the block faster than reading from disk, but I think the benefits to the block producer are potentially only present in the POW context since that is the only context where the \"race\" is important (to avoid being uncled) <@364458974906548225> I'll moderately argue the thing you wanted to know if anyone was going to argue. 😄 My concern is that if we add access lists now, but then later realize that we need to change it, then it will be harder to change it later. Because of the difficulty of changing the tires on the bus while it is driving down the highway, I prefer to not add new hubcaps until we are confident they are the hubcaps we will actually use long term. 🚌 As in... change their format? The idea behind access lists is that they are independent of what a proof/witness looks like I'm concerned that once proof/witness stuff is done we'll realize that this particular incarnation of access lists ended up being incompatible in some way or otherwise \"useless\". the proposal is for `AccessListRoot` is to have a `URN` like parsable structure, which is upgradable imho `AccessListRoot := \"urn:sha256:json:0x${ SHA256( access_list.toJSONString('utf8') ).toHexString() }\"` ah, I'm reasonably confident that they are demonstrably useful now. My case would be something like: we currently have `wit/0` which only exposes the simplest and very grief-able API of a list of node-hashes. That's used for beam sync acceleration. we intentionally didn't do anything more complex because node hashes was easy and anything more complex was equally griefable. with a `header.access_list`, we could improve `wit/1` to include the access list, which would remove the griefing vector, and still provide the same level of beam sync speed up. like this is sample construction Adding a block header field doesn't bother me, but the problem with Ethereum client dev is that you can never *delete* code. So even though we can create a new format later, we always will have to support the initial format. tells, serialization is json and root construction is sha256 <@!792822129019584562> we probably want to avoid specifics about what it looks like because they will end up leading to bike-shedding over whether we should sha256/keccak, or whether json is good, or whether ..... Heh, I can avoid that for this evening and stay on topic. 😉 yea, idea is that there is an upgradable path of the root construction which can specifiy access list generation methodology <@!301186049323958275> do you have push back on my \"this is objectively useful because...\" use case? So I think what I would want to be convinced of (and maybe this is easy for you as I have been too busy to follow witness discussion lately so the answer may already exist) is that access lists of the kind being proposed are useful today and will enable some useful feature that will benefit end users immediately. Not specifically, though I would like to better understand the end-user benefit this enables. *cache warmup* seems off the boot benefit especially when the state is huge Is it just to close a griefing vector against beam sync, and we want beam sync to remain usable? for validating/sibling miners Well, currently there are no functional light clients I don't think? Is that because we don't have access lists (at least in part) or after adding this will we still not have functional light clients? I won't be able to convince you in this chat, but the hill I'm currently willing to die on is having functional light clients, and this is a piece of that puzzle. https://github.com/ethereum/stateless-ethereum-specs/blob/master/portal-network.md access list is a step in that direction, i think, bundling witnesses as far as my impression is, not a \"light\" job for a full node this will be necessary at the point where we have formal support for stateless block execution in the protocol, I can only predict (with reasonable confidence) that this is the actual mechanism that we need for that functionality. I also very much want functional light clients, and this being a prerequisite for that definitely is a strong argument. Is it your belief that functional light clients are sufficiently solved that at this point we just need to add some specific key features to the chain along with some elbow grease and we'll have them? I guess what I'm really asking is: are we still in the research phase for light clients, or are we now past that and in the development phase? I think stateroot, plus access list to inspect the state changes should enable thee light client dev If we are still in the research phase then I think we should be careful about adding features to mainnet that may not end up necessary once research is done because adding stuff to mainnet is soooo complicated. If we are in the development phase and this is just the first step, then I'm much more on board. We are building them. My team is building https://github.com/carver/trin/ and status is building an independent implementation. I have been here long enough to trust your judgement and honesty on the current progress of light clients, so if you say that we are \"ready to start building them\" and not \"still figuring them out\" then I'm on board. 👍 (I very much wish I had time to validate this personally, but sadly my time is very limited these days and I would rather spend it validating the work of people I have less confidence in) cool, I'm gonna go leave a few notes on the discussion thread that outline some of the things that I know we need to validate or at least fully understand before we actually put this on mainnet The goal of trin seems to be this transparent proxy which predominantly uses the \"new state network\" but falls back to an upstream RPC for missing data. Once the new state network is validated and established as a working solution, do you expect that a) existing clients would just implement it, b) new specific clients (like trin) would act as gateways, c) every light client still works like trin (i.e. has an upstream connection); d) something else? By a) I meant that existing clients would implement participation in the network to supply data. Light clients just want to use the new network. The upstream RPC fallback is just a way that we can ship something usable today and provide incremental improvements as the portal network components are built out. Otherwise, we will have something that isn't actually functionally usable until the full network has been implemented, which poses a \"chicken/egg\" problem since the network needs a critical mass of users to be able to house the necessary data. So the upstream RPC fallback is just a mechanism through which we can allow early users to help build out the network while still providing them with a fully functional JSON-RPC provider. Maybe a better question, ideally in the future, would we have two kinds of \"light clients\": 1) \"light client gateways\" like trin which connect both to portalnet and eth 2) light clients which only connect to portalnet Or would being a light client mean option 1) ? option 2. Trin will not be connecting to the `eth` network (or any DevP2P networks) If it is not connecting to `eth` neither uses an RPC, how does new state data gets into portalnet? We are building out a separate mode of operation (that might be bundled within `trin` but likely won't be commonly used) which would be configured to connect to a specially modified Eth1 client (currently nethermind) which pulls data from that client and pushes it into the portal networks. Ok, so we would have gateways and light clients? 🙂 we call these \"bridge nodes\" What you call a \"bridge node\" I called a gateway, but same thing. Ok, maybe the point is that the portal network is oblivious to the existence of the bridge nodes. They just look like normal portal clients, but somehow that magically materialize new state data, blocks, etc into the network. \"gateway\" = \"bridge\" 👍 Yeah, sure. So for whoever is relying solely on portalnet, they would need a hardcoded truth (i.e. blockhash) for at least one block and then be able to traverse and verify the correctness of the network? No, they should be able to do what clients currently do if they really want to, and sync the header chain from genesis. It would just be quite time consuming and I expect most clients will checkpoint **or** do something like checking that a few centralized sources all agree on a recent block header. Then the only point it serves is an alternate path for acquiring data? but POS weak subjectivity already would impose this condition post merge Not at all. The networks are fundamentally designed to allow participants to contribute back to the network at any level they chose (something that cannot be done in the current DevP2P ETH or LES networks). This includes state storage, history storage, canonical indices for block number and tx_hash storage, and tx gossip, all of which are what make eth1 clients heavy. Yes, post merge, they would be subject to the same POS weak subjectivity effects as full nodes and would need to learn about a recent point in the chain history via some out-of-band mechanism. this decoupling with remove the load off proposers, and enable specialised `gateways` to comein and enrich the network",
+  "excerpts": [
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In the post verkle trie migration world, is it proposed that witnesses are part of the block or a separate item that allows you to validate a block statelessly? In other words will a miner be allowed to distribute a block without generating and distributing a witness for it?",
+      "createdAt": "2021-05-28T13:10:19.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I feel like we're moving toward a more decoupled download-what-you-want system so I expect a good chance we'll see witnesses distributed on a separate subnet",
+      "createdAt": "2021-05-28T13:11:58.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think a fully stateful node can validate a block faster if given a witness. So miners are probably incentivized to generate and distribute witnesses to reduce uncle rates (although if verkle tries ship after the merge this is moot).",
+      "createdAt": "2021-05-28T13:18:47.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "oh interesting",
+      "createdAt": "2021-05-28T13:22:37.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "not sure though! validating a witness takes a couple hundred milliseconds as well",
+      "createdAt": "2021-05-28T13:23:00.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Reads are O(1) database access or O(d) Kate commitments, so a stateful client is presumably faster to do the disk access. Writes are O(d) Kate commitments or O(d) database access. (d being the depth of the verkle trie).",
+      "createdAt": "2021-05-28T13:43:56.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The devil is in the constant factors",
+      "createdAt": "2021-05-28T13:44:22.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh actually wait nevermind",
+      "createdAt": "2021-05-28T13:44:28.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Validating a Verkle witness is pretty easy",
+      "createdAt": "2021-05-28T13:44:34.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's producing the witness that takes a few hundred ms",
+      "createdAt": "2021-05-28T13:44:42.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The problem here is that because producing the witness is a massive headache (256x slower than reading or writing to a verkle trie, I think), is there a risk that we are putting lots of work on nodes to produce witnesses on demand for stateless clients that want them. Would we be better off telling the miner that they are required to do that work and then distributing the witness they produce once and for all?",
+      "createdAt": "2021-05-28T13:47:14.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "POS should largely remove the \"race\" that has long been a burden of POW, so a few hundred ms extra to generate and produce a witness seems like it wouldn't have a significant effect on block proposers profits in the POS world.",
+      "createdAt": "2021-05-28T14:17:18.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That said, it isn't clear to me whether we need block proposers/producers to generate and disseminate witnesses.  I say this under the presumption that the block header has a canonical access list which would allow for the witness to be independently produced and gossiped.  This flexibility may be beneficial/nice",
+      "createdAt": "2021-05-28T14:19:04.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I believe that you are correct though in the assertion that a node which receives a block with a bundled witness *should* in most cases be able to validate the block faster than reading from disk, but I think the benefits to the block producer are potentially only present in the POW context since that is the only context where the \"race\" is important (to avoid being uncled)",
+      "createdAt": "2021-05-28T14:23:26.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@364458974906548225> I'll moderately argue the thing you wanted to know if anyone was going to argue.  😄",
+      "createdAt": "2021-05-28T15:30:58.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My concern is that if we add access lists now, but then later realize that we need to change it, then it will be harder to change it later.",
+      "createdAt": "2021-05-28T15:31:18.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because of the difficulty of changing the tires on the bus while it is driving down the highway, I prefer to not add new hubcaps until we are confident they are the hubcaps we will actually use long term.  🚌",
+      "createdAt": "2021-05-28T15:31:53.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "As in... change their format?  The idea behind access lists is that they are independent of what a proof/witness looks like",
+      "createdAt": "2021-05-28T15:31:56.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm concerned that once proof/witness stuff is done we'll realize that this particular incarnation of access lists ended up being incompatible in some way or otherwise \"useless\".",
+      "createdAt": "2021-05-28T15:32:34.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the proposal is for `AccessListRoot` is to have a `URN` like parsable structure, which is upgradable imho",
+      "createdAt": "2021-05-28T15:34:44.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`AccessListRoot := \"urn:sha256:json:0x${ SHA256( access_list.toJSONString('utf8') ).toHexString() }\"`",
+      "createdAt": "2021-05-28T15:35:19.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ah, I'm reasonably confident that they are demonstrably useful now.  My case would be something like:\n\nwe currently have `wit/0` which only exposes the simplest and very grief-able API of a list of node-hashes.  That's used for beam sync acceleration.\n\nwe intentionally didn't do anything more complex because node hashes was easy and anything more complex was equally griefable.\n\nwith a `header.access_list`, we could improve `wit/1` to include the access list, which would remove the griefing vector, and still provide the same level of beam sync speed up.",
+      "createdAt": "2021-05-28T15:35:25.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "like this is sample construction",
+      "createdAt": "2021-05-28T15:35:27.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Adding a block header field doesn't bother me, but the problem with Ethereum client dev is that you can never *delete* code.  So even though we can create a new format later, we always will have to support the initial format.",
+      "createdAt": "2021-05-28T15:35:41.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "tells, serialization is json and root construction is sha256",
+      "createdAt": "2021-05-28T15:35:42.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!792822129019584562> we probably want to avoid specifics about what it looks like because they will end up leading to bike-shedding over whether we should sha256/keccak, or whether json is good, or whether .....",
+      "createdAt": "2021-05-28T15:36:01.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Heh, I can avoid that for this evening and stay on topic.  😉",
+      "createdAt": "2021-05-28T15:36:32.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yea, idea is that there is an upgradable path of the root construction",
+      "createdAt": "2021-05-28T15:36:53.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "which can specifiy access list generation",
+      "createdAt": "2021-05-28T15:37:04.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "methodology",
+      "createdAt": "2021-05-28T15:37:10.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> do you have push back on my \"this is objectively useful because...\" use case?",
+      "createdAt": "2021-05-28T15:37:56.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So I think what I would want to be convinced of (and maybe this is easy for you as I have been too busy to follow witness discussion lately so the answer may already exist) is that access lists of the kind being proposed are useful today and will enable some useful feature that will benefit end users immediately.",
+      "createdAt": "2021-05-28T15:37:57.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not specifically, though I would like to better understand the end-user benefit this enables.",
+      "createdAt": "2021-05-28T15:38:13.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "*cache warmup* seems off the boot benefit especially when the state is huge",
+      "createdAt": "2021-05-28T15:39:01.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is it just to close a griefing vector against beam sync, and we want beam sync to remain usable?",
+      "createdAt": "2021-05-28T15:39:03.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "for validating/sibling miners",
+      "createdAt": "2021-05-28T15:39:28.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Well, currently there are no functional light clients I don't think?  Is that because we don't have access lists (at least in part) or after adding this will we still not have functional light clients?",
+      "createdAt": "2021-05-28T15:39:47.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I won't be able to convince you in this chat, but the hill I'm currently willing to die on is having functional light clients, and this is a piece of that puzzle.",
+      "createdAt": "2021-05-28T15:40:39.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/stateless-ethereum-specs/blob/master/portal-network.md",
+      "createdAt": "2021-05-28T15:40:50.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "access list is a step in that direction, i think, bundling witnesses as far as my impression is, not a \"light\" job for a full node",
+      "createdAt": "2021-05-28T15:41:49.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this will be necessary at the point where we have formal support for stateless block execution in the protocol, I can only predict (with reasonable confidence) that this is the actual mechanism that we need for that functionality.",
+      "createdAt": "2021-05-28T15:41:52.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I also very much want functional light clients, and this being a prerequisite for that definitely is a strong argument.  Is it your belief that functional light clients are sufficiently solved that at this point we just need to add some specific key features to the chain along with some elbow grease and we'll have them?",
+      "createdAt": "2021-05-28T15:42:20.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess what I'm really asking is: are we still in the research phase for light clients, or are we now past that and in the development phase?",
+      "createdAt": "2021-05-28T15:42:46.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think stateroot, plus access list to inspect the state changes should enable thee light client dev",
+      "createdAt": "2021-05-28T15:43:30.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If we are still in the research phase then I think we should be careful about adding features to mainnet that may not end up necessary once research is done because adding stuff to mainnet is soooo complicated.  If we are in the development phase and this is just the first step, then I'm much more on board.",
+      "createdAt": "2021-05-28T15:43:30.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We are building them.  My team is building https://github.com/carver/trin/ and status is building an independent implementation.",
+      "createdAt": "2021-05-28T15:44:25.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have been here long enough to trust your judgement and honesty on the current progress of light clients, so if you say that we are \"ready to start building them\" and not \"still figuring them out\" then I'm on board.  👍",
+      "createdAt": "2021-05-28T15:45:18.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(I very much wish I had time to validate this personally, but sadly my time is very limited these days and I would rather spend it validating the work of people I have less confidence in)",
+      "createdAt": "2021-05-28T15:46:02.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cool, I'm gonna go leave a few notes on the discussion thread that outline some of the things that I know we need to validate or at least fully understand before we actually put this on mainnet",
+      "createdAt": "2021-05-28T15:46:09.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The goal of trin seems to be this transparent proxy which predominantly uses the \"new state network\" but falls back to an upstream RPC for missing data. Once the new state network is validated and established as a working solution, do you expect that a) existing clients would just implement it, b) new specific clients (like trin) would act as gateways, c) every light client still works like trin (i.e. has an upstream connection); d) something else?",
+      "createdAt": "2021-05-28T16:20:57.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By a) I meant that existing clients would implement participation in the network to supply data. Light clients just want to use the new network.",
+      "createdAt": "2021-05-28T16:24:30.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The upstream RPC fallback is just a way that we can ship something usable today and provide incremental improvements as the portal network components are built out.  Otherwise, we will have something that isn't actually functionally usable until the full network has been implemented, which poses a \"chicken/egg\" problem since the network needs a critical mass of users to be able to house the necessary data.  So the upstream RPC fallback is just a mechanism through which we can allow early users to help build out the network while still providing them with a fully functional JSON-RPC provider.",
+      "createdAt": "2021-05-28T16:24:34.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Maybe a better question, ideally in the future, would we have two kinds of \"light clients\":\n1) \"light client gateways\" like trin which connect both to portalnet and eth\n2) light clients which only connect to portalnet\n\nOr would being a light client mean option 1) ?",
+      "createdAt": "2021-05-28T16:26:09.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "option 2.  Trin will not be connecting to the `eth` network (or any DevP2P networks)",
+      "createdAt": "2021-05-28T16:26:44.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If it is not connecting to `eth` neither uses an RPC, how does new state data gets into portalnet?",
+      "createdAt": "2021-05-28T16:27:12.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We are building out a separate mode of operation (that might be bundled within `trin` but likely won't be commonly used) which would be configured to connect to a specially modified Eth1 client (currently nethermind) which pulls data from that client and pushes it into the portal networks.",
+      "createdAt": "2021-05-28T16:28:16.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ok, so we would have gateways and light clients? 🙂",
+      "createdAt": "2021-05-28T16:28:49.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we call these \"bridge nodes\"",
+      "createdAt": "2021-05-28T16:28:51.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What you call a \"bridge node\" I called a gateway, but same thing.",
+      "createdAt": "2021-05-28T16:30:10.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ok, maybe the point is that the portal network is oblivious to the existence of the bridge nodes.  They just look like normal portal clients, but somehow that magically materialize new state data, blocks, etc into the network.",
+      "createdAt": "2021-05-28T16:30:52.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"gateway\" = \"bridge\" 👍",
+      "createdAt": "2021-05-28T16:31:06.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, sure. So for whoever is relying solely on portalnet, they would need a hardcoded truth (i.e. blockhash) for at least one block and then be able to traverse and verify the correctness of the network?",
+      "createdAt": "2021-05-28T16:32:58.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No, they should be able to do what clients currently do if they really want to, and sync the header chain from genesis.  It would just be quite time consuming and I expect most clients will checkpoint **or** do something like checking that a few centralized sources all agree on a recent block header.",
+      "createdAt": "2021-05-28T16:33:33.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Then the only point it serves is an alternate path for acquiring data?",
+      "createdAt": "2021-05-28T16:34:27.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but POS weak subjectivity already would impose this condition post merge",
+      "createdAt": "2021-05-28T16:34:31.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not at all.  The networks are fundamentally designed to allow participants to contribute back to the network at any level they chose (something that cannot be done in the current DevP2P ETH or LES networks).  This includes state storage, history storage, canonical indices for block number and tx_hash storage, and tx gossip, all of which are what make eth1 clients heavy.",
+      "createdAt": "2021-05-28T16:35:26.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, post merge, they would be subject to the same POS weak subjectivity effects as full nodes and would need to learn about a recent point in the chain history via some out-of-band mechanism.",
+      "createdAt": "2021-05-28T16:36:02.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this decoupling with remove the load off proposers, and enable specialised `gateways` to comein and enrich the network",
+      "createdAt": "2021-05-28T16:57:12.100000+00:00",
+      "attachments": []
+    }
+  ]
+}

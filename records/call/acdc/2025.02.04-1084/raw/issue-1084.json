@@ -1,0 +1,143 @@
+{
+  "body": "# Consensus-layer Call 136\r\n\r\n[prev: call 135](https://github.com/ethereum/pm/issues/1069)\r\n\r\nMeeting Date/Time: [Thursday 2024/6/27 at 14:00 UTC](https://savvytime.com/converter/utc/june-27-2024/2pm)\r\nMeeting Duration: 1.5 hours\r\n[stream](https://www.youtube.com/live/T-w5dzte36c)\r\n\r\n0. [Private client information update](https://github.com/ethereum/pm/issues/1084#issuecomment-2189516637)\r\n1. [Execution cross-validation](https://github.com/ethereum/pm/issues/1084#issuecomment-2189676688)\r\n2. Electra\r\n   * devnet-1\r\n   * other electra updates\r\n     * EIP-6110 updates: https://github.com/ethereum/consensus-specs/pull/3818\r\n   * anything to say about blob fee spike?\r\n3. PeerDAS\r\n   * [Refactor blob count and blob fee handling across EL and CL](https://github.com/ethereum/pm/issues/1084#issuecomment-2192009972)\r\n4. [SSZ update](https://github.com/ethereum/pm/issues/1084#issuecomment-2191282230)\r\n5. Research, spec, etc\r\n6. Open discussion/Closing remarks",
+  "comments": [
+    {
+      "id": "IC_kwDOBCfO0M6CgV9d",
+      "author": {
+        "login": "jorem321"
+      },
+      "authorAssociation": "NONE",
+      "body": "Hello! On behalf of Nethermind Research, I would like to present the results of the research report [\"Allowing validators to provide client information privately\"](https://ethresear.ch/t/research-report-allowing-validators-to-share-client-information-privately-a-project-by-nethermind-research/19506). This work was sponsored by a grant from the Ethereum Foundation, and its presentation to the community is an important milestone for its completion.\r\n\r\n(I will summarize the main results into a 15-minute presentation.)\r\n\r\nThis research discusses methods that can be used (with some changes to the Ethereum protocol) to gather client diversity data from validators in an anonymous fashion. We would greatly appreciate your feedback on this.",
+      "createdAt": "2024-06-25T17:16:02Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2189516637",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6Cg9CQ",
+      "author": {
+        "login": "karalabe"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "Hey all,\r\n\r\nI'd like to RFC a proposal I've made a number of months ago, and which we've since mostly fleshed out and completed Geth side. Although I could try to EIP it, it cross cuts EL and CL and extends the `engine` API, so I'm unsure what exactly the procedure is (or if I should be even the one driving the spec given other owners of the `engine` API).\r\n\r\nThe proposal (updated since originally brain-dumped) is [Execution layer cross-validation](https://gist.github.com/karalabe/47c906f0ab4fdc5b8b791b74f084e5f9), which is a fancy way of saying *Stateless Ethereum before Verkle*. The TL;DR is that whilst MPT witnesses are somewhat large for reliable propagation over the internet, they can still be immensely useful (before Verkle lands) for a) preventing validator slashing due to consensus fault; and b) preventing double spend type attacks on services relying on a consensus faulty client.\r\n\r\n---\r\n\r\nWhat concerns the consensus clients is the `engine` API extensions proposed. Note, the names were derived to be fully analogous to how the API works currently, but still create a separate subset to not clash with production use until the final schemes are agreed upon. This is where you come in:\r\n\r\n- Add `forkchoiceUpdatedWithWitnessV1,2,3` with same params and returns as `forkchoiceUpdatedV1,2,3`, but triggering a stateless witness building if block production is requested.\r\n- Extend `getPayloadV2,3` to return `executionPayloadEnvelope` with an additional `witness` field of type `DATA` iff created via `forkchoiceUpdatedWithWitnessV2,3`.\r\n- Add `newPayloadWithWitnessV1,2,3` with same params and returns as `newPayloadV1,2,3`, but triggering a stateless witness creation during payload execution to allow cross validating it.\r\n- Extend `payloadStatusV1` with a `witness` field of type `DATA` if returned by `newPayloadWithWitnessV1,2,3`.\r\n- Add `executeStatelessPayloadV1,2,3` with same base params as `newPayloadV1,2,3` and one more additional `witness` param of type `DATA`. The method returns `statelessPayloadStatusV1`, which mirrors `payloadStatusV1` but replaces `latestValidHash` with `stateRoot` and `receiptRoot`.\r\n\r\nOne new type mentioned above are (exemplified json):\r\n\r\n```js\r\n// statelessPayloadStatusV1 is the result of a stateless payload execution.\r\nvar statelessPayloadStatusV1 = {\r\n\tstatus:          \"same as payloadStatusV1.status\",\r\n\tstateRoot:       \"0x0000000000000000000000000000000000000000000000000000000000000000\",\r\n\treceiptsRoot:    \"0x0000000000000000000000000000000000000000000000000000000000000000\",\r\n\tvalidationError: \"same as payloadStatusV1.validationError\",\r\n}\r\n```\r\n\r\n---\r\n\r\nThe above primitives permit us to enable the following use-cases:\r\n\r\n- Cross validating locally created blocks:\r\n  - Call `forkchoiceUpdatedWithWitness` instead of `forkchoiceUpdated` to trigger witness creation too.\r\n  - Call `getPayload` as before to retrieve the new block and also the above created witness.\r\n  - Call `executeStatelessPayload` against another client to cross-validate the block.\r\n\r\n- Cross validating locally processed blocks:\r\n  - Call `newPayloadWithWitness` instead of `newPayload` to trigger witness creation too.\r\n  - Call `executeStatelessPayload` against another client to cross-validate the block.\r\n\r\n- Block production for stateless clients (local or MEV builders):\r\n  - Call `forkchoiceUpdatedWithWitness` instead of `forkchoiceUpdated` to trigger witness creation too.\r\n  - Call `getPayload` as before to retrieve the new block and also the above created witness.\r\n  - Propagate witnesses across the consensus libp2p network for stateless Ethereum.\r\n\r\n- Stateless validator validation:\r\n  - Call `executeStatelessPayload` with the propagated witness to statelessly validate the block.\r\n\r\n*Again, note, the various `WithWitness` methods could also *just be* an additional boolean flag on the base methods, but this PR wanted to keep the methods separate until a final consensus is reached on how to integrate in production.*\r\n\r\n---\r\n\r\nAs you can see on the use cases above, I've tried to make the API design feel as natural as can be compared to the way the consensus clients communicate currently with the execution layer. You'd have complete control over how you cross validate across different client implementations.\r\n\r\nEverything mentioned in this doc and the one linked is implemented in Geth and is fully functional. Currently the API integration is the only outstanding merge, which you can find in [this PR](https://github.com/ethereum/go-ethereum/pull/30069).\r\n\r\nYou can also find benchmark results in the linked document wrt witness construction overhead in Geth (hint, 20ms on mainnet head); stateless execution performance in Geth (hint, 105ms on mainnet head); witness sizes (hint; 8MB JSON encoded) and encoding/decoding speeds (hint, 100ms for JSON, 5ms for RLP (ouch)).\r\n\r\n<img src=\"https://github.com/ethereum/pm/assets/129561/d929e0e1-54fa-4dd7-a8fe-73a11cb3fb38\">\r\n<img src=\"https://github.com/ethereum/pm/assets/129561/a2cae8c0-4fb0-41dd-8cc9-5ef2df7f0e4c\">\r\n<img src=\"https://github.com/ethereum/pm/assets/129561/6f852169-a76d-426c-8ad9-691849ca84ae\">\r\n\r\nFor more details though, please check out the [proposal](https://gist.github.com/karalabe/47c906f0ab4fdc5b8b791b74f084e5f9).",
+      "createdAt": "2024-06-25T18:22:03Z",
+      "includesCreatedEdit": true,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [
+        {
+          "content": "THUMBS_UP",
+          "users": {
+            "totalCount": 1
+          }
+        }
+      ],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2189676688",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6CmYKz",
+      "author": {
+        "login": "mkalinin"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "I’d like to announce the following PR:\r\n* https://github.com/ethereum/consensus-specs/pull/3818",
+      "createdAt": "2024-06-26T08:18:08Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2191098547",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6CnFA2",
+      "author": {
+        "login": "etan-status"
+      },
+      "authorAssociation": "NONE",
+      "body": "- [EIP-7688: Forward compatible consensus data structures](https://eips.ethereum.org/EIPS/eip-7688)\r\n  - Include in Pectra devnet 2?\r\n    - Lodestar, Nimbus, Teku already have full implementations\r\n    - Grandine, Lighthouse, Prysm still working on it, but no opposition at this stage for Electra inclusion\r\n    - Specs not locked in, feedback can still be addressed\r\n  - Specs rebased on top of Electra devnet 1: https://github.com/ethereum/EIPs/pull/8691/files\r\n- [EIP-6493: SSZ Transaction Signature Scheme](https://eips.ethereum.org/EIPS/eip-6493)\r\n  - 🎉 EthereumJS has implementation: https://x.com/Gajpower/status/1805260843308794303 @g11tech\r\n  - Kurtosis devnet available: https://stabilitynow.box\r\n- Light client specs updated for Electra: https://github.com/ethereum/consensus-specs/pull/3811",
+      "createdAt": "2024-06-26T09:51:40Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2191282230",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6CnjF5",
+      "author": {
+        "login": "g11tech"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "\r\n>     * [EIP-6493: SSZ Transaction Signature Scheme](https://eips.ethereum.org/EIPS/eip-6493)\r\n>       \r\n>       * 🎉 EthereumJS has implementation: https://x.com/Gajpower/status/1805260843308794303 @g11tech\r\n>       * Kurtosis devnet available: https://stabilitynow.box\r\n\r\nethjs impl :partying_face: \r\n - https://github.com/ethereumjs/ethereumjs-monorepo/pull/3452",
+      "createdAt": "2024-06-26T10:54:41Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [
+        {
+          "content": "HOORAY",
+          "users": {
+            "totalCount": 1
+          }
+        }
+      ],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2191405433",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6Cp2r0",
+      "author": {
+        "login": "hwwhww"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "This has been discussed in #1070, but we hope to get broader attention on passing the blob max count in Pectra to make the PeerDAS feature easier to test and deliver.\r\n\r\n- Solution 1: pass `max_blobs_per_block` https://github.com/ethereum/consensus-specs/pull/3800\r\n- Solution 2: pass `​​base_fee_per_blob_gas` https://github.com/ethereum/consensus-specs/pull/3813",
+      "createdAt": "2024-06-26T15:34:06Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2192009972",
+      "viewerDidAuthor": false
+    },
+    {
+      "id": "IC_kwDOBCfO0M6D-tIO",
+      "author": {
+        "login": "ralexstokes"
+      },
+      "authorAssociation": "MEMBER",
+      "body": "closing in lieu of #1096",
+      "createdAt": "2024-07-08T14:35:24Z",
+      "includesCreatedEdit": false,
+      "isMinimized": false,
+      "minimizedReason": "",
+      "reactionGroups": [],
+      "url": "https://github.com/ethereum/pm/issues/1084#issuecomment-2214253070",
+      "viewerDidAuthor": false
+    }
+  ],
+  "labels": [
+    {
+      "id": "LA_kwDOBCfO0M8AAAAB4uFrwQ",
+      "name": "ACD",
+      "description": "Type: All Core Dev calls - execution & consensus",
+      "color": "2A3841"
+    },
+    {
+      "id": "LA_kwDOBCfO0M8AAAAB4uGEvg",
+      "name": "Consensus",
+      "description": "Layer: Issues that affect the consensus layer",
+      "color": "6CA9C1"
+    }
+  ],
+  "number": 1084,
+  "state": "CLOSED",
+  "title": "Consensus-layer Call 136",
+  "updatedAt": "2025-02-04T22:03:49Z",
+  "url": "https://github.com/ethereum/pm/issues/1084"
+}

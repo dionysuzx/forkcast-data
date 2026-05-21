@@ -1,0 +1,586 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-04-26",
+  "messageCount": 72,
+  "sourceHash": "405044309a711c52ae3dd9c821ea949e65265cd272506605cdf4dacd87609c92",
+  "searchText": "Yes, we're using 0x04. In source code we have that prefix in: P2PMessageCode.AddCapability Eth62MessageCode.BlockHeaders LesMessageCode.GetBlockBodies Hey guys, could someone help me out? EthereumJS has connected to Aleut, we sync up till block 55 but now we get invalid state root. I think the only parts which could be wrong here are either coinbase or the sender of that EIP1559 transaction. Our gas used is correct, and I manually checked the miner balance and the account balance, they seem correct to me but they probably are not. Could someone report the state of these accounts after executing the block? So the state of these accounts on block 56: `0xfe3b557e8fb62b89f4916b721be55ceb828dbd73` `0x563256a49aaa1e8c985a10bd73222834b3946b54` Balance for 0xfe is 89999999999937843870800 for us. And the miner gets a tip of 50600 Or if a node could open a RPC endpoint that would also be cool 😄 (Can DM me) We touch this 0x0000..00aaaa account, we delete this account from trie after executing the txs right? CC <@!758579010027782144> <@!574864862338088960> How do I run Nethermind in aleut mode? Do you have a documentation for P2PMessageCode.AddCapability somewhere? This is not part of the RLPx spec 🙂 It would be nice to know how to decode this data. Weird we report the wrong miner i think that can happen if the clique seal hash is incorrect? I pulled the data from turbo geth which seems to sync with both Nethermind and Besu 🤔 This is clique extra data 0x00000000000000000000000000000000000000000000000000000000000000004038bec6427396c8f6f4044668543c368ad5acab1eb9d556075816d25ea90b7b17958594cbd8dc5058c280e1286472d784ea89cc92587854cbeae1272567d36400 Reported address should be 0x36267c845cc42b57ccb869d655e5d5fb620cc69a (Which is in fact the only signer available if I'm seeing that correctly) that's the signer you're getting? No I am getting 0x563256a49aaa1e8c985a10bd73222834b3946b54 But this might have to do with the fact that EIP1559 introduces an extra field on the block EIP225 states that this extra field /should/ be hashed to get the right clique hash But I can imagine that this is overlooked and instead what is being hashed is not the base fee field, so I will check if that is the case (This is the clique EIP) Ah wait that's actually what we do 😂 this is how i'm calculating the seal hash: https://github.com/quilt/go-ethereum/blob/259ffe56f42d94c7e4dbb69f5dd69b6e70cbe20e/consensus/clique/clique.go#L714-L738 `baseFee` as optional element at the end Yep we are actually not considering baseFee 🙂 I think this might be the problem 👍 okay 🙂 let us know if that resolves the issue! Will do 😄 Is this buffer unpadded? Or is it always padded to 32 bytes? <@508125616940515329> should be unpadded I just realized that at least this is correct, since we can download block headers and thus parentHeader fields are valid. I also realized that we actually /do/ add baseFee to the raw RLP (I really need to read more carefully 😅 ). So I will now try to remove this base fee if I try to calculate the clique msg hash and see what happens Are we far enough along on the consensus side of things of EIP-1559 to start discussing JSONRPC changes? Namely what will the `maxPriorityFeePerGas, maxFeePerGas` fields from the EIP be called in say `eth_getTransactionByHash` results? yes i think so Our issue is an internal one; your implementation also seems correct RE: clique signing hash 🙂 AFAIK there haven't been any EIPs drafted for the tx changes, only the `baseFee` additions to the block results (EIP-3041 and friends). _Personally_ I like the `maxFee` and `tip` names used in your geth PR, but IMO I think the field names in the JSONRPC and the EIP itself should match as closely as possible. That said `maxFeePerGas` and `maxPriorityFeePerGas` aren't the most end-user friendly terms. Would we consider updating EIP-1559 to use `tip` and `maxFee` terminology? fyi i think the latest preferred term for `tip` is priority fee 🙂 I guess the next question is whether the JSONRPC result should contain the \"max\" or \"actual\" ~tip~ priority fee. i suggested changing the terms a couple weeks ago, but <@!301186049323958275> made the point that the spec should be as pedantic as possible and we can choose the lay terms external to the spec yep, good questions i don't have a preference, but IMO if the actual tip is included then we should also include the effectiveGasPrice since both depend on retrieving the block's base fee from disk ya in my first-pass implementation of the JSONRPC fields I re-used `gasPrice` as the effective gas price for -1559 txs: https://github.com/quilt/go-ethereum/pull/48/commits/7b11019893be78d3797c9ebdd58d7fcfd8ea85bf#diff-c426ecd2f7d247753b9ea8c1cc003f21fa412661c1f967d203d4edf8163da344R1277. I wrestled with making that a new field overloading the existing field felt the most backwards compatible in that if a consumer isn't updated for London they will still get something for `gasPrice` i think that makes good sense So maybe we should rename `RPCTransaction.Tip` to `RPCTransaction.PriorityFee` and propose these fields as an EIP? I can take a stab at an initial EIP this afternoon. seems good to me - might want to run the draft past the <#804019759934078987> folks ya good idea, will do (once written) <@!508125616940515329> I will DM you with our RPC aleut endpoint Now, we can build it from the branch: https://github.com/NethermindEth/nethermind/tree/1559 https://github.com/NethermindEth/nethermind/tree/1559#build-and-run And then: Nethermind.Runner.exe --config aleut Cool, thanks 😄 Hmmmm AFAIK we planned names: MaxPriorityFeePerGas and MaxFeePerGas. <@!574864862338088960> , <@!543900561460822016>, <@!508125616940515329>, <@!388751025789468672> Do you agree with that naming? imo the \"PerGas\" is more verbose than needed for RPC my preference would be `PriorityFee`, `FeeCap` or `MaxFee`, `EffectiveGasPrice`, and `EffectivePriorityFee` I think I like those, but I'd say it would need `MaxPriorityFee` since `PriorityFee` could be interpreted as \"this is the priority fee\" while in practice it could be less than that (hence `Max`) yeah that's fair ugh would be nice to drop the \"Effective\" or \"Max\" prefix on one of those pairs, it seems unnecessary to be so verbose with both as the use of one should imply the other `MaxTip` also sounds nice tbh And it's shorter 🙂 `MaxTip`, `MaxFee`, `EffectiveGasPrice`, `EffectiveTip` `Tip`, `FeeCap`, `GasPrice`, `EffectiveTip` 😄 Ah right maybe due to the mechanism `Tip` is also ok I guess the latter one works, `EffectiveTip` is indeed somewhat excessive Is there a shorter synonym for `Effective`? lol Wouldn't just `GasPrice` also work? Currently we know that `GasPrice` is what was actually paid for a single gas unit. So in this context that would be fine too...? The semantics are the same, although it could be somewhat confusing especially with legacy/eip2930 gas price fields fine with me So `GasPrice` works since \"price\" is basically a synonym for \"fee per gas\", so what about `MaxPrice` and `MaxTipPrice`? Sorry to hijack this convo, but our JS node is only connecting to Nethermind. Are the other two bootnodes down? I am assuming not, then it means we have a devp2p issue. <@!508125616940515329> http://eip1559-testnet.ops.pegasys.tech:3001/ Great 😄 i'm running with discovery off Right, but you are quilt.link right? If I would directly try to connect since I have your identity (bootnode) then I would be able to connect right? Or does discovery off disable all new connections? I think disable discover disables new external connections, but would need to double check I'll move the JSONRPC discussions over to <#804019759934078987>",
+  "excerpts": [
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, we're using 0x04. In source code we have that prefix in:\nP2PMessageCode.AddCapability\nEth62MessageCode.BlockHeaders\nLesMessageCode.GetBlockBodies",
+      "createdAt": "2021-04-26T09:26:52.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey guys, could someone help me out? EthereumJS has connected to Aleut, we sync up till block 55 but now we get invalid state root. I think the only parts which could be wrong here are either coinbase or the sender of that EIP1559 transaction. Our gas used is correct, and I manually checked the miner balance and the account balance, they seem correct to me but they probably are not. Could someone report the state of these accounts after executing the block? So the state of these accounts on block 56:\n\n`0xfe3b557e8fb62b89f4916b721be55ceb828dbd73`\n`0x563256a49aaa1e8c985a10bd73222834b3946b54`",
+      "createdAt": "2021-04-26T10:31:21.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Balance for 0xfe is 89999999999937843870800 for us. And the miner gets a tip of 50600",
+      "createdAt": "2021-04-26T10:33:46.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or if a node could open a RPC endpoint that would also be cool 😄",
+      "createdAt": "2021-04-26T10:35:26.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(Can DM me)",
+      "createdAt": "2021-04-26T10:35:40.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We touch this 0x0000..00aaaa account, we delete this account from trie after executing the txs right?",
+      "createdAt": "2021-04-26T11:37:31.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "CC <@!758579010027782144> <@!574864862338088960>",
+      "createdAt": "2021-04-26T11:52:09.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How do I run Nethermind in aleut mode?",
+      "createdAt": "2021-04-26T12:19:55.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you have a documentation for P2PMessageCode.AddCapability somewhere? This is not part of the RLPx spec 🙂 It would be nice to know how to decode this data.",
+      "createdAt": "2021-04-26T13:26:16.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Weird we report the wrong miner",
+      "createdAt": "2021-04-26T14:30:40.177000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think that can happen if the clique seal hash is incorrect?",
+      "createdAt": "2021-04-26T14:42:33.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I pulled the data from turbo geth which seems to sync with both Nethermind and Besu 🤔",
+      "createdAt": "2021-04-26T15:01:52.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is clique extra data\n0x00000000000000000000000000000000000000000000000000000000000000004038bec6427396c8f6f4044668543c368ad5acab1eb9d556075816d25ea90b7b17958594cbd8dc5058c280e1286472d784ea89cc92587854cbeae1272567d36400\n\nReported address should be 0x36267c845cc42b57ccb869d655e5d5fb620cc69a",
+      "createdAt": "2021-04-26T15:02:14.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(Which is in fact the only signer available if I'm seeing that correctly)",
+      "createdAt": "2021-04-26T15:02:37.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that's the signer you're getting?",
+      "createdAt": "2021-04-26T15:03:33.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No I am getting 0x563256a49aaa1e8c985a10bd73222834b3946b54",
+      "createdAt": "2021-04-26T15:16:27.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But this might have to do with the fact that EIP1559 introduces an extra field on the block",
+      "createdAt": "2021-04-26T15:16:39.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "EIP225 states that this extra field /should/ be hashed to get the right clique hash",
+      "createdAt": "2021-04-26T15:16:51.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But I can imagine that this is overlooked and instead what is being hashed is not the base fee field, so I will check if that is the case",
+      "createdAt": "2021-04-26T15:17:02.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(This is the clique EIP)",
+      "createdAt": "2021-04-26T15:17:27.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah wait that's actually what we do 😂",
+      "createdAt": "2021-04-26T15:19:44.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this is how i'm calculating the seal hash: https://github.com/quilt/go-ethereum/blob/259ffe56f42d94c7e4dbb69f5dd69b6e70cbe20e/consensus/clique/clique.go#L714-L738",
+      "createdAt": "2021-04-26T15:19:51.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`baseFee` as optional element at the end",
+      "createdAt": "2021-04-26T15:20:24.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep we are actually not considering baseFee 🙂 I think this might be the problem 👍",
+      "createdAt": "2021-04-26T15:21:09.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "okay 🙂 let us know if that resolves the issue!",
+      "createdAt": "2021-04-26T15:21:25.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Will do 😄",
+      "createdAt": "2021-04-26T15:21:32.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is this buffer unpadded? Or is it always padded to 32 bytes?",
+      "createdAt": "2021-04-26T15:26:16.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@508125616940515329> should be unpadded",
+      "createdAt": "2021-04-26T15:34:15.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just realized that at least this is correct, since we can download block headers and thus parentHeader fields are valid. I also realized that we actually /do/ add baseFee to the raw RLP (I really need to read more carefully 😅 ). So I will now try to remove this base fee if I try to calculate the clique msg hash and see what happens",
+      "createdAt": "2021-04-26T15:35:25.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Are we far enough along on the consensus side of things of EIP-1559 to start discussing JSONRPC changes?  Namely what will the `maxPriorityFeePerGas, maxFeePerGas` fields from the EIP be called in say `eth_getTransactionByHash` results?",
+      "createdAt": "2021-04-26T15:52:16.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes i think so",
+      "createdAt": "2021-04-26T17:05:05.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Our issue is an internal one; your implementation also seems correct RE: clique signing hash 🙂",
+      "createdAt": "2021-04-26T18:00:05.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "AFAIK there haven't been any EIPs drafted for the tx changes, only the `baseFee` additions to the block results (EIP-3041 and friends).  _Personally_ I like the `maxFee` and `tip` names used in your geth PR, but IMO I think the field names in the JSONRPC and the EIP itself should match as closely as possible.  That said `maxFeePerGas` and `maxPriorityFeePerGas` aren't the most end-user friendly terms.  Would we consider updating EIP-1559 to use `tip` and `maxFee` terminology?",
+      "createdAt": "2021-04-26T19:49:12.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "fyi i think the latest preferred term for `tip` is priority fee 🙂",
+      "createdAt": "2021-04-26T19:50:50.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess the next question is whether the JSONRPC result should contain the \"max\" or \"actual\" ~tip~ priority fee.",
+      "createdAt": "2021-04-26T19:52:07.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i suggested changing the terms a couple weeks ago, but <@!301186049323958275> made the point that the spec should be as pedantic as possible and we can choose the lay terms external to the spec",
+      "createdAt": "2021-04-26T19:52:08.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yep, good questions",
+      "createdAt": "2021-04-26T19:53:01.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i don't have a preference, but IMO if the actual tip is included then we should also include the effectiveGasPrice",
+      "createdAt": "2021-04-26T19:53:25.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "since both depend on retrieving the block's base fee from disk",
+      "createdAt": "2021-04-26T19:53:38.490000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ya in my first-pass implementation of the JSONRPC fields I re-used `gasPrice` as the effective gas price for -1559 txs: https://github.com/quilt/go-ethereum/pull/48/commits/7b11019893be78d3797c9ebdd58d7fcfd8ea85bf#diff-c426ecd2f7d247753b9ea8c1cc003f21fa412661c1f967d203d4edf8163da344R1277. I wrestled with making that a new field overloading the existing field felt the most backwards compatible in that if a consumer isn't updated for London they will still get something for `gasPrice`",
+      "createdAt": "2021-04-26T19:58:07.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think that makes good sense",
+      "createdAt": "2021-04-26T19:59:50.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So maybe we should rename `RPCTransaction.Tip` to `RPCTransaction.PriorityFee` and propose these fields as an EIP?",
+      "createdAt": "2021-04-26T20:01:17.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I can take a stab at an initial EIP this afternoon.",
+      "createdAt": "2021-04-26T20:02:05.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "seems good to me - might want to run the draft past the <#804019759934078987> folks",
+      "createdAt": "2021-04-26T20:02:30.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ya good idea, will do (once written)",
+      "createdAt": "2021-04-26T20:02:55.611000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!508125616940515329> I will DM you with our RPC aleut endpoint",
+      "createdAt": "2021-04-26T20:05:40.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Now, we can build it from the branch: https://github.com/NethermindEth/nethermind/tree/1559 https://github.com/NethermindEth/nethermind/tree/1559#build-and-run\nAnd then: Nethermind.Runner.exe --config aleut",
+      "createdAt": "2021-04-26T20:09:02.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Cool, thanks 😄",
+      "createdAt": "2021-04-26T20:11:27.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmmmm AFAIK we planned names: MaxPriorityFeePerGas and MaxFeePerGas. <@!574864862338088960> , <@!543900561460822016>, <@!508125616940515329>, <@!388751025789468672> Do you agree with that naming?",
+      "createdAt": "2021-04-26T20:16:36.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "imo the \"PerGas\" is more verbose than needed for RPC",
+      "createdAt": "2021-04-26T20:17:54.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my preference would be `PriorityFee`, `FeeCap` or `MaxFee`, `EffectiveGasPrice`, and `EffectivePriorityFee`",
+      "createdAt": "2021-04-26T20:19:48.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think I like those, but I'd say it would need `MaxPriorityFee` since `PriorityFee` could be interpreted as \"this is the priority fee\" while in practice it could be less than that (hence `Max`)",
+      "createdAt": "2021-04-26T20:20:41.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah that's fair",
+      "createdAt": "2021-04-26T20:21:15.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ugh",
+      "createdAt": "2021-04-26T20:21:19.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "would be nice to drop the \"Effective\" or \"Max\" prefix on one of those pairs, it seems unnecessary to be so verbose with both as the use of one should imply the other",
+      "createdAt": "2021-04-26T20:22:57.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`MaxTip` also sounds nice tbh",
+      "createdAt": "2021-04-26T20:24:56.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And it's shorter 🙂",
+      "createdAt": "2021-04-26T20:25:00.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`MaxTip`, `MaxFee`, `EffectiveGasPrice`, `EffectiveTip`",
+      "createdAt": "2021-04-26T20:25:41.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`Tip`, `FeeCap`, `GasPrice`, `EffectiveTip` 😄",
+      "createdAt": "2021-04-26T20:26:13.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah right maybe due to the mechanism `Tip` is also ok",
+      "createdAt": "2021-04-26T20:27:29.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess the latter one works, `EffectiveTip` is indeed somewhat excessive",
+      "createdAt": "2021-04-26T20:28:31.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is there a shorter synonym for `Effective`? lol",
+      "createdAt": "2021-04-26T20:28:44.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Wouldn't just `GasPrice` also work? Currently we know that `GasPrice` is what was actually paid for a single gas unit. So in this context that would be fine too...? The semantics are the same, although it could be somewhat confusing especially with legacy/eip2930 gas price fields",
+      "createdAt": "2021-04-26T20:29:59.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "fine with me",
+      "createdAt": "2021-04-26T20:31:23.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So `GasPrice` works since \"price\" is basically a synonym for \"fee per gas\", so what about `MaxPrice` and `MaxTipPrice`?",
+      "createdAt": "2021-04-26T20:45:24.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry to hijack this convo, but our JS node is only connecting to Nethermind. Are the other two bootnodes down? I am assuming not, then it means we have a devp2p issue.",
+      "createdAt": "2021-04-26T21:10:19.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!508125616940515329> http://eip1559-testnet.ops.pegasys.tech:3001/",
+      "createdAt": "2021-04-26T21:11:13.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Great 😄",
+      "createdAt": "2021-04-26T21:12:23.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i'm running with discovery off",
+      "createdAt": "2021-04-26T21:20:06.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, but you are quilt.link right? If I would directly try to connect since I have your identity (bootnode) then I would be able to connect right? Or does discovery off disable all new connections?",
+      "createdAt": "2021-04-26T21:21:38.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think disable discover disables new external connections, but would need to double check",
+      "createdAt": "2021-04-26T21:29:56.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll move the JSONRPC discussions over to <#804019759934078987>",
+      "createdAt": "2021-04-26T22:04:09.744000+00:00",
+      "attachments": []
+    }
+  ]
+}

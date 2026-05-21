@@ -1,0 +1,56 @@
+{
+  "id": 6800,
+  "title": "EIP-6800: Ethereum state using a unified verkle tree",
+  "status": "Stagnant",
+  "description": "This introduces a new Verkle state tree alongside the existing MPT.",
+  "laymanDescription": "This proposes transitioning Ethereum's entire state system from Merkle Patricia tries to Verkle trees. This foundational change would enable stateless clients, dramatically faster syncing, and better scalability while maintaining security. However, it's competing with other major proposals for Glamsterdam.",
+  "author": "Vitalik Buterin (@vbuterin), Dankrad Feist (@dankrad), Kevaundray Wedderburn (@kevaundray), Guillaume Ballet (@gballet), Piper Merriam (@pipermerriam), Gottfried Herold (@GottfriedHerold), Ignacio Hagopian (@jsign), Tanishq Jasoria (@tanishqjasoria), Gajinder Singh (@g11tech), Danno Ferrin (@shemnon)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2023-03-17",
+  "discussionLink": "https://ethereum-magicians.org/t/proposed-verkle-tree-scheme-for-ethereum-state/5805",
+  "requires": [
+    "6780"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Revolutionary improvement in node syncing speed (from hours/days to minutes), better network decentralization, and more reliable access to Ethereum services."
+    },
+    "appDevs": {
+      "description": "More efficient state access patterns and improved proof verification, though most smart contract logic remains unchanged."
+    },
+    "walletDevs": {
+      "description": "Can implement much faster light clients and improve wallet syncing speed through stateless verification capabilities."
+    },
+    "toolingInfra": {
+      "description": "Complete overhaul needed for state management, proof generation, indexing systems, and block explorers to handle Verkle tree proofs."
+    },
+    "layer2s": {
+      "description": "More efficient state root verification and improved cross-chain proof mechanisms using Verkle tree cryptography."
+    },
+    "stakersNodes": {
+      "description": "Can operate with dramatically reduced storage requirements and near-instant syncing through stateless validation, lowering barriers to participation."
+    },
+    "clClients": {
+      "description": "Minimal direct impact as this primarily affects execution layer state management and proof structures."
+    },
+    "elClients": {
+      "description": "Complete state system rewrite required including Verkle tree implementation, state migration logic, and new proof generation/verification systems."
+    }
+  },
+  "benefits": [
+    "Enables instant node syncing through stateless operation",
+    "Dramatically reduces storage requirements for validators",
+    "Improves network decentralization through lower barriers",
+    "More efficient cryptographic proofs (smaller size)",
+    "Foundation for future scalability improvements"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract Introduce a new Verkle state tree alongside the existing hexary Patricia tree. After the hard fork, the Verkle tree stores all edits to state and a copy of all accessed state, and the hexary Patricia tree can no longer be modified. This is a first step in a multi-phase transition to Ethereum exclusively relying on Verkle trees to store execution state. ## Motivation Verkle trees solve a key problem standing in the way of Ethereum being stateless-client-friendly: witness sizes. A witness accessing an account in today’s hexary Patricia tree is, in the average case, close to 3 kB, and in the worst case it may be three times larger. Assuming a worst case of 6000 accesses per block (15m gas / 2500 gas per access), this corresponds to a witness size of ~18 MB, which is too large to safely broadcast through a p2p network within a 12-second slot. Verkle trees reduce witness sizes to ~200 bytes per account in the average case, allowing stateless client witnesses to be acceptably small. ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in RFC 2119 and RFC 8174. ### Verkle tree definition We define a Verkle tree here by providing the function to compute the root commitment given a set of 32-byte keys and 32-byte values. Algorithms for updating and inserting values are up to the implementer; the only requirement is that the root commitment after the update must continue to match the value computed from this specification. We will then define an embedding that provides the 32-byte key at which any particular piece of state information (account headers, code, storage) should be stored. ``` # Bandersnatch curve order BANDERSNATCH_MODULUS = \\ 13108968793781547619861935127046491459309155893440570251786403306729687672801 # Bandersnatch Pedersen basis of length 256 PEDERSEN_BASIS = [....] VERKLE_NODE_WIDTH = len(PEDERSEN_BASIS) def group_to_scalar_field(point: Point) -> int: # Not collision resistant. Not random oracle. # Binding for Pedersen commitments. assert isinstance(point, Point) if point == bandersnatch.Z: return 0 else: return point.map_to_base_field() % BANDERSNATCH_MODULUS def compute_commitment_root(children: Sequence[int]) -> Point: o = bandersnatch.Z for generator, child in zip(PEDERSEN_BASIS, children): o = bandersnatch.add(o, bandersnatch.mul(generator, child)) return o def extension_and_suffix_tree(stem: bytes31, values: Dict[byte, bytes32]) -> int: sub_leaves = [0] * 512 for suffix, value in values.items(): sub_leaves[2 * suffix] = int.from_bytes(value[:16], 'little') + 2**128 sub_leaves[2 * suffix + 1] = int.from_bytes(value[16:], 'little') C1 = compute_commitment_root(sub_leaves[:256]) C2 = compute_commitment_root(sub_leaves[256:]) return compute_commitment_root([1, # Extension marker int.from_bytes(stem, \"little\"), group_to_scalar_field(C1), group_to_scalar_field(C2)] + [0] * 252) def compute_main_tree_root(data: Dict[bytes32, int], prefix: bytes) -> int: # Empty subtree: 0 if len(data) == 0: return 0 elif len(data) == 1: return list(data.values())[0] else: sub_commitments = [ compute_main_tree_root({ key: value for key, value in data.items() if key[:len(prefix) + 1] == prefix + bytes([i]) }, prefix + bytes([i])) for i in range(VERKLE_NODE_WIDTH) ] return group_to_scalar_field(compute_commitment_root(sub_commitments)) def compute_verkle_root(data: Dict[bytes32, bytes32]) -> Point: stems = set(key[:-1] for key in data.keys()) data_as_stems = {} for stem in stems: commitment_data = Dict[byte, bytes32]() for i in range(VERKLE_NODE_WIDTH): if stem + bytes([i]) in data: commitment_data[i] = data[stem + bytes([i])] data_as_stems[stem] = extension_and_suffix_tree(stem, commitment_data) sub_commitments = [ compute_main_tree_root({ key: value for key, value in data.items() if key[0] == i }, bytes([i])) for i in range(VERKLE_NODE_WIDTH) ] return compute_commitment_root(sub_commitments) ``` Note that a value of zero is not the same thing as a position being empty; a position being empty is represented as 0 in the bottom layer commitment, but a position being zero is represented by a different value in the suffix tree commitment (2**128 is added to value_lower to distinguish it from empty). This distinction between zero and empty is not a property of the existing Patricia tree, but it is a property of the proposed Verkle tree. In the rest of this document, saving or reading a number at some position in the Verkle tree will mean saving or reading the 32-byte little-endian encoding of that number. ### Illustration This is an illustration of the tree structure. ![tree structure](../assets/eip-6800/tree_structure.png) ### Tree embedding Instead of a two-layer structure as in the Patricia tree, in the Verkle tree we will embed all information into a single `key: value` tree. This section specifies which tree keys store the information (account header data, code, storage) in the state. | Parameter | Value | | --------------------- | ------- | | BASIC_DATA_LEAF_KEY | 0 | | CODE_HASH_LEAF_KEY | 1 | | HEADER_STORAGE_OFFSET | 64 | | CODE_OFFSET | 128 | | VERKLE_NODE_WIDTH | 256 | | MAIN_STORAGE_OFFSET | 256**31 | _It’s a required invariant that `VERKLE_NODE_WIDTH > CODE_OFFSET > HEADER_STORAGE_OFFSET` and that `HEADER_STORAGE_OFFSET` is greater than the leaf keys. Additionally, `MAIN_STORAGE_OFFSET` must be a power of `VERKLE_NODE_WIDTH`._ Note that addresses are always passed around as an `Address32`. To convert existing addresses to `Address32`, prepend with 12 zero bytes: ``` def old_style_address_to_address32(address: Address) -> Address32: return b'\\x00' * 12 + address ``` #### Header values These are the positions in the tree at which block header fields of an account are stored. ``` def hash_point_to_bytes(point: Point) -> int: return group_to_scalar_field(point).to_bytes(32, 'little') def pedersen_hash(inp: bytes) -> bytes3"
+}

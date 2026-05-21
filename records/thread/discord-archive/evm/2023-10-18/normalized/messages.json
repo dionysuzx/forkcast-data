@@ -1,0 +1,506 @@
+{
+  "schemaVersion": 1,
+  "channel": "evm",
+  "date": "2023-10-18",
+  "messageCount": 62,
+  "sourceHash": "d2bd0daa1d09b79e2385ffd3ebdf24cea5d0ec34f9134ea9280f0321e1fec519",
+  "searchText": "i have a conflict during the EOF call today, if some else could take the lead i would appreciate 🙏 no, you would end up with completely new behavior for existing contracts (unless you had a rule which was like, contracts deployed after X timestamp use a different EVM than contracts deployed before) dirty upper bits are disallowed by the spec. a compliant ABI decoder needs to validate (raise an exception of some kind if the upper bits are dirty) I'm also on the L2 call. Will call in when it is over <@403707149043105803> are you running the EOF call today then? could you ping here when you are ready Wasn't planning on it. But I will ping here when I'm on the zoom. nobody is really in the call rn. will check back in 20 I'm on now Maybe we can make it a short update call. we also did just have a meeting last week... I'm not keen having it, but people are online so maybe lets just crunch it out. In order to keep the cadence alternating to ACD. The issue is that the L2 call will run into it about half the time. It's 3rd wednesdays. It will collide in istanbul, then february, march and april, then Aug, Sep, and October That's our hint at what timeline we need to ship EOF to not have conflicting calls 😅 > no, you would end up with completely new behavior for existing contracts Well, this is what I'm trying to understand. I'm just looking for some easy and clear evidence many existing contracts would actually be broken. I'm assuming this evidence exists, I'm just not sure exactly what it is. Hence, asking here. For example, if `solc` puts databytes at arbitrary positions within contracts (e.g. for constants or something) then that's pretty clear. Likewise, if it constructs jump destinations out-of-thin-air then would also be pretty clear (function pointers are close to this). Otherwise, if it turned out (by some crazy coincidence) that in all on-chain contracts only had data bytes at the end of the contract ... well that would be a different, and less clear situation. Here's another twist: if we say \"Immediates activate in cancun\" some troll will post a contract that is broken by the immediate just to cause problems. That happened with the EIP-3541, someone deployed some contracts that were EF-emoji for the lulz. We also cannot just turn on code validation because that breaks data segments in solodity (specifically metatata) without enshrining their pattern. > some troll will post a contract that is broken by the immediate just to cause problems Hmmm, that is indeed an interesting twist!!! But, still if we already have on chain evidence ... then no need to worry about that!! Anyway, maybe I can look into this and scan a bunch of existing contracts. I just thought the answer would be easy. There was on-chain evidence for the shanghai attacks. Still a giant PITA Ok, can I find that somewhere? Just the contracts and transacitons themselves. For the time a precompile bug split the network the ether cam from tornadocash. A real troll doesn't care about gensler it's uncommon to put databytes in the middle of a contract. the reason is that data could have a `PUSH` instruction which 'eats into' succeeding code True, you'd need to pad or something when that happened. So like escaping like, if you want something like `code | <32 bytes of data> | code2`, that is not really going to work if some byte in the data is like `0x7f`, because then that breaks `code2` bc of push immediate rules yes, and nobody really does this, they just put the data at the end of the contract where it can't brick any code Right, but you could have an encoding whereby you check for this and then pad if you needed to at the end > and nobody really does this Ok, and this is what I was wondering. It does feel like there's no good reason to do it, but I just wasn't sure yea, here is where in vyper, the assembler moves all data things to the end of the bytecode: https://github.com/vyperlang/vyper/blob/5482bbcbed22b856bec6e57c06aeb7e0bee9a1ab/vyper/ir/compile_ir.py#L1075-L1078 Ok, great --- that is answering my question. (and idk what other compilers do, guessing something similar) but as danno points out, it's not impossible, like ofc you can have bytecode with data in the middle of it. just that most people/compilers don't do it Right, so the question: how many contracts actually have data in the middle? Like none, or like < 1%, or ? I'm not expecting an answer to that. Its just what I'm wondering. i mean, a similar issue happens whenever we introduce a new opcode like, `PUSH0` was previously an invalid opcode, and now it is a valid opcode Not so much though if it doesn't have immediate operands 🙂 we just kind of assume, everybody is using `0xFE` for invalid. but they might not, they might have been using `0x5F` But, yeah, presumably someone could have been using an `0x5e` byte to cause an exception (i.e. instead of `INVALID` instruction) And, you can actually scan for it (in theory at least) so every time we add an opcode, or even change gas semantics, we technically risk breaking contracts But breaking jumpdests is a new category of breakage. Yeah, fair enough I understand actually do the code validation rules of EOF prevent you from deploying contracts with invalid (unallocated) instructions? that might be pretty useful Yes, I believe so. No deadcode is allowed. I don't know how it is being checked though. Needs a DFS through the control-flow graph yea, it's first bullet point under https://notes.ethereum.org/@ipsilon/mega-eof-specification#Code-Validation -- no unassigned instructions used How to check that though? Definitely much easier with proper subroutines and static branching. Code validation includes no dead code, no invalid code, no pointers to bogus things (jumps must land, callfs must land, create3s must reference a subcontainer). also all opcodes with immediates must have those opcodes. So we are safer adding new unallocated opcodes. Yeah, that makes sense. So how do you plan to check for dead code? Do you want a linear scan algorithm? Or happy with something a bit more heavyweight? We use a work list right now. If the code has been validated we don't add it to the list. nets to linear time. We are considering a \"no backwards-only code sections\". i.e. there must be one forwards jump into the code. That way if we get to a terminal instruction we expect the next opcode to have stack height info or it's dead code. Linear time is needed for JIT compilations. Sounds like something similar to a depth-first search. To be honest, I don't think you can do it in a single linear scan. I was skeptical too, but it does it linear. Yes, but we did announce in 2016 that the guaranteed way is the `INVALID` instruction, see the EIP. Hmmmm, if every block has at least one forward jump into it .... ok, yeah, maybe that would work. Yeah I don't know what algorithm the JVM does. Maybe it uses a linear scan algorithm and then, if that fails, drops back to something more expensive. Not really very important, tbh. Am just interested They have a two step process. The runtime part is linear, not sure if the compile time step is linear or worse. But, hmmmm ... does the JVM even check for unreachable instructions? Now I think about it, I'm not so sure. Yes, at compile time, `javac` does an unreachability check. But, runtime is more like what a client would be doing. Certainly, the JVM wouldn't allow arbitrary data bytes, or instructions with malformed/missing immediate operands. That's easy to check for in a linear scan. That should really be enough no?",
+  "excerpts": [
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i have a conflict during the EOF call today, if some else could take the lead i would appreciate 🙏",
+      "createdAt": "2023-10-18T13:49:48.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "no, you would end up with completely new behavior for existing contracts (unless you had a rule which was like, contracts deployed after X timestamp use a different EVM than contracts deployed before)",
+      "createdAt": "2023-10-18T15:06:13.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "dirty upper bits are disallowed by the spec. a compliant ABI decoder needs to validate (raise an exception of some kind if the upper bits are dirty)",
+      "createdAt": "2023-10-18T15:07:33.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm also on the L2 call.  Will call in when it is over",
+      "createdAt": "2023-10-18T15:08:39.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@403707149043105803> are you running the EOF call today then? could you ping here when you are ready",
+      "createdAt": "2023-10-18T15:09:19.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Wasn't planning on it.  But I will ping here when I'm on the zoom.",
+      "createdAt": "2023-10-18T15:09:53.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "nobody is really in the call rn. will check back in 20",
+      "createdAt": "2023-10-18T15:10:49.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm on now",
+      "createdAt": "2023-10-18T15:11:30.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Maybe we can make it a short update call.",
+      "createdAt": "2023-10-18T15:11:57.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we also did just have a meeting last week...",
+      "createdAt": "2023-10-18T15:12:32.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not keen having it,  but people are online so maybe lets just crunch it out.",
+      "createdAt": "2023-10-18T15:13:05.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In order to keep the cadence alternating to ACD.",
+      "createdAt": "2023-10-18T15:13:22.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The issue is that the L2 call will run into it about half the time.  It's 3rd wednesdays.  It will collide in istanbul, then february, march and april, then Aug, Sep, and October",
+      "createdAt": "2023-10-18T15:15:10.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That's our hint at what timeline we need to ship EOF to not have conflicting calls 😅",
+      "createdAt": "2023-10-18T15:16:32.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> no, you would end up with completely new behavior for existing contracts\nWell, this is what I'm trying to understand.  I'm just looking for some easy and clear evidence many existing contracts would actually be broken.  I'm assuming this evidence exists, I'm just not sure exactly what it is.  Hence, asking here.  For example, if `solc` puts databytes at arbitrary positions within contracts (e.g. for constants or something) then that's pretty clear.  Likewise, if it constructs jump destinations out-of-thin-air then would also be pretty clear (function pointers are close to this).  Otherwise, if it turned out (by some crazy coincidence) that in all on-chain contracts only had data bytes at the end of the contract ... well that would be a different, and less clear situation.",
+      "createdAt": "2023-10-18T20:39:59.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Here's another twist: if we say \"Immediates activate in cancun\" some troll will post a contract that is broken by the immediate just to cause problems.  That happened with the EIP-3541, someone deployed some contracts that were EF-emoji for the lulz.",
+      "createdAt": "2023-10-18T20:41:54.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We also cannot just turn on code validation because that breaks data segments in solodity (specifically metatata) without enshrining their pattern.",
+      "createdAt": "2023-10-18T20:42:26.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> some troll will post a contract that is broken by the immediate just to cause problems\nHmmm, that is indeed an interesting twist!!!",
+      "createdAt": "2023-10-18T20:42:27.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But, still if we already have on chain evidence ... then no need to worry about that!!",
+      "createdAt": "2023-10-18T20:43:00.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Anyway, maybe I can look into this and scan a bunch of existing contracts.  I just thought the answer would be easy.",
+      "createdAt": "2023-10-18T20:43:21.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There was on-chain evidence for the shanghai attacks. Still a giant PITA",
+      "createdAt": "2023-10-18T20:43:25.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ok, can I find that somewhere?",
+      "createdAt": "2023-10-18T20:43:50.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Just the contracts and transacitons themselves.  For the time a precompile bug split the network the ether cam from tornadocash.  A real troll doesn't care about gensler",
+      "createdAt": "2023-10-18T20:57:32.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's uncommon to put databytes in the middle of a contract. the reason is that data could have a `PUSH` instruction which 'eats into' succeeding code",
+      "createdAt": "2023-10-18T21:42:44.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "True, you'd need to pad or something when that happened. So like escaping",
+      "createdAt": "2023-10-18T21:43:24.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "like, if you want something like `code | <32 bytes of data> | code2`, that is not really going to work if some byte in the data is like `0x7f`, because then that breaks `code2` bc of push immediate rules",
+      "createdAt": "2023-10-18T21:44:14.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, and nobody really does this, they just put the data at the end of the contract where it can't brick any code",
+      "createdAt": "2023-10-18T21:44:34.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, but you could have an encoding whereby you check for this and then pad if you needed to at the end",
+      "createdAt": "2023-10-18T21:44:47.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> and nobody really does this\nOk, and this is what I was wondering.  It does feel like there's no good reason to do it, but I just wasn't sure",
+      "createdAt": "2023-10-18T21:45:22.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yea, here is where in vyper, the assembler moves all data things to the end of the bytecode: https://github.com/vyperlang/vyper/blob/5482bbcbed22b856bec6e57c06aeb7e0bee9a1ab/vyper/ir/compile_ir.py#L1075-L1078",
+      "createdAt": "2023-10-18T21:45:39.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ok, great --- that is answering my question.",
+      "createdAt": "2023-10-18T21:46:05.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(and idk what other compilers do, guessing something similar)",
+      "createdAt": "2023-10-18T21:46:20.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but as danno points out, it's not impossible, like ofc you can have bytecode with data in the middle of it. just that most people/compilers don't do it",
+      "createdAt": "2023-10-18T21:46:40.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, so the question: how many contracts actually have data in the middle?  Like none, or like < 1%, or ?",
+      "createdAt": "2023-10-18T21:47:18.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not expecting an answer to that.  Its just what I'm wondering.",
+      "createdAt": "2023-10-18T21:47:40.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i mean, a similar issue happens whenever we introduce a new opcode",
+      "createdAt": "2023-10-18T21:50:17.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "like, `PUSH0` was previously an invalid opcode, and now it is a valid opcode",
+      "createdAt": "2023-10-18T21:50:33.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not so much though if it doesn't have immediate operands 🙂",
+      "createdAt": "2023-10-18T21:50:44.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we just kind of assume, everybody is using `0xFE` for invalid. but they might not, they might have been using `0x5F`",
+      "createdAt": "2023-10-18T21:51:13.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But, yeah, presumably someone could have been using an `0x5e` byte to cause an exception (i.e. instead of `INVALID` instruction)",
+      "createdAt": "2023-10-18T21:51:43.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And, you can actually scan for it (in theory at least)",
+      "createdAt": "2023-10-18T21:52:29.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so every time we add an opcode, or even change gas semantics, we technically risk breaking contracts",
+      "createdAt": "2023-10-18T21:52:37.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But breaking jumpdests is a new category of breakage.",
+      "createdAt": "2023-10-18T21:53:04.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, fair enough I understand",
+      "createdAt": "2023-10-18T21:53:05.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "actually do the code validation rules of EOF prevent you from deploying contracts with invalid (unallocated) instructions? that might be pretty useful",
+      "createdAt": "2023-10-18T21:53:10.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, I believe so.  No deadcode is allowed.  I don't know how it is being checked though.",
+      "createdAt": "2023-10-18T21:53:38.255000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Needs a DFS through the control-flow graph",
+      "createdAt": "2023-10-18T21:53:56.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "big_tech_sux",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yea, it's first bullet point under https://notes.ethereum.org/@ipsilon/mega-eof-specification#Code-Validation -- no unassigned instructions used",
+      "createdAt": "2023-10-18T21:54:20.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "How to check that though?  Definitely much easier with proper subroutines and static branching.",
+      "createdAt": "2023-10-18T21:54:55.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Code validation includes no dead code, no invalid code, no pointers to bogus things (jumps must land, callfs must land, create3s must reference a subcontainer).",
+      "createdAt": "2023-10-18T21:55:29.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "also all opcodes with immediates must have those opcodes.  So we are safer adding new unallocated opcodes.",
+      "createdAt": "2023-10-18T21:57:06.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, that makes sense.  So how do you plan to check for dead code?  Do you want a linear scan algorithm?  Or happy with something a bit more heavyweight?",
+      "createdAt": "2023-10-18T21:58:35.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We use a work list right now.  If the code has been validated we don't add it to the list.  nets to linear time.  We are considering a \"no backwards-only code sections\".  i.e. there must be one forwards jump into the code.  That way if we get to a terminal instruction we expect the next opcode to have stack height info or it's dead code.",
+      "createdAt": "2023-10-18T22:00:03.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Linear time is needed for JIT compilations.",
+      "createdAt": "2023-10-18T22:01:12.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sounds like something similar to a depth-first search.  To be honest, I don't think you can do it in a single linear scan.",
+      "createdAt": "2023-10-18T22:01:24.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I was skeptical too, but it does it linear.",
+      "createdAt": "2023-10-18T22:01:40.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, but we did announce in 2016 that the guaranteed way is the `INVALID` instruction, see the EIP.",
+      "createdAt": "2023-10-18T22:01:46.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hmmmm, if every block has at least one forward jump into it .... ok, yeah, maybe that would work.  Yeah I don't know what algorithm the JVM does.  Maybe it uses a linear scan algorithm and then, if that fails, drops back to something more expensive.",
+      "createdAt": "2023-10-18T22:02:59.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not really very important, tbh.  Am just interested",
+      "createdAt": "2023-10-18T22:03:55.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "They have a two step process.  The runtime part is linear, not sure if the compile time step is linear or worse.",
+      "createdAt": "2023-10-18T22:04:39.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But, hmmmm ... does the JVM even check for unreachable instructions?  Now I think about it, I'm not so sure.  Yes, at compile time, `javac` does an unreachability check.  But, runtime is more like what a client would be doing.",
+      "createdAt": "2023-10-18T22:05:37.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "whileydave",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Certainly, the JVM wouldn't allow arbitrary data bytes, or instructions with malformed/missing immediate operands.  That's easy to check for in a linear scan.  That should really be enough no?",
+      "createdAt": "2023-10-18T22:09:02.414000+00:00",
+      "attachments": []
+    }
+  ]
+}

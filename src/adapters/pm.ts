@@ -31,7 +31,8 @@ export const ingestPmArtifacts = async (repoRoot: string, pmRoot: string, limit 
   const manifest = await readJson<PmArtifactManifest>(manifestPath);
   const records: RecordManifest[] = [];
   for (const [seriesSlug, series] of Object.entries(manifest.series)) {
-    for (const call of series.calls.slice(0, limit)) {
+    const calls = limit > 0 ? series.calls.slice(0, limit) : series.calls;
+    for (const call of calls) {
       if (call.number === undefined) continue;
       const canonicalDate = call.date.replaceAll("-", ".");
       let record = newRecord({

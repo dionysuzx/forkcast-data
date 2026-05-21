@@ -1,0 +1,596 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2024-09-27",
+  "messageCount": 68,
+  "sourceHash": "ae380abb189b5cba703a069894c16c9d41b94be53ce9cf6ed808ba2bb68d601f",
+  "searchText": "oh we do tolerate up to `16384` columns per request in our validation, but our rate limiter doesn't 😂 currently we allow for `5120` columns per 10 seconds, which is around ~40 blocks per 10s for supernodes we'll need to fix this, but I feel like the limit is a bit high in the spec. 128 blocks worth of all data columns is a lot of data from a single peer. It's 196mb for 6 blobs or 524mb for 16 blobs thats basically the almost the entire bandwidth for a node Which node is this? There should be a corresponding range request log before this: ``` Sending DataColumnsByRange requests ``` just want to make sure we're not requesting the wrong columns as well Is this devnet-2 or your local testnet? Do you know if lighthouse banned the other clients when invalid columns were propagated ? Trying to see why LH appears to remain peered with the other clients . At least thats what it appears from dora Yeah i think that happened - just checked the dashboard and there was a drop in peers across all lighthouse nodes around that time - but i'll check the logs to be sure ok great, so it confirms what we did see too. hmm i don't see it in the logs though, digging further and checking our inclusion proof validation looks like we missed that one! good catch ah, that explains why prysm was basically on its own network then So lighthouse missed this validation and propgated the sidecars, but did Teku, Lodestar and Nimbus all identified the bad column sidecars, and still propagated on? and then Prysm disconnected all of us? I think teku,lodestar and nimbus did not validate this too and propagated them on. They assumed it was valid. From prysm's point of view, 80% of the network was gossiping invalid data which is why there was a mass disconnection of peers for prysm ^ This was the bad columns you were talking about right? the logs show that that caught them no? lh-geth-3 Oh thanks! this is the broken node. I've been looking into this one. Looks like there's a stuck lookup, and the node is never able to catch up. We'll work on a fix for this, thanks! excuse me <@531934490826768418>, does prysm full node subscribe to data column sidecar subnets? I just don't see the subscribed logs as the prysm supernode it receive data columns through req/resp rather than gossip like supernode I see these logs for Prysm full node. ``` [2024-09-27 07:45:46.01] INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_5/ssz_snappy [2024-09-27 07:45:46.01] INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_71/ssz_snappy [2024-09-27 07:45:46.01] INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_41/ssz_snappy [2024-09-27 07:45:46.01] INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_101/ssz_snappy ... + 4 other lines ``` Are you saying you don't? Yeah, even one. What are the additional flags for fullnode? Woow, that's strange. No additional flag required. Do you have a TG (so not to spam this channel) ? Just create some threads 😄 its useful to keep the discussions on this channel, even if its not relevant for other clients (yet) Many of you might not know, but kurtosis allows you to sync up to a devnet (hosted by the pandaops team) easily using a simple config like: ```yaml participants: - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:peerDAS-df42f37 - cl_type: lighthouse cl_image: ethpandaops/lighthouse:unstable-2792705 - cl_type: teku cl_image: ethpandaops/teku:nashatyrev-das-458f7e7 - cl_type: nimbus cl_image: ethpandaops/nimbus-eth2:pdsync-30f8ef9 - cl_type: lodestar cl_image: ethpandaops/lodestar:peerDAS-a3de70f - cl_type: grandine cl_image: ethpandaops/grandine:hangleang-feature-das-2c2f74b network_params: network: peerdas-devnet-2 snooper_enabled: true additional_services: - dora ``` This can help you check if syncing works for your client - you won't be able to check validator performance or attestations tho. You can also specify optionally a checkpoint sync url which can help you checkpoint sync to an endpoint. Sorry about the spam’s! I only thought about creating thread after it’s too late 😅 will do next time OK, after talking with <@498331483732312075> (thanks a lot!), there is the totally more that strange conclusion: As soon as Grandine is in the mix, Prysm full nodes, sometimes, but not always, do not subscribe to data columns subnets. (No issue with Prysm super nodes, no issue if Grandine is not in the mix.) 🤯 after about an hour, teku and nimbus managed to sync up to head. lh and lodestar couldn't even get past slot 31 grandine seems to have stalled, prysm is still actively syncing. devnet 2 node i am trying to resync i thought my sync was buggy nvm > prysm is still actively syncing. I know there is a bug in Prysm, where, sometimes, it cannot sync to the head because it cannot find good peers to serve data columns. I'm working on it. yes similar bug in Nimbus i'm trying to optimistically select supernodes, to reduce the hassle, but this is a 50-50 network, in reality, the algorithm might not work out that well. Kind of same issue in Prysm actually. i think we should have a tiny supernode classifying pool and then we run a count on the connected supernodes that we have and ask accordingly similar issue from teku as well: getting datacolumns for block 37 which has no blobs inventory url not working <@412614104222531604> , need to check node's custody for peer id seems on the other block teku didn't gave columns requested, which looks like this is a supernode nimbus issue: this also advertised as a supernode, didn't send requested columns chekcing <@792822129019584562> should be working After analysing issues between Prysm and Grandine, we found 3 issues, which, taken independently, have nothing in common, but, taken together, lead to Prysm avoiding registering to data columns subnets when Grandine is in the mix. The **first** issue is in Prysm (we have a PR for that). The **second** issue is possibly in the discv5 library we use: When a Prysm node updates its ENR, other (at least Prysm) nodes never see this updated ENR via discv5. (Via libp2p, its OK.) The **third** issue is somewhere between the discv5 library used by Prysm and Grandine: - **Without** Grandine in the mix, the iterator of the discv5 library used by Prysm is usually able to it iterate over **~2.000 nodes / second.** - **With** Grandine in the mix (no issue with Teku and LH), then the iterator of the discv5 library used by Prysm is able to it iterate over **only 3-4 nodes / second.** , which is a huge difference. <@498331483732312075> Currently, I have no idea why. I'm curious to know if other clients have the same issue with Grandine, or if Prysm is the only one? `iterator` is our discV5 iterator. `iterator.Next` is called to find the next node. **Without** Grandine - always about ~0.2, 0.3 ms / iteration): ``` [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000242s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000366s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000326s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000297s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000236s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000270s [2024-09-27 14:35:08.31] DEBUG p2p: Iterating through nodes duration=0.000287s ``` **With** Grandine - either 0 ms/iteration (which is already suspisious), or ... 700 ms/iteration (which is huge): ``` [2024-09-27 14:31:31.22] DEBUG p2p: Iterating through nodes duration=0.701454s [2024-09-27 14:31:31.22] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:31.22] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:31.92] DEBUG p2p: Iterating through nodes duration=0.701819s [2024-09-27 14:31:31.92] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:31.92] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:32.62] DEBUG p2p: Iterating through nodes duration=0.702008s [2024-09-27 14:31:32.62] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:32.62] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:33.32] DEBUG p2p: Iterating through nodes duration=0.700664s [2024-09-27 14:31:33.32] DEBUG p2p: Iterating through nodes duration=0.000000s [2024-09-27 14:31:33.32] DEBUG p2p: Iterating through nodes duration=0.000000s ``` This is the `Iterator::Next` function, correct? https://github.com/prysmaticlabs/prysm/blob/003b70c34b04025e19afe7dffdd2b71350ad484c/beacon-chain/p2p/iterator.go#L26-L36 Prysm <-> Teku issue Some nimbus nodes started to produce orphaned blocks and we dropped another 20% participation Yep 1 and 4 Trying to push a fix by tonight With the range issue fixed Nimbus geth 1 and 3 are back on canonical 4 is most likely syncing All seem recovered But I think that orphan must be due to a disconnection because of the range issue I’m just waiting for a nimbus geth 4 proposal to go right 😀 Lh geth 1 forked Do I understand it correctly that `dataColumnSidecar.getSszKZGCommitments()` is empty? We have all logic and I'm a bit confused where the leak could happen, going to write a test Teku DataColumnSidecar validation issue FYI We’re looking into a stuck sync lookup issue in LH - as we’ve noticed some stuck lookups across LH nodes",
+  "excerpts": [
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh we do tolerate up to `16384` columns per request in our validation, but our rate limiter doesn't 😂 currently we allow for `5120` columns per 10 seconds, which is around ~40 blocks per 10s for supernodes",
+      "createdAt": "2024-09-27T00:07:15.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "we'll need to fix this, but I feel like the limit is a bit high in the spec. 128 blocks worth of all data columns is a lot of  data from a single peer. It's 196mb for 6 blobs or 524mb for 16 blobs",
+      "createdAt": "2024-09-27T00:10:00.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "thats basically the almost the entire bandwidth for a node",
+      "createdAt": "2024-09-27T00:11:16.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Which node is this? There should be a corresponding range request log before this:\n```\nSending DataColumnsByRange requests\n```\njust want to make sure we're not requesting the wrong columns as well",
+      "createdAt": "2024-09-27T01:08:29.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is this devnet-2 or your local testnet?",
+      "createdAt": "2024-09-27T01:11:34.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Do you know if lighthouse banned the other clients when invalid columns were propagated ? Trying to see why LH appears to remain peered with the other clients . At least thats what it appears from dora",
+      "createdAt": "2024-09-27T02:07:19.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah i think that happened - just checked the dashboard and there was a drop in peers across all lighthouse nodes around that time - but i'll check the logs to be sure",
+      "createdAt": "2024-09-27T04:05:50.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok great, so it confirms what we did see too.",
+      "createdAt": "2024-09-27T04:13:35.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm i don't see it in the logs though, digging further and checking our inclusion proof validation",
+      "createdAt": "2024-09-27T04:53:01.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like we missed that one! good catch",
+      "createdAt": "2024-09-27T04:58:37.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah, that explains why prysm was basically on its own network then",
+      "createdAt": "2024-09-27T04:59:35.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "So lighthouse missed this validation and propgated the sidecars, but did Teku, Lodestar and Nimbus all identified the bad column sidecars, and still propagated on? and then Prysm disconnected all of us?",
+      "createdAt": "2024-09-27T05:04:01.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think teku,lodestar and nimbus did not validate this too and propagated them on. They assumed it was valid. From prysm's point of view, 80% of the network was gossiping invalid data which is why there was a mass disconnection of peers for prysm",
+      "createdAt": "2024-09-27T05:05:26.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "^ This was the bad columns you were talking about right? the logs show that that caught them no?",
+      "createdAt": "2024-09-27T05:08:33.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "lh-geth-3",
+      "createdAt": "2024-09-27T05:41:39.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh thanks! this is the broken node. I've been looking into this one. Looks like there's a stuck lookup, and the node is never able to catch up.",
+      "createdAt": "2024-09-27T05:42:33.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "We'll work on a fix for this, thanks!",
+      "createdAt": "2024-09-27T05:43:25.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "excuse me <@531934490826768418>, does prysm full node subscribe to data column sidecar subnets? I just don't see the subscribed logs as the prysm supernode",
+      "createdAt": "2024-09-27T06:06:22.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "it receive data columns through req/resp rather than gossip like supernode",
+      "createdAt": "2024-09-27T06:08:42.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see these logs for Prysm full node.\n```\n[2024-09-27 07:45:46.01]  INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_5/ssz_snappy\n[2024-09-27 07:45:46.01]  INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_71/ssz_snappy\n[2024-09-27 07:45:46.01]  INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_41/ssz_snappy\n[2024-09-27 07:45:46.01]  INFO sync: Subscribed to topic=/eth2/aabc67ec/data_column_sidecar_101/ssz_snappy\n...\n+ 4 other lines\n```\n\nAre you saying you don't?",
+      "createdAt": "2024-09-27T07:47:08.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah, even one. What are the additional flags for fullnode?",
+      "createdAt": "2024-09-27T07:48:51.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Woow, that's strange. No additional flag required.\nDo you have a TG (so not to spam this channel)",
+      "createdAt": "2024-09-27T07:51:00.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "?",
+      "createdAt": "2024-09-27T07:51:00.975000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Just create some threads 😄",
+      "createdAt": "2024-09-27T07:54:00.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its useful to keep the discussions on this channel, even if its not relevant for other clients (yet)",
+      "createdAt": "2024-09-27T07:54:20.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Many of you might not know, but kurtosis allows you to sync up to a devnet (hosted by the pandaops team) easily using a simple config like:\n```yaml\nparticipants:\n  - cl_type: prysm\n    cl_image: ethpandaops/prysm-beacon-chain:peerDAS-df42f37\n  - cl_type: lighthouse\n    cl_image: ethpandaops/lighthouse:unstable-2792705\n  - cl_type: teku\n    cl_image: ethpandaops/teku:nashatyrev-das-458f7e7\n  - cl_type: nimbus\n    cl_image: ethpandaops/nimbus-eth2:pdsync-30f8ef9\n  - cl_type: lodestar\n    cl_image: ethpandaops/lodestar:peerDAS-a3de70f\n  - cl_type: grandine\n    cl_image: ethpandaops/grandine:hangleang-feature-das-2c2f74b\nnetwork_params:\n  network: peerdas-devnet-2\nsnooper_enabled: true\nadditional_services:\n  - dora\n```\n\nThis can help you check if syncing works for your client - you won't be able to check validator performance or attestations tho. You can also specify optionally a checkpoint sync url which can help you checkpoint sync to an endpoint.",
+      "createdAt": "2024-09-27T08:06:43.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sorry about the spam’s! I only thought about creating thread after it’s too late 😅 will do next time",
+      "createdAt": "2024-09-27T08:10:48.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "OK, after talking with <@498331483732312075> (thanks a lot!), there is the totally more that strange conclusion:\n\nAs soon as Grandine is in the mix, Prysm full nodes, sometimes, but not always, do not subscribe to data columns subnets.\n(No issue with Prysm super nodes, no issue if Grandine is not in the mix.)\n🤯",
+      "createdAt": "2024-09-27T08:20:26.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "after about an hour, teku and nimbus managed to sync up to head.",
+      "createdAt": "2024-09-27T08:40:36.965000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2024-09-27_at_10.40.19.png",
+          "content": "77bdfaaaf801946e753c1f61e41a117c634589d30cd9e70d615f297cf052ad4c"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "lh and lodestar couldn't even get past slot 31",
+      "createdAt": "2024-09-27T08:40:55.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "grandine seems to have stalled, prysm is still actively syncing.",
+      "createdAt": "2024-09-27T08:41:30.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "devnet 2 node i am trying to resync",
+      "createdAt": "2024-09-27T08:50:47.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i thought my sync was buggy",
+      "createdAt": "2024-09-27T08:51:06.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "nvm",
+      "createdAt": "2024-09-27T08:51:10.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "> prysm is still actively syncing.\nI know there is a bug in Prysm, where, sometimes, it cannot sync to the head because it cannot find good peers to serve data columns.\nI'm working on it.",
+      "createdAt": "2024-09-27T08:57:44.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes similar bug",
+      "createdAt": "2024-09-27T08:58:02.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "in Nimbus",
+      "createdAt": "2024-09-27T08:58:08.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i'm trying to optimistically select supernodes, to reduce the hassle, but this is a 50-50 network, in reality, the algorithm might not work out that well.",
+      "createdAt": "2024-09-27T08:58:54.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Kind of same issue in Prysm actually.",
+      "createdAt": "2024-09-27T08:59:24.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think we should have a tiny supernode classifying pool",
+      "createdAt": "2024-09-27T08:59:57.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "and then we run a count on the connected supernodes that we have",
+      "createdAt": "2024-09-27T09:00:39.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "and ask accordingly",
+      "createdAt": "2024-09-27T09:00:52.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "similar issue from teku as well:",
+      "createdAt": "2024-09-27T11:21:27.649000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "282749832ce421a2b2ce02a78c99b1582da2d56c9a554d41e300d6a208f34d5a"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "getting datacolumns for  block 37 which has no blobs",
+      "createdAt": "2024-09-27T11:22:02.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "inventory url not working <@412614104222531604>  , need to check node's custody for peer id",
+      "createdAt": "2024-09-27T11:27:03.108000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "33e8889967d33df0a411477d47b7d6fbbcb779015f26811db69dcdf389001cd5"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "seems on the other block teku didn't gave columns requested, which looks like this is a supernode",
+      "createdAt": "2024-09-27T11:32:26.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2024-09-27T11:33:17.553000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "909efd8f35c075b1c1badd65a09ec0a366d2f60128bc3a0228752e099ed03951"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "nimbus issue: this also advertised as a supernode, didn't send requested columns",
+      "createdAt": "2024-09-27T11:36:41.113000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "6465635fe919a21f31e7268d34fc1c80a4bdc824ba847297c617e9d334a45633"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "chekcing",
+      "createdAt": "2024-09-27T11:37:46.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562> should be working",
+      "createdAt": "2024-09-27T12:57:23.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "After analysing issues between Prysm and Grandine, we found 3 issues, which, taken independently, have nothing in common, but, taken together, lead to Prysm avoiding registering to data columns subnets when Grandine is in the mix.\n\nThe **first** issue is in Prysm (we have a PR for that).\n\nThe **second** issue is possibly in the discv5 library we use: When a Prysm node updates its ENR, other (at least Prysm) nodes never see this updated ENR via discv5. (Via libp2p, its OK.)\n\nThe **third** issue is somewhere between the discv5 library used by Prysm and Grandine:\n- **Without** Grandine in the mix, the iterator of the discv5 library used by Prysm is usually able to it iterate over **~2.000 nodes / second.**\n - **With** Grandine in the mix (no issue with Teku and LH), then the iterator of the discv5 library used by Prysm is able to it iterate over **only 3-4 nodes / second.** , which is a huge difference.\n\n<@498331483732312075> \n\nCurrently, I have no idea why. I'm curious to know if other clients have the same issue with Grandine, or if Prysm is the only one?",
+      "createdAt": "2024-09-27T14:22:52.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "`iterator` is our discV5 iterator. `iterator.Next` is called to find the next node.\n\n**Without** Grandine - always about ~0.2, 0.3 ms / iteration):\n```\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000242s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000366s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000326s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000297s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000236s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000270s\n[2024-09-27 14:35:08.31]  DEBUG p2p: Iterating through nodes duration=0.000287s\n```\n\n**With** Grandine - either 0 ms/iteration (which is already suspisious), or ... 700 ms/iteration (which is huge):\n```\n[2024-09-27 14:31:31.22]  DEBUG p2p: Iterating through nodes duration=0.701454s\n[2024-09-27 14:31:31.22]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:31.22]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:31.92]  DEBUG p2p: Iterating through nodes duration=0.701819s\n[2024-09-27 14:31:31.92]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:31.92]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:32.62]  DEBUG p2p: Iterating through nodes duration=0.702008s\n[2024-09-27 14:31:32.62]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:32.62]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:33.32]  DEBUG p2p: Iterating through nodes duration=0.700664s\n[2024-09-27 14:31:33.32]  DEBUG p2p: Iterating through nodes duration=0.000000s\n[2024-09-27 14:31:33.32]  DEBUG p2p: Iterating through nodes duration=0.000000s\n```",
+      "createdAt": "2024-09-27T14:37:39.949000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "b5beb9bd7a2e89151c8c29a2864ac86873917d9cd88bf37e6881f9b34696b13f"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is the `Iterator::Next` function, correct?\nhttps://github.com/prysmaticlabs/prysm/blob/003b70c34b04025e19afe7dffdd2b71350ad484c/beacon-chain/p2p/iterator.go#L26-L36",
+      "createdAt": "2024-09-27T14:44:34.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Prysm <-> Teku issue",
+      "createdAt": "2024-09-27T15:06:16.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Some nimbus nodes started to produce orphaned blocks",
+      "createdAt": "2024-09-27T15:21:00.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and we dropped another 20% participation",
+      "createdAt": "2024-09-27T15:21:16.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep 1 and 4",
+      "createdAt": "2024-09-27T16:07:52.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Trying to push a fix by tonight",
+      "createdAt": "2024-09-27T16:08:15.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "With the range issue fixed",
+      "createdAt": "2024-09-27T16:08:24.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Nimbus geth 1 and 3 are back on canonical",
+      "createdAt": "2024-09-27T16:10:39.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "4 is most likely syncing",
+      "createdAt": "2024-09-27T16:11:04.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "All seem recovered",
+      "createdAt": "2024-09-27T16:15:11.096000+00:00",
+      "attachments": [
+        {
+          "type": "image/jpeg",
+          "origin_name": "IMG_1596.png",
+          "content": "d27d37c60f340ded52631350764f6892e772ed40a52e4bcda3531ae3828e19ca"
+        }
+      ]
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "But I think that orphan must be due to a disconnection because of the range issue",
+      "createdAt": "2024-09-27T16:15:32.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "I’m just waiting for a nimbus geth 4 proposal to go right 😀",
+      "createdAt": "2024-09-27T16:21:17.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Lh geth 1 forked",
+      "createdAt": "2024-09-27T16:29:58.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Do I understand it correctly that `dataColumnSidecar.getSszKZGCommitments()` is empty? We have all logic and I'm a bit confused where the leak could happen, going to write a test",
+      "createdAt": "2024-09-27T20:58:02.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Teku DataColumnSidecar validation issue",
+      "createdAt": "2024-09-27T21:26:03.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "FYI We’re looking into a stuck sync lookup issue in LH - as we’ve noticed some stuck lookups across LH nodes",
+      "createdAt": "2024-09-27T21:58:21.196000+00:00",
+      "attachments": []
+    }
+  ]
+}

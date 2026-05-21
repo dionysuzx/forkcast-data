@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "channel": "consensus-dev",
+  "date": "2025-05-19",
+  "messageCount": 11,
+  "sourceHash": "4bc75e4c804f0d67e190027e51dbbcf28ac8d8e00885a3449ddbc59d91310763",
+  "searchText": "continuing the conversation on implementing *BPO forks* on the CL side. Options AFAIU: 1. Treat as a hardfork on the p2p protocol, signalling as a new `ForkDigest` value on the Status req/resp. Could mix in the base `ForkDigest` with a hash of the canonical representation of the currently active BPO config. Key downside cited was code difficulties on various CL clients; but the idea of avoiding using the regular fork boilerplate machinery, and instead creating a secondary (wrapping or intercepting) codepath seemed to (silently) resonate? 2. Extend the Status req/resp with a new field to represent the BPO configuration. I am less agreeable to this option because it's likely to ossify poorly. At one point in the future BPO forks will stop being relevant, and we'll be left with this field which will only ever carry a fixed value. cc <@498009160982724610> <@449019668296892420> for input. I think both options are relatively simple to implement in Prysm and both are simpler than a full fork. Also think 1 may be better I dont think we want to touch the `ForkData` and `compute_fork_data_root` method because that's going to change the signatgure domain completely. I think the cleanest change for (1) is to update `compute_fork_digest` directly and mix bpo's epoch and max blobs count into it I like (1) as well but will defer it to the p2p experts according to beacon chain specs, it's the `compute_fork_**digest**` function that returns the domain separation tag for p2p? if we don't want to affect that, we'd have to concat directly to the digest and rehash? oh no, I think it's fine to change that, such that after fusaka gets activated, it uses something like this: ```python def compute_bpo_fork_digest(current_version: Version, genesis_validators_root: Root, epoch: Epoch, blob_schedule: List[Tuple[int, int]]) -> ForkDigest: max_blobs = 0 for scheduled_epoch, max_blobs_per_block in reversed(blob_schedule): if epoch >= scheduled_epoch: max_blobs = max_blobs_per_block break version_bytes = bytearray(current_version) version_bytes[0] ^= max_blobs mixed_version = bytes(version_bytes) return ForkDigest(compute_fork_data_root(mixed_version, genesis_validators_root)[:4]) ``` We just dont want to change the fork data itself <@363800010518822915> also: what are the downsides of leaning into the separation, btw? i gather this was introduced as a top-level way to version the data structures transiting on topics upon a fork. but is there a downside to segregation upon a BPO fork even if the schemas don't change? (but the max cardinalities do) ok, TIL: * fork data root => determines signature domain * fork digest => determines p2p topic segregation I think the fundamental question is whether we want to change the topic string. Using a different fork digest will change the topic string. Intuitivelly I feel like if the column sidecar has more rows then maybe it should be on a different topic than before, but ill defer this to the p2p experts The option (2) you provided would still use the same topic string, but allow peers to goodbye the ones that's not on the same BPO schedule (if you consider me a p2p expert 😅 ) intuitively I'd like to roll over, but that will reset the meshes -- have we seen p2p stability issues in the past related to this? how do clients handle this? do they start subscribing prior to the fork epoch? we already do this every hard fork so Id say it's battle tested at this point. The only concern I see is the number of data column sidecars subnets to roll over at once. Maybe beacon attestations for nodes that subscribe to all the subnets is close to the same amount. Need to think abou tthis more... Prysm for example will subscribe to the new subnets 1 epoch before the target epoch, the disconnect the old subnets 1 epoch after target epoch",
+  "excerpts": [
+    {
+      "author": "raulvk",
+      "category": "general",
+      "parent": "",
+      "content": "continuing the conversation on implementing *BPO forks* on the CL side. Options AFAIU:\n1. Treat as a hardfork on the p2p protocol, signalling as a new `ForkDigest` value on the Status req/resp. Could mix in the base `ForkDigest` with a hash of the canonical representation of the currently active BPO config. Key downside cited was code difficulties on various CL clients; but the idea of avoiding using the regular fork boilerplate machinery, and instead creating a secondary (wrapping or intercepting) codepath seemed to (silently) resonate?\n2. Extend the Status req/resp with a new field to represent the BPO configuration. I am less agreeable to this option because it's likely to ossify poorly. At one point in the future BPO forks will stop being relevant, and we'll be left with this field which will only ever carry a fixed value.",
+      "createdAt": "2025-05-19T14:43:16.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "cc <@498009160982724610> <@449019668296892420> for input. I think both options are relatively simple to implement in Prysm and both are simpler than a full fork. Also think 1 may be better",
+      "createdAt": "2025-05-19T17:22:10.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "general",
+      "parent": "",
+      "content": "I dont think we want to touch the `ForkData` and `compute_fork_data_root` method because that's going to change the signatgure domain completely. I think the cleanest change for (1) is to update `compute_fork_digest` directly and mix bpo's epoch and max blobs count into it\n\nI like (1) as well but will defer it to the p2p experts",
+      "createdAt": "2025-05-19T18:02:18.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "general",
+      "parent": "",
+      "content": "according to beacon chain specs, it's the `compute_fork_**digest**` function that returns the domain separation tag for p2p? if we don't want to affect that, we'd have to concat directly to the digest and rehash?",
+      "createdAt": "2025-05-19T18:09:38.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "general",
+      "parent": "",
+      "content": "oh no, I think it's fine to change that, such that after fusaka gets activated, it uses something like this:\n```python\ndef compute_bpo_fork_digest(current_version: Version, genesis_validators_root: Root, epoch: Epoch, blob_schedule: List[Tuple[int, int]]) -> ForkDigest:\n\n    max_blobs = 0\n    for scheduled_epoch, max_blobs_per_block in reversed(blob_schedule):\n        if epoch >= scheduled_epoch:\n            max_blobs = max_blobs_per_block\n            break\n\n    version_bytes = bytearray(current_version)\n    version_bytes[0] ^= max_blobs\n    mixed_version = bytes(version_bytes)\n    return ForkDigest(compute_fork_data_root(mixed_version, genesis_validators_root)[:4])\n```\nWe just dont want to change the fork data itself",
+      "createdAt": "2025-05-19T18:13:12.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "general",
+      "parent": "",
+      "content": "<@363800010518822915> also: what are the downsides of leaning into the separation, btw? i gather this was introduced as a top-level way to version the data structures transiting on topics upon a fork. but is there a downside to segregation upon a BPO fork even if the schemas don't change? (but the max cardinalities do)",
+      "createdAt": "2025-05-19T18:15:36.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "general",
+      "parent": "",
+      "content": "ok, TIL:\n* fork data root => determines signature domain\n* fork digest => determines p2p topic segregation",
+      "createdAt": "2025-05-19T18:18:25.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "general",
+      "parent": "",
+      "content": "I think the fundamental question is whether we want to change the topic string. Using a different fork digest will change the topic string. Intuitivelly I feel like if the column sidecar has more rows then maybe it should be on a different topic than before, but ill defer this to the p2p experts",
+      "createdAt": "2025-05-19T18:18:37.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "general",
+      "parent": "",
+      "content": "The option (2) you provided would still use the same topic string, but allow peers to goodbye the ones that's not on the same BPO schedule",
+      "createdAt": "2025-05-19T18:20:10.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "general",
+      "parent": "",
+      "content": "(if you consider me a p2p expert 😅 ) intuitively I'd like to roll over, but that will reset the meshes -- have we seen p2p stability issues in the past related to this? how do clients handle this? do they start subscribing prior to the fork epoch?",
+      "createdAt": "2025-05-19T18:24:24.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "general",
+      "parent": "",
+      "content": "we already do this every hard fork so Id say it's battle tested at this point. The only concern I see is the number of data column sidecars subnets to roll over at once. Maybe beacon attestations for nodes that subscribe to all the subnets is close to the same amount. Need to think abou tthis more... \nPrysm for example will subscribe to the new subnets 1 epoch before the target epoch, the disconnect the old subnets 1 epoch after target epoch",
+      "createdAt": "2025-05-19T18:27:47.327000+00:00",
+      "attachments": []
+    }
+  ]
+}

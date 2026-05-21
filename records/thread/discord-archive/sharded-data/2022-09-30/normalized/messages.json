@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "sharded-data",
+  "date": "2022-09-30",
+  "messageCount": 165,
+  "sourceHash": "479115ef559b66aea915b5d4a0167288cc4b7837b96bda842c096256fc0b3edd",
+  "searchText": "> I imagine that this will force the EL to consider blocks with missing withrawals as blocks with zero withrawals until the CL upgrades Why do you think this would be problematic? This is an API issue, not a consensus issue. API changes don't happen with forks (I don't believe EL clients have the ability to have the API change based on the current block height/timestamp). That's not really relevant - we still need it to happen ahead of the EL upgrade or stuff breaks. So we have to make sure all users upgrade their CL, then upgrade their EL, then upgrade their CL again. And we failed to decouple the upgrades because the EL upgrade required changes on the CL side. I think this gets to a real problem that we need to address which is API versioning. So we wind up with more complexity and more interaction models to test which increases risk when we were trying to reduce it. We have been hand waving over this problem for a while, but it really does need a solution. Unless we want to require users to update both of their clients simultaneously, we will need the EL to be able to function with a CL that doesn't support receiving empty withdraw lists (assuming that is how the spec works out). API versioning doesn't really help though - you have to get the CL upgraded to the new version or do the testing to ensure the required changes are actually backwards compatible for all real implementations. The bottom line is that the EL will change behaviour in a way that affects the CL. The changes are not actually decoupled. So the simplest option is just to do them at the same time. Pretending they're decoupled when they're not introduces a lot of complexity and risk. I don't think it is pragmatic to require *users* update two clients in lockstep. If we omit empty withdrawal lists then that's a weird quirk we have to live with in the API forever. Why not? It's much simpler for them to do both updates at the same time and monitor a single hard fork than it is to do them at different times. This gets to Peter's point argument in ACD (I think) a while ago where we really need to have a process for API versioning and deprecation specifically so we *don't* have to continue supporting this stuff indefinitely. This is a broad problem that extends well beyond the topic of hard forks that needs to be solved, and once we have solved it we can use that solution for decoupled forks. But then we just have a separate upgrade cycle somewhere which is the original problem. We don't *have* a versioning issue if we upgrade both at once because we know they will both activate the new field at the same time. Not saying that having a clear approach to migrating APIs is a bad thing, but it doesn't solve this issue. This solution adds complexity to release processes for clients because now they need to maintain a security fixes for old versions because you **cannot** upgrade to new version X until all EL/CL clients are ready for a massive simultaneous release since there is an API change included. As a client dev I can say that's not true. We didn't do it for Altair or Bellatrix, both of which involved significant API changes. API changes that are backward incompatible? Meaning, you could not update either side of the API without updating the other; they had to update in lockstep? Yes. Blocks changed in both upgrades and the API between the validator and the beacon node had to adapt to that. Because the change happened in lock step, it just worked. There's already a hard dependency because you can't work with an Altair block after the Bellatrix upgrade so it's quite natural for the API to also handle that change. It will work until it doesn't. e.g., if you have a security vulnerability you need to fix and you already implemented the backward incompatible API change, now you need to apply the security fix to both head and an old version without the API change. Again, I'm a client dev. I have been living this and dealing with these issues. You're wrong. Or you keep the API change in a feature branch and spend resources constantly maintaining it until it is released, but even that has some raciness if the security vulnerability shows up during the 1-2 month long release process. Sorry to be blunt but you're making up issues that just don't come up. These are issues that aren't specific to Ethereum. There is a good reason that companies try to avoid lockstep API changes in production systems. And while I don't write an Ethereum client, I *have* had to maintain production code with an exposed or consumed API where turning off the system to do lockstep upgrades wasn't a viable option, and the option of trying to update both simultaneously is always brought up as the \"easy\" solution and it never ends up actually being easy. The book \"Continuous Delivery\" by Jez Humble and Dave Farley would be excellent reading on how to make this work without feature branching and backporting etc. Is there a TL;DR version (e.g., blog post) that doesn't require me to buy and read a book? In my experience in the industry, \"continuous delivery\" *never* involves lockstep upgrades because it creates coupling in your release pipeline between disparate components (often developed by different teams). You can start with https://continuousdelivery.com but I'd read the book before arguing that you can't manage this stuff effectively. I think one *can* pull it off, but it requires significantly more effort than designing systems that don't require as much coordination to deliver/deploy. i.e., API versioning and negotiation Shrug. What would I know? I'm just a client dev who's been dealing with this exact issue... Just to make sure I understand correctly: the Altair and Bellatrix upgrade both required users to update their consensus client and validator client to specific versions simultaneously, and if they updated either their consensus or validator client without updating the other their setup would break? This is true for prysm. With hard forks we typically advertise it as a major release meaning it's not backwards compatible between BN and VC How many different validator clients are there? Does each consensus client team produce their own validator client, or is it mix and match like EL/CL combinations? No this wasn’t the case for Teku. You needed to have upgraded both by the time the fork happened but that’s required anyway because the hard fork changed behaviour not just the API. But you could upgrade one before the other before the fork and it would work because neither side added or expected the new fields in the blocks. The hard fork activated at the same time (same epoch start) for both the beacon node and validator client and then they both added and expected the new fields. So the deployment is decoupled and the activation occurs in lock step. Just like we do for every hard fork. Is the API Teku serves coupled with the current epoch? The block data is. Because blocks are inherently coupled to a hard fork. Ah I think I missspoke. We are the same as Teku That’s slightly new for EL clients who have gone to rather extreme lengths to avoid changing data structures in the past but new transaction types have started that change already so it’s not unheard of. IIRC with the new transaction types, various clients on the gossip network added support for them over gossip prior to the hard fork, and it was just that no one was using them until after the fork. There was no need to sync the different client releases as they all added support at their own leisure prior to London (including users being able to submit new transaction types to their local node and whatnot). You just couldn't include them in a block prior to London, and *some* subset of the clients on the network may reject them if they were received via gossip prior to London. Some clients *may* (I'm not sure) have not allowed them in their mempool prior to London (since they weren't yet valid transactions) but that was a per-client decision and nothing that needed to be done in lockstep between clients. Yes exactly. Then they activated in lock step. 🙂 They activated the consensus changes in lockstep, as with every hard fork. They did not activate API or gossip changes in lockstep. I don’t think that’s true exactly. They could only start using the new transaction type after the hard fork so that’s when those changes actually activated. I *think* you could gossip (to a limited extent) new transactions prior to the hard fork that enables them for a block. We’d do the same for withdrawals. The clients get new versions deployment which are ready to activate the changes and then at the specific slot/timestamp those changes activate. What do CL clients do with unknown extra parameters in API responses from the EL? I’d guess there’s a mix of things. But it doesn’t matter if you activate the hard fork at the same time. If you activate at different times you have to handle that complexity and test the combinations. I argue that we need to handle that problem for other reasons anyway, and once we have handled it we can just use that solution. I forget what it was, but there is already talk of needing to update the EL/CL API for something (<@425572898787426305> probably remembers what). Even if we handle it we don’t need the extra complexity and risk in this case. Activating at separate times was meant to make it simpler but it actually makes it more complex. I don't think activating at different times makes the code simpler. I think it reduces risk though. Coordination, for example, is simpler when you only have to coordinate timing with 4 teams rather than 8. You have to coordinate with EL and CL anyway because you need them to ultimately work together. There is no option here of activating at different times. You can’t do withdrawals with only one side. The question is how we trigger activating at the same time. You *can* activate at different times. EL has a hard fork where blocks can now contain withdraw lists provided by the CL. This list would be empty, but everything would be present for them to work. Then at a future date (doesn't matter when from the EL perspective), the CL can start actually sending withdraws. If we assume that we have an API versioning system (because we need one anyway), then we would just leverage that system to support the fact that some CL clients may not be providing any list in their API responses yet. But you don’t use withdrawals until the CL updates. Ie you activate at the same time. The feature is only available when both sides have it. Your describing one possible way of separating deployment from activation. It’s not the only way and it’s definitely not the simplest way. It would activate for the EL as the block structure would change with the EL fork. There would be no user facing \"feature\" at this time, but there would be block structure (and thus consensus change) with the EL fork. And the EL would (likely) start shipping that new block structure to its API clients (JSON-RPC), so tooling can start depending on it from that point (even though it is empty). I took your advice and was reading over this site, and it seems the author here agrees with me and not you, which suggests that perhaps we are misunderstanding each other's position. https://continuousdelivery.com/implementing/patterns/#patterns-for-low-risk-releases > Low-risk Releases are Incremental. Our goal is to architect our systems such that we can release individual changes (including database changes) independently, rather than having to orchestrate big-bang releases due to tight coupling between multiple different systems. This typically requires building versioned APIs and implementing patterns such as circuit breaker. Those books typically talk about traditional deployments that are done with a single button push. I’m wondering do you also argue for hardforks that include only one feature/change? I'm personally a fan of having regularly scheduled forks and whatever is ready goes in at ",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> I imagine that this will force the EL to consider blocks with missing withrawals as blocks with zero withrawals until the CL upgrades\nWhy do you think this would be problematic?",
+      "createdAt": "2022-09-30T03:48:06.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is an API issue, not a consensus issue.  API changes don't happen with forks (I don't believe EL clients have the ability to have the API change based on the current block height/timestamp).",
+      "createdAt": "2022-09-30T03:49:15.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's not really relevant - we still need it to happen ahead of the EL upgrade or stuff breaks.  So we have to make sure all users upgrade their CL, then upgrade their EL, then upgrade their CL again. And we failed to decouple the upgrades because the EL upgrade required changes on the CL side.",
+      "createdAt": "2022-09-30T03:50:43.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this gets to a real problem that we need to address which is API versioning.",
+      "createdAt": "2022-09-30T03:51:13.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So we wind up with more complexity and more interaction models to test which increases risk when we were trying to reduce it.",
+      "createdAt": "2022-09-30T03:51:13.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We have been hand waving over this problem for a while, but it really does need a solution.",
+      "createdAt": "2022-09-30T03:51:32.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Unless we want to require users to update both of their clients simultaneously, we will need the EL to be able to function with a CL that doesn't support receiving empty withdraw lists (assuming that is how the spec works out).",
+      "createdAt": "2022-09-30T03:53:17.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "API versioning doesn't really help though - you have to get the CL upgraded to the new version or do the testing to ensure the required changes are actually backwards compatible for all real implementations.  The bottom line is that the EL will change behaviour in a way that affects the CL. The changes are not actually decoupled. So the simplest option is just to do them at the same time.  Pretending they're decoupled when they're not introduces a lot of complexity and risk.",
+      "createdAt": "2022-09-30T03:53:18.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think it is pragmatic to require *users* update two clients in lockstep.",
+      "createdAt": "2022-09-30T03:53:48.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we omit empty withdrawal lists then that's a weird quirk we have to live with in the API forever.",
+      "createdAt": "2022-09-30T03:53:54.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why not? It's much simpler for them to do both updates at the same time and monitor a single hard fork than it is to do them at different times.",
+      "createdAt": "2022-09-30T03:54:21.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This gets to Peter's point argument in ACD (I think) a while ago where we really need to have a process for API versioning and deprecation specifically so we *don't* have to continue supporting this stuff indefinitely.",
+      "createdAt": "2022-09-30T03:54:40.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is a broad problem that extends well beyond the topic of hard forks that needs to be solved, and once we have solved it we can use that solution for decoupled forks.",
+      "createdAt": "2022-09-30T03:55:12.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But then we just have a separate upgrade cycle somewhere which is the original problem.  We don't *have* a versioning issue if we upgrade both at once because we know they will both activate the new field at the same time.",
+      "createdAt": "2022-09-30T03:55:36.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Not saying that having a clear approach to migrating APIs is a bad thing, but it doesn't solve this issue.",
+      "createdAt": "2022-09-30T03:56:05.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This solution adds complexity to release processes for clients because now they need to maintain a security fixes for old versions because you **cannot** upgrade to new version X until all EL/CL clients are ready for a massive simultaneous release since there is an API change included.",
+      "createdAt": "2022-09-30T03:57:05.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As a client dev I can say that's not true.  We didn't do it for Altair or Bellatrix, both of which involved significant API changes.",
+      "createdAt": "2022-09-30T03:57:51.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "API changes that are backward incompatible?",
+      "createdAt": "2022-09-30T03:58:16.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Meaning, you could not update either side of the API without updating the other; they had to update in lockstep?",
+      "createdAt": "2022-09-30T03:58:31.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes. Blocks changed in both upgrades and the API between the validator and the beacon node had to adapt to that.  Because the change happened in lock step, it just worked.",
+      "createdAt": "2022-09-30T03:59:16.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There's already a hard dependency because you can't work with an Altair block after the Bellatrix upgrade so it's quite natural for the API to also handle that change.",
+      "createdAt": "2022-09-30T03:59:55.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It will work until it doesn't.  e.g., if you have a security vulnerability you need to fix and you already implemented the backward incompatible API change, now you need to apply the security fix to both head and an old version without the API change.",
+      "createdAt": "2022-09-30T04:00:44.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Again, I'm a client dev.  I have been living this and dealing with these issues.  You're wrong.",
+      "createdAt": "2022-09-30T04:01:16.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Or you keep the API change in a feature branch and spend resources constantly maintaining it until it is released, but even that has some raciness if the security vulnerability shows up during the 1-2 month long release process.",
+      "createdAt": "2022-09-30T04:01:24.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry to be blunt but you're making up issues that just don't come up.",
+      "createdAt": "2022-09-30T04:01:36.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "These are issues that aren't specific to Ethereum.  There is a good reason that companies try to avoid lockstep API changes in production systems.",
+      "createdAt": "2022-09-30T04:02:11.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And while I don't write an Ethereum client, I *have* had to maintain production code with an exposed or consumed API where turning off the system to do lockstep upgrades wasn't a viable option, and the option of trying to update both simultaneously is always brought up as the \"easy\" solution and it never ends up actually being easy.",
+      "createdAt": "2022-09-30T04:03:45.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The book \"Continuous Delivery\" by Jez Humble and Dave Farley would be excellent reading on how to make this work without feature branching and backporting etc.",
+      "createdAt": "2022-09-30T04:04:15.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is there a TL;DR version (e.g., blog post) that doesn't require me to buy and read a book?",
+      "createdAt": "2022-09-30T04:05:18.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In my experience in the industry, \"continuous delivery\" *never* involves lockstep upgrades because it creates coupling in your release pipeline between disparate components (often developed by different teams).",
+      "createdAt": "2022-09-30T04:06:10.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You can start with https://continuousdelivery.com but I'd read the book before arguing that you can't manage this stuff effectively.",
+      "createdAt": "2022-09-30T04:06:41.490000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think one *can* pull it off, but it requires significantly more effort than designing systems that don't require as much coordination to deliver/deploy.",
+      "createdAt": "2022-09-30T04:07:28.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i.e., API versioning and negotiation",
+      "createdAt": "2022-09-30T04:07:43.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Shrug. What would I know? I'm just a client dev who's been dealing with this exact issue...",
+      "createdAt": "2022-09-30T04:09:05.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Just to make sure I understand correctly: the Altair and Bellatrix upgrade both required users to update their consensus client and validator client to specific versions simultaneously, and if they updated either their consensus or validator client without updating the other their setup would break?",
+      "createdAt": "2022-09-30T04:11:28.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is true for prysm. With hard forks we typically advertise it as a major release meaning it's not backwards compatible between BN and VC",
+      "createdAt": "2022-09-30T04:15:41.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How many different validator clients are there?  Does each consensus client team produce their own validator client, or is it mix and match like EL/CL combinations?",
+      "createdAt": "2022-09-30T04:18:36.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No this wasn’t the case for Teku. You needed to have upgraded both by the time the fork happened but that’s required anyway because the hard fork changed behaviour not just the API. \nBut you could upgrade one before the other before the fork and it would work because neither side added or expected the new fields in the blocks.\n\nThe hard fork activated at the same time (same epoch start) for both the beacon node and validator client and then they both added and expected the new fields.",
+      "createdAt": "2022-09-30T04:27:45.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So the deployment is decoupled and the activation occurs in lock step. Just like we do for every hard fork.",
+      "createdAt": "2022-09-30T04:28:31.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is the API Teku serves coupled with the current epoch?",
+      "createdAt": "2022-09-30T04:29:58.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The block data is.",
+      "createdAt": "2022-09-30T04:30:11.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Because blocks are inherently coupled to a hard fork.",
+      "createdAt": "2022-09-30T04:30:29.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah I think I missspoke. We are the same as Teku",
+      "createdAt": "2022-09-30T04:30:44.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That’s slightly new for EL clients who have gone to rather extreme lengths to avoid changing data structures in the past but new transaction types have started that change already so it’s not unheard of.",
+      "createdAt": "2022-09-30T04:31:17.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "IIRC with the new transaction types, various clients on the gossip network added support for them over gossip prior to the hard fork, and it was just that no one was using them until after the fork.",
+      "createdAt": "2022-09-30T04:34:28.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There was no need to sync the different client releases as they all added support at their own leisure prior to London (including users being able to submit new transaction types to their local node and whatnot).  You just couldn't include them in a block prior to London, and *some* subset of the clients on the network may reject them if they were received via gossip prior to London.",
+      "createdAt": "2022-09-30T04:35:38.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Some clients *may* (I'm not sure) have not allowed them in their mempool prior to London (since they weren't yet valid transactions) but that was a per-client decision and nothing that needed to be done in lockstep between clients.",
+      "createdAt": "2022-09-30T04:36:12.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes exactly. Then they activated in lock step. 🙂",
+      "createdAt": "2022-09-30T04:36:55.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "They activated the consensus changes in lockstep, as with every hard fork.",
+      "createdAt": "2022-09-30T04:37:06.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "They did not activate API or gossip changes in lockstep.",
+      "createdAt": "2022-09-30T04:37:17.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don’t think that’s true exactly. They could only start using the new transaction type after the hard fork so that’s when those changes actually activated.",
+      "createdAt": "2022-09-30T04:37:59.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I *think* you could gossip (to a limited extent) new transactions prior to the hard fork that enables them for a block.",
+      "createdAt": "2022-09-30T04:38:21.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We’d do the same for withdrawals. The clients get new versions deployment which are ready to activate the changes and then at the specific slot/timestamp those changes activate.",
+      "createdAt": "2022-09-30T04:38:44.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What do CL clients do with unknown extra parameters in API responses from the EL?",
+      "createdAt": "2022-09-30T04:39:28.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I’d guess there’s a mix of things. But it doesn’t matter if you activate the hard fork at the same time. If you activate at different times you have to handle that complexity and test the combinations.",
+      "createdAt": "2022-09-30T04:40:21.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I argue that we need to handle that problem for other reasons anyway, and once we have handled it we can just use that solution.  I forget what it was, but there is already talk of needing to update the EL/CL API for something (<@425572898787426305> probably remembers what).",
+      "createdAt": "2022-09-30T04:41:54.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Even if we handle it we don’t need the extra complexity and risk in this case. Activating at separate times was meant to make it simpler but it actually makes it more complex.",
+      "createdAt": "2022-09-30T04:42:42.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think activating at different times makes the code simpler.  I think it reduces risk though.",
+      "createdAt": "2022-09-30T04:43:45.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Coordination, for example, is simpler when you only have to coordinate timing with 4 teams rather than 8.",
+      "createdAt": "2022-09-30T04:44:04.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You have to coordinate with EL and CL anyway because you need them to ultimately work together. There is no option here of activating at different times. You can’t do withdrawals with only one side. \nThe question is how we trigger activating at the same time.",
+      "createdAt": "2022-09-30T04:45:14.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You *can* activate at different times.  EL has a hard fork where blocks can now contain withdraw lists provided by the CL.  This list would be empty, but everything would be present for them to work.",
+      "createdAt": "2022-09-30T04:47:36.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Then at a future date (doesn't matter when from the EL perspective), the CL can start actually sending withdraws.",
+      "createdAt": "2022-09-30T04:47:58.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we assume that we have an API versioning system (because we need one anyway), then we would just leverage that system to support the fact that some CL clients may not be providing any list in their API responses yet.",
+      "createdAt": "2022-09-30T04:49:27.487000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But you don’t use withdrawals until the CL updates. Ie you activate at the same time. The feature is only available when both sides have it. \n\nYour describing one possible way of separating deployment from activation. It’s not the only way and it’s definitely not the simplest way.",
+      "createdAt": "2022-09-30T04:49:33.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It would activate for the EL as the block structure would change with the EL fork.",
+      "createdAt": "2022-09-30T04:50:56.277000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There would be no user facing \"feature\" at this time, but there would be block structure (and thus consensus change) with the EL fork.",
+      "createdAt": "2022-09-30T04:51:13.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And the EL would (likely) start shipping that new block structure to its API clients (JSON-RPC), so tooling can start depending on it from that point (even though it is empty).",
+      "createdAt": "2022-09-30T04:52:08.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I took your advice and was reading over this site, and it seems the author here agrees with me and not you, which suggests that perhaps we are misunderstanding each other's position.  https://continuousdelivery.com/implementing/patterns/#patterns-for-low-risk-releases\n> Low-risk Releases are Incremental. Our goal is to architect our systems such that we can release individual changes (including database changes) independently, rather than having to orchestrate big-bang releases due to tight coupling between multiple different systems. This typically requires building versioned APIs and implementing patterns such as circuit breaker.",
+      "createdAt": "2022-09-30T04:57:34.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Those books typically talk about traditional deployments that are done with a single button push.",
+      "createdAt": "2022-09-30T05:00:04.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I’m wondering do you also argue for hardforks that include only one feature/change?",
+      "createdAt": "2022-09-30T05:00:34.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm personally a fan of having regularly scheduled forks and whatever is ready goes in at the scheduled time.",
+      "createdAt": "2022-09-30T05:01:23.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is specific to Ethereum, and not my general policy on all things though.",
+      "createdAt": "2022-09-30T05:01:36.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Then you are contradicting yourself.",
+      "createdAt": "2022-09-30T05:02:00.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I tend to prefer continuous deployment when it makes sense.  In the case of Ethereum though, we need to coordinate deployment with thousands of users and stakeholders so CD doesn't work.",
+      "createdAt": "2022-09-30T05:02:08.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You should argue for the smallest chances possible. That means you should argue for single change/feature hardforks",
+      "createdAt": "2022-09-30T05:02:31.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In my perfect imaginary world of unicorns and rainbows, ELs and CLs would both be on a 6 month release cadence, but they would be offset from each other by 3 months.  The EL fork that enables withdraws would happen, and then the CL fork that enables withdraws would happen on their next scheduled HF at the earliest (though they could choose to delay 6 months).",
+      "createdAt": "2022-09-30T05:03:28.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Again, the risk is when you treat something as decoupled when it actually isn’t. That increases complexity and risk rather than reducing it. \n\nThere’s no silver bullet for doing continuous delivery well, it’s about understanding each situation and using a suite of tools to speed up feedback loops and reduce risk.",
+      "createdAt": "2022-09-30T05:03:38.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree with this, but I disagree that this change is actually coupled.",
+      "createdAt": "2022-09-30T05:04:00.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This actually means that hardforks effectively activates on each side every three months. So when CL activates real hardfork it actually triggers EL virtual hardfork that was waiting for the feature activated in CL. Such short periods are not very realistic given historical performance.\n\nSo overall I don’t really see how this approach helps in really.",
+      "createdAt": "2022-09-30T05:17:18.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The EL hard fork would activate, it just wouldn't be fully utilized.",
+      "createdAt": "2022-09-30T05:18:04.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is similar to Berlin (I think) where consensus support for new transaction types was added but those new transaction types didn't actually show up on the network until sometime later (I think intentionally by a dev to validate the feature).",
+      "createdAt": "2022-09-30T05:18:56.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I wouldn't say that there was a \"virtual hardfork\" when those transactions were the feature was first used.",
+      "createdAt": "2022-09-30T05:19:17.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In general case I see this as a virtual hardfork as before it’s activated the new code isn’t really used.",
+      "createdAt": "2022-09-30T05:21:30.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm not a fan of that use of the term hard fork personally, but I can accept it for the context of this discussion.  In that case it is not at all uncommon for us to have \"virtual hard forks\".",
+      "createdAt": "2022-09-30T05:22:50.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And I don't think having these \"virtual hard forks\" is a problem.",
+      "createdAt": "2022-09-30T05:23:08.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think you don’t see this as a problem bc you are not developing a client. From dev perspective thats problems everywhere. Just a small example, in Rust types are pretty strict. So there may be some new feature in the hardfork that needs some field in the container to be set. So instead of having this field always set in the new CL hardfork we would need to make it optional so it handles both pre and post virtual hardfork modes on EL. That’s a mess that doesn’t help in any way.",
+      "createdAt": "2022-09-30T05:33:15.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "A couple of changes not related to hard forks:\n* `getPayloadV2` with `feeRecipientBalance` field\n* `getPayloadBodiesByRoot`, `getPayloadBodiesByRange` where the latter method is *optional*\n\nWe likely need versioning for it in order to avoid try-and-fallback pattern on CL side to understand whether a certain method is supported by EL or not.",
+      "createdAt": "2022-09-30T09:07:05.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For the case of withdraws, EL would come first so the CL wouldn't need to deal with this.  However, I think your general point applies if you just flip EL and CL in your statement.  I still argue that we have to solve this problem anyway for other reasons, and once solved we can leverage that solution.",
+      "createdAt": "2022-09-30T09:09:18.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If CL would need to switch to the new `newPayloadV2` method because of changes in the data structure then we have coordinated update even though CL isn't activating withdrawals at the same time.\n\nIf EL exposes `newPayloadV2` but CL uses `newPayloadV1` until the upgrade epoch then we can't check whether stakers have updated their ELs or not.",
+      "createdAt": "2022-09-30T09:09:40.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, so I finished reading the hundreds of messages in this channel since last night that I went to sleep, the cycle goes about every 20-30 messages and then the same arguments are repeated 😉 I don't think we'll get far here. From what I can gather there are three camps. On one camp there's Micah claiming that this update is not coupled. On the other hand there's every CL client dev (that participated here) saying it is. And the third camp is Marius that wants the upgrade to be on block height. The only agreement seems to be that in order to do block height then the upgrade can't happen simultaneously, so it's safe to assume that there's a camp with Micah and Marius and then there's every other CL client dev.",
+      "createdAt": "2022-09-30T09:30:51.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "They could be decoupled only if CL keeps using the previous version of Engine API after EL upgrades which would be complexity on EL side (EL will have to e.g. append empty withdrawals list to every payload fed by CL)",
+      "createdAt": "2022-09-30T09:50:58.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If CL switches to the new Engine API version then the upgrade becomes slightly coupled, slightly means synchronous data structure upgrade but async logic upgrade (CL may enabled withdrawals logic after EL does the same)",
+      "createdAt": "2022-09-30T09:52:38.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am wondering what does the latter buy us?",
+      "createdAt": "2022-09-30T09:54:04.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah that's what I said in the original post, that the EL would have to treat differently the empty withdrawal list from the no list at all. I suspect that any sort of artificial decoupling like this ends up in much more complexity than the one Marius is trying to avoid by not using timestamps",
+      "createdAt": "2022-09-30T10:05:48.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think that my general point is that I just don't see why a regular upgrade needs to be split into separate EL/CL hardforks at different times. While your suggestion is to split it because it arguably is safer etc. In my opinion, the only case when an upgrade should be split is that it's so complex that it's too large for a single release. I don't think that's the case generally, it's the opposite usually, hardforks involve a few features. \n\nI really would like to think about upgrades assuming that EL/CL is a single piece. You know, just like normal people are doing client dev elsewhere. So then we even wouldn't need to discussions we have now. I'm afraid if we keep splitting things, then soon hardforks that involve only one side will be split further. For example, the first hardfork will add optional fields to the containers without actually using it and the second hard fork will start to use it (and it can be split further this way until hardfork consists of a single code line change). Wait, that's pretty much the same as suggesting 6 months hardforks with 3 months offsets 🙂\n\nMy point is that this separation of EL and CL is not a desired thing. Life would be much easier if it was a single piece. So further building on the weaknesses of not ideal concept isn't the best idea.",
+      "createdAt": "2022-09-30T11:28:23.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think we should be using API sniffing as a mechanism for determining what version remote client/server is running.  This gets back to the need for a status endpoint and/or a \"ping\" (which could contain version information).",
+      "createdAt": "2022-09-30T12:24:05.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Eh, we are in \"vacation mode\" so not everyone is paying attention/participating at the moment.  As much as I hate the whole idea of vacations, I do think since we are currently in one we should not make any decisions nor assume we have full participation in discussions.",
+      "createdAt": "2022-09-30T12:25:26.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what does \"vacations\" mean? looking at the concept in the dictionary seems something interesting. I should try that",
+      "createdAt": "2022-09-30T12:26:27.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this gets to the core of our disagreement.  I think that the separation of EL/CL was a great thing and we should leverage it.  I have lobbied in the past (and I know I'm not alone) for breaking apart the EL into even more components that can be extracted into separate services.  From a user standpoint, I *do* think there is value in people creating bundles/packages/launchers that hides this complexity from users, but from an architecture/engineering standpoint I'm a big fan of splitting things up and decoupling them.",
+      "createdAt": "2022-09-30T12:28:55.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Its a trap!  It sounds great, but then when you return from this \"vacation\" you just have way more work!",
+      "createdAt": "2022-09-30T12:29:23.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, that's the core disagreement. I hear you, but it's possible to have a well-designed monolith that will have similar benefits to a split system without the hassle of a split system. This actually starts to remind monolith vs microservices debates we had back then in web 2.0.",
+      "createdAt": "2022-09-30T12:47:20.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, it is essentially that exact debate.",
+      "createdAt": "2022-09-30T12:47:49.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm of the belief that once a piece of software gets bigger than can be reasonably maintained by 4-5 people, it is time to break it apart into smaller pieces that *can* be maintained by around 4-5 people.  Human coordination is very hard, and having very clear/well defined coordination boundaries helps facilitate it.",
+      "createdAt": "2022-09-30T12:48:47.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Some notes on CL client implementation considerations\nhttps://hackmd.io/hZefl5F5RgWXeibgWflRQQ?view",
+      "createdAt": "2022-09-30T12:54:28.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<asn_d6> wrt kzg functions terence here is the latest list that the lib should provide:\n\n\n-     compute_powers()\n-     matrix_lincomb()\n-     g1_lincomb()\n-     bytes_to_bls_field()\n-     evaluate_polynomial_in_evaluation_form()\n-     verify_kzg_proof()\n-     compute_kzg_proof()",
+      "createdAt": "2022-09-30T13:09:30.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<asn_d6> im not sure where to write this list down so that client devs can see it",
+      "createdAt": "2022-09-30T13:15:03.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<timbeiko> 4844 Breakout in ~40m! https://github.com/ethereum/pm/issues/628",
+      "createdAt": "2022-09-30T13:20:06.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "booklearner",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not sure about a comparison, but as part of the observability work related to 4844 I could collect network metrics as well -- if this is helpful I'm happy to get you access to some dashboards (aiming to have the setup complete early next week)",
+      "createdAt": "2022-09-30T13:35:22.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "booklearner",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so this would be real world measurements from nodes in the testnet, open to any suggestions you might have/if there's specific data you'd like to see measured let me know!",
+      "createdAt": "2022-09-30T13:41:45.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would the existing geth / prysm grafana dashboards help with these?",
+      "createdAt": "2022-09-30T13:47:25.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "booklearner",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "probably! if that stack is collecting network data from the nodes, though the challenge I think is adding granularity i.e. showing bandwidth breakdowns by specific rpc or something like that",
+      "createdAt": "2022-09-30T13:50:19.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "booklearner",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@466006586477772831> are those dashboards publicly accessible? I'd be interested in taking a look",
+      "createdAt": "2022-09-30T13:52:01.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes they are.\n\nthis one is for Geth (screenshot available on the page)\nhttps://grafana.com/grafana/dashboards/13877-single-geth-dashboard/\n\nPrysm\nhttps://docs.prylabs.network/docs/prysm-usage/monitoring/grafana-dashboard",
+      "createdAt": "2022-09-30T14:00:33.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think there are some more detailed dashboards used for the merge by some client dev teams",
+      "createdAt": "2022-09-30T14:02:37.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<xrchz> > <xrchz>  one version is here https://github.com/dankrad/c-kzg/blob/4844/min-src/c_kzg_4844.h (re @asn_d6: im not sure where to write this list down so that client devs can see it)",
+      "createdAt": "2022-09-30T14:15:34.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<abdelhamidbakhta> @dankrad do we have data about what has been done in terms of analysis of other commitment schemes ? like numbers showing what you were saying about FRI being far from practical",
+      "createdAt": "2022-09-30T14:34:27.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<abdelhamidbakhta> I do agree that Quantum resistance is not the major problem, but I am not sure about transparent vs practical efficiency tradeoff to be honest. I don't know what you mean by far for being practical, but for example if it is like x2 in terms of data or even x10 I still think this is not enough to disqualify, compared to requiring a trusted setup on the L1, which is a huge precedent IMO",
+      "createdAt": "2022-09-30T14:36:38.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sauliusgrigaitis",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do you think that a trusted setup on the L1 is an issue if the trusted setup is updatable and anyone can join?",
+      "createdAt": "2022-09-30T14:43:38.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<abdelhamidbakhta> > <abdelhamidbakhta>  is it updatable right now ? will future participants in 100 years be able to participate ? otherwise yes I think it is an issue (re @sharded_data_bot: <Saulius Grigaitis> [reply]: Do you think that a trusted setup on the L1 is an issue if the trusted setup is updatable and anyone can join?)",
+      "createdAt": "2022-09-30T14:44:23.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<abdelhamidbakhta> > Fwiw, I'm currently investigating partially-STARK/FRI-based proofs of block execution.  Can someone point me to the analysis comparing different commitment schemes which says FRI is far from usable at the moment?\n@prylabsjames is it you ?",
+      "createdAt": "2022-09-30T14:44:45.889000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "id": 8105,
+  "title": "EIP-8105: Universal Enshrined Encrypted Mempool",
+  "status": "Draft",
+  "description": "Add a scheme agnostic encrypted mempool",
+  "laymanDescription": "Note: withdrawn from Hegota headliner proposals [here](https://ethereum-magicians.org/t/hegota-headliner-proposal-eip-8105-universal-enshrined-encrypted-mempool-eem/27448/3) on 23 Feb, in favor of LUCID encrypted mempools.\n\nAdds a built-in encrypted mempool option: you can submit an encrypted transaction that stays unreadable until it's included in a block. This reduces front-running and sandwich attacks and can improve real-time censorship resistance. Regular plaintext transactions still work, and the chain continues even if key providers fail.",
+  "author": "Jannik Luhn (@jannikluhn)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-12-17",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-8105-universal-enshrined-encrypted-mempool/27201",
+  "requires": [
+    "7732"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Hegota",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Withdrawn",
+          "call": null,
+          "date": "2026-02-23"
+        }
+      ],
+      "isHeadliner": false,
+      "wasHeadlinerCandidate": true,
+      "champions": [
+        {
+          "name": "Jannik Luhn",
+          "discord": "jannik031153"
+        }
+      ],
+      "presentationHistory": [
+        {
+          "type": "headliner_proposal",
+          "link": "https://ethereum-magicians.org/t/hegota-headliner-proposal-eip-8105-universal-enshrined-encrypted-mempool-eem/27448",
+          "date": "2026-01-16"
+        },
+        {
+          "type": "headliner_presentation",
+          "call": "acde/229",
+          "date": "2026-01-29"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Can submit encrypted transactions until inclusion, reducing front-running/sandwiching and strengthening weak censorship-resistance guarantees."
+    },
+    "appDevs": {
+      "description": "May add support for encrypted transaction flows and key-provider selection; must handle payloads being skipped if keys missing."
+    },
+    "walletDevs": {
+      "description": "Need envelope/payload signing support, key-provider discovery, and UX for choosing encrypted vs plaintext submissions."
+    },
+    "toolingInfra": {
+      "description": "Mempool/RPC/builders must relay encrypted txs, process decryption-key messages, and integrate key validation and ordering rules."
+    },
+    "layer2s": {
+      "description": "No required L2 protocol changes; they may opt to use encrypted L1 transactions for their own L1 interactions."
+    },
+    "stakersNodes": {
+      "description": "PTC members must listen for keys, validate them with a gas cap, and attest key availability per encrypted transaction."
+    },
+    "clClients": {
+      "description": "Must implement registry replication, extended payload attestations with a bitfield, and consensus processing of key availability."
+    },
+    "elClients": {
+      "description": "Must add encrypted tx type, envelope batch execution and fee accounting, decryption via registry, and skip-on-failure semantics."
+    }
+  },
+  "benefits": [
+    "Protects users from front-running and sandwich attacks by hiding transaction contents until inclusion.",
+    "Improves weak censorship resistance by blinding builders while encrypted transactions wait for inclusion.",
+    "Supports diverse encryption schemes via arbitrary decryption key providers and a trust-graph mechanism.",
+    "Keeps chain progressing even if key providers fail; plaintext transactions remain supported."
+  ],
+  "tradeoffs": [
+    "Backwards-incompatible protocol changes across execution and consensus layers, increasing implementation complexity.",
+    "Users must trust key providers; withheld or late keys can skip payload while envelope fees paid."
+  ],
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP proposes to enshrine an encrypted mempool into the protocol. It enables users to encrypt their transactions until they have been included in a block, protecting them from front running and sandwiching attacks as well as increasing censorship resistance guarantees. The design is encryption technology agnostic by supporting arbitrary decryption key providers, which can for instance be based on threshold encryption, MPC committees, TEEs, delay encryption, or FHE schemes. Traditional plaintext transactions are still supported and progression of the chain is guaranteed even if decryption key providers fail. ## Motivation The goal of this EIP is to prevent users from malicious transaction reordering attacks as well as increase real time (\"weak\") censorship resistance of the protocol. It also aims to reduce regulatory risks of block builders and other protocol participants by temporarily blinding them. The goal is not to improve user privacy (e.g., transaction confidentiality) as transactions are publicly revealed eventually. This proposal builds on prior work such as the _Shutterized Beacon Chain_ and a live, out-of-protocol implementation of the encrypted mempool already deployed on Gnosis Chain. It addresses a long-standing issue with front running and has the potential to mitigate harmful second-order effects of MEV, such as builder centralization. The design also fits naturally with enshrined proposer-builder separation (ePBS), making it a logical extension of Ethereum’s roadmap. ## Specification ### Key Provider Registry In the execution layer, a system contract called the key provider registry is deployed. It allows any account to register a key provider and assigns them a unique ID. Registration requires specifying a contract with a decryption and a key validation function, each of which accept a key ID and a key message as byte strings. Additionally, key providers may designate other providers as directly trusted, thereby forming a directed trust graph. We define a key provider A to trust another key provider B if and only if a directed path from A to B exists in this graph. The beacon chain replicates the key provider registry in its state, analogously to the mechanism that handles beacon chain deposits. The source code of the key provider registry contract is TBD. ### Transaction Types The proposal adds two new [EIP-2718](./eip-2718.md) transaction types. Encrypted transactions have the following form: `0x05 || rlp([chain_id, envelope_nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_amount, key_provider_id, key_id, encrypted_payload, envelope_signature_y_parity, envelope_signature_r, envelope_signature_s])` Decrypted transactions have the following form: `0x06 || rlp([envelope_signer, nonce, destination, amount, data, access_list, signature_y_parity, signature_r, signature_s])` ### Key Provider Responsibilities In each slot, when a key provider observes the execution payload published by the builder, they collect the key IDs referenced in the envelopes of all encrypted transactions addressed with their key provider ID. For each of those, they must publish either the corresponding decryption key or a key withhold notice. The corresponding message references the beacon block hash to prevent replays in a future slot. They may do so either immediately upon observing the execution payload or delay publication to a later point in the slot. ### Additional Payload Timeliness Committee Responsibilities Members of the Payload Timeliness Committee (PTC) defined in [EIP-7732](./eip-7732.md) must listen for the decryption keys referenced by all encrypted transactions in a block, as identified by the key provider ID and key ID fields. They must validate these keys using the validation function specified in the registry contract, using a hardcoded small gas limit per key. Finally, they must attest to the presence or absence of a valid key for each encrypted transaction in the payload attestation message, which is extended for this purpose with a dedicated bitfield. ### Block Structure In a valid block, transactions must be ordered as follows: - Decrypted transactions at the start - Encrypted transactions at the end - Any other transaction in the middle Additionally, if an encrypted transaction A is preceded by another encrypted transaction B, then A and B must either specify the same key provider or B's key provider must be trusted by A's key provider. Each decrypted transaction must correspond to an encrypted transaction in the previous block. The correspondence must be order-preserving. A decrypted transaction must be the result of applying the decryption function given by `key_provider_id` to `encrypted_payload` of the corresponding encrypted transaction. The key to be used is specified by the encrypted transaction's `key_id` and must be attested to by the PTC in the slot in which the encrypted transaction was included. A decrypted transaction must not be included if and only if any of the following conditions is met: - the key is attested as missing - decryption fails - decryption does not yield a structurally valid decrypted transaction - the decrypted transaction's `envelope_signer` does not match the signer of the corresponding encrypted transaction - including the decrypted transaction would result in an invalid block (e.g., because of a nonce mismatch) ### Transaction Execution Encrypted transactions are executed by incrementing the nonce of the envelope signer account and paying for `gas_amount` analogously to [EIP-1559](./eip-1559.md). The transaction consumes `gas_amount` units of gas. Decrypted transactions are executed as a regular transaction under the execution context of the inclusion block (e.g., for `block.slot` and `block.coinbase`). The gas limit of the transaction is given by the corresponding encrypted transaction's `gas_amount` minus the cost of the encrypted transaction as well as decryption. However, the consumed gas does not count towards the blo"
+}

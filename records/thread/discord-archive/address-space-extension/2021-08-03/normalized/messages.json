@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "channel": "address-space-extension",
+  "date": "2021-08-03",
+  "messageCount": 35,
+  "sourceHash": "5263b31a27b707ecc0f629d5a214dd8d0158eea76fe12d201b6353554b093a6d",
+  "searchText": "Hey everyone! I've caught up on the ASE writings. Have still to dive into the meetings. One thing I'm curious about is that I see a lot of bearishness on the PWA-ASE scheme. What are the big issues that would justify completely giving up on the scheme? The only thing that strikes me as truly problematic is ECRECOVER, since its uses in legacy contract would need some kind of context to know the epoch of the address to recover. This is not tractable in general - for instance consider a legacy contract that stores token balances per address and also stores signatures from these addresses. It's impossible to have a context that causes ECRECOVER to return the right compressed address (or even the right long address) for signatures made with long adresses in different epochs. Does that seem like a correct characterization? I've written a sketch of how I think the PWA-ASE could work focusing on the loss of funds issue. I think I've shown that we can prevent loss of funds by rules that tooling can follow in practice and that mitigations can make recovery possible in many cases where funds are lost. https://hackmd.io/@yokPKswWQlu93Y10pQBj2Q/By5FXqLkt I realize that placing such a \"do this or potentially lose funds\" requirement on users isn't great (even if tooling can enforce it). But I don't see a better alternative that makes legacy and long address contracts capable of interaction. This is great! One question: I'm not sure why \"If the recipient is a legacy address or the thing being sent is a legacy ERC20, loss is impossible.\" If the recipient is a legacy address I understand, but if a legacy ERC20 is being sent, that I do not. Would the legacy ERC20 contract not just associated token ownership to the `chuck_contract_compressed` which Chuck can steal because he has an EOA of that address too? There are two types of problems and I don't think I was very clear at distinguishing them: a) You violate The Edict sending and send something to the contract that has a collision and Chuck steals your funds. b) You violate The Edict and you funds end up in long address land at `encode(compress(long_address))` and you can't get them back. I (and most other people) aren't very worried about a), because Chuck has to spend billions of dollars to generate the collision and then cross his fingers and hope you screw up. The attack isn't even viable unless Chuck targets the richest whales anyway. By contrast b) is an extreme headache (It's why everyone is bearish on PWA-ASE). The statement \"If the recipient is a legacy address or the thing being sent is a legacy ERC20, loss is impossible.\" only applies to b). Its not a problem for legacy ERC20s because they only know about `compress(long_address)` and not about the difference between `encode(compress(long_address))` and `long_address`. I understand! Scenario (b) wasn't really clear to me indeed. Isn't that fixable by treating `encode(compress(long_address)) == long_adress` in long address land? it doesn't jeopardize security on the condition that we reject signatures for address `compress(long_address)` when it is a key in the translation map Works for ETH not for ERC20s. Say the following happens: 1. I send 2 WDOGE to `encode(compress(long_address))` before adding it to the translation map. 2. I add `long_address` the translation map. 3. I send 2 WDOGE to `long_address`. Now I have WDOGE at two different locations. Unless you want the ERC20 to do a extra `SLOAD` (which are expensive) and use custom logic everytime someone sends tokens, there is no way for it to know about the other tokens. There is a `recover_edict_violation()` function in the document that allows manual recovery of such situations. The problem being that we can't force ERC20s to include `recover_edict_violation()` and some current tokens don't even implement ERC20 correctly today. Makes sense also. Would be nice to be able to require address normalization when addresses enter the system. But the format for arguments is not specified (it's just calldata as far as I understand) so it's not generalizable. Have you also thought about the similar issue for the legacy address associated with a long address (i.e. its last 20 bytes)? Looks like there is a much better UX fix there, which is to never ever show that address (which is pointless, unlike the compressed address which shows up in transaction etc). <@243183686562873344> I just skimmed the documents and didn't see anything about this. Are there numbers to how much storage will be required to even have something like a translation table? In the \"main\" doc: https://notes.ethereum.org/@ipsilon/address-space-extension-exploration#Size-of-translation-map-concern thanks a lot, that's a fairly optimistic assumption there and a very large hot dbase to do lookups. Can I ask why is there a general consensus that existing contracts should support large addresses? I can't tell. It is baseline estimate to have magnitude of the size. We don't send a lot of time tuning the estimate. Only new (long) addresses are going to be translated, so this goes with the address usage grow rate, now how much is currently being used (legacy addresses are not being translated). I understand, but the chain has been growing exponentially in terms of active addresses so a fair guess would be larger than current growth for the next 2 years. Either way, already a 1GB table is somewhat prohibitive I suppose If you can propose better estimate what would be useful. Besides, 1GB does not sound bad if priced the same or higher than contract storage. But this issue (and other issues with translation map) has been noticed. That's why <@!425279588009246720> and others are exploring alternatives like Bridge Contracts: https://ethereum-magicians.org/t/address-space-extension-with-bridge-contracts/6660. Address Space Extension specification draft https://notes.ethereum.org/@ipsilon/address-space-extension-exploration <@!301186049323958275> can we update pinned messages to maybe have single message with short description per published document? Possibly linked with the main author? If you want to draft something up I don't mind. Alternatively, if you write up a nice message just ask one of the Discord admins to pin yours and delete mine (which I'm 100% on board with). So I just did an exponential fitting on the data from july 2018 from here: https://etherscan.io/chart/address And got `1.4312220437556 * 10^-8` for the exponent (unix time as the x axis) and R^2 of 0.9974 which should be fitting (although already is wrong by 30M today). In any case what matters is the exponent and not the actual equation, but believing equation, we should have by 2023/08/01 this many accounts ``` >>> import math >>> 0.014785589084287*math.exp(0.000000014312220437556*1691091020) 479936890.50813836 ``` Which is an increase (assuming the same fitting instead of taking real number today) of 285 816 002 accounts. It's a stupid estimation without any real basis. But is a bit larger of an increase than the expected 150M in that file. ohhh actually this was my first gut feeling when I read the issue, I'll take a look at the pinned messages here when I get some time tonight. unless I'm mistaken, the estimation in the document is a 9GB translation map size in two years, not 1GB *2 if we assume the exponential curve fitting you did ends up closer to the real number of accounts I think the real question is how much space does the scheme save and how much of a multiple that is relative to the space required for the translation table might be interesting to see what the numbers would have been if address extension had been introduced two years ago although that might be unrepresentative given both high growth + the big push in DeFi only happening a year ago Yep I misread that number, that exponential fitting points to 18GB What I would like to know is how much of an incentive do we really have to have old contracts interacting with long addresses. Given that simple transactions from short addresses to long addresses require much less of machinery with the advantage that you lose less entropy on the large addresses, I would have expected that during the transition period old contracts would continue behaving as they do and people will just transfer from short accounts to long accounts until the contracts are upgraded.",
+  "excerpts": [
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hey everyone! I've caught up on the ASE writings. Have still to dive into the meetings.\nOne thing I'm curious about is that I see a lot of bearishness on  the PWA-ASE scheme.\nWhat are the big issues that would justify completely giving up on the scheme?\n\nThe only thing that strikes me as truly problematic is ECRECOVER, since its uses in legacy contract would need some kind of context to know the epoch of the address to recover. This is not tractable in general - for instance consider a legacy contract that stores token balances per address and also stores signatures from these addresses. It's impossible to have a context that causes ECRECOVER to return the right compressed address (or even the right long address) for signatures made with long adresses in different epochs. Does that seem like a correct characterization?",
+      "createdAt": "2021-08-03T00:24:37.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I've written a sketch of how I think the PWA-ASE could work focusing on the loss of funds issue. I think I've shown that we can prevent loss of funds by rules that tooling can follow in practice and that mitigations can make recovery possible in many cases where funds are lost.",
+      "createdAt": "2021-08-03T10:25:38.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://hackmd.io/@yokPKswWQlu93Y10pQBj2Q/By5FXqLkt",
+      "createdAt": "2021-08-03T10:25:39.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I realize that placing such a \"do this or potentially lose funds\" requirement on users isn't great (even if tooling can enforce it). But I don't see a better alternative that makes legacy and long address contracts capable of interaction.",
+      "createdAt": "2021-08-03T10:27:48.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is great!\nOne question: I'm not sure why \"If the recipient is a legacy address or the thing being sent is a legacy ERC20, loss is impossible.\"\nIf the recipient is a legacy address I understand, but if a legacy ERC20 is being sent, that I do not.\nWould the legacy ERC20 contract not just associated token ownership to the `chuck_contract_compressed` which Chuck can steal because he has an EOA of that address too?",
+      "createdAt": "2021-08-03T12:57:15.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There are two types of problems and I don't think I was very clear at distinguishing them:\na) You violate The Edict sending and send something to the contract that has a collision and Chuck steals your funds.\nb) You violate The Edict and you funds end up in long address land at `encode(compress(long_address))` and you can't get them back.",
+      "createdAt": "2021-08-03T13:11:25.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I (and most other people) aren't very worried about a), because Chuck has to spend billions of dollars to generate the collision and then cross his fingers and hope you screw up. The attack isn't even viable unless Chuck targets the richest whales anyway.",
+      "createdAt": "2021-08-03T13:11:54.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By contrast b) is an extreme headache (It's why everyone is bearish on PWA-ASE). The statement \"If the recipient is a legacy address or the thing being sent is a legacy ERC20, loss is impossible.\" only applies to b). Its not a problem for legacy ERC20s because they only know about `compress(long_address)` and not about the difference between `encode(compress(long_address))` and `long_address`.",
+      "createdAt": "2021-08-03T13:15:14.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I understand! Scenario (b) wasn't really clear to me indeed.",
+      "createdAt": "2021-08-03T13:15:46.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Isn't that fixable by treating `encode(compress(long_address)) == long_adress` in long address land?\nit doesn't jeopardize security on the condition that we reject signatures for address `compress(long_address)` when it is a key in the translation map",
+      "createdAt": "2021-08-03T13:18:44.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Works for ETH not for ERC20s. Say the following happens:\n1. I send 2 WDOGE to `encode(compress(long_address))` before adding it to the translation map.\n2. I add `long_address` the translation map.\n3. I send 2 WDOGE to `long_address`.\nNow I have WDOGE at two different locations. Unless you want the ERC20 to do a extra `SLOAD` (which are expensive) and use custom logic everytime someone sends tokens, there is no way for it to know about the other tokens.",
+      "createdAt": "2021-08-03T13:24:56.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There is a `recover_edict_violation()` function in the document that allows manual recovery of such situations.",
+      "createdAt": "2021-08-03T13:25:52.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "peter.davies",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The problem being that we can't force ERC20s to include `recover_edict_violation()` and some current tokens don't even implement ERC20 correctly today.",
+      "createdAt": "2021-08-03T13:27:21.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Makes sense also. Would be nice to be able to require address normalization when addresses enter the system. But the format for arguments is not specified (it's just calldata as far as I understand) so it's not generalizable.",
+      "createdAt": "2021-08-03T13:34:36.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Have you also thought about the similar issue for the legacy address associated with a long address (i.e. its last 20 bytes)?\nLooks like there is a much better UX fix there, which is to never ever show that address (which is pointless, unlike the compressed address which shows up in transaction etc).",
+      "createdAt": "2021-08-03T13:38:19.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@243183686562873344> I just skimmed the documents and didn't see anything about this. Are there numbers to how much storage will be required to even have something like a translation table?",
+      "createdAt": "2021-08-03T18:06:31.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In the \"main\" doc: https://notes.ethereum.org/@ipsilon/address-space-extension-exploration#Size-of-translation-map-concern",
+      "createdAt": "2021-08-03T19:17:27.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "thanks a lot, that's a fairly optimistic assumption there",
+      "createdAt": "2021-08-03T19:19:41.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and a very large hot dbase to do lookups.",
+      "createdAt": "2021-08-03T19:20:15.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Can I ask why is there a general consensus that existing contracts should support large addresses?",
+      "createdAt": "2021-08-03T19:21:52.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can't tell. It is baseline estimate to have magnitude of the size. We don't send a lot of time tuning the estimate.  Only new (long) addresses are going to be translated, so this goes with the address usage grow rate, now how much is currently being used (legacy addresses are not being translated).",
+      "createdAt": "2021-08-03T19:25:55.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I understand, but the chain has been growing exponentially in terms of active addresses so a fair guess would be larger than current growth for the next 2 years. Either way, already a 1GB table is somewhat prohibitive I suppose",
+      "createdAt": "2021-08-03T19:27:24.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you can propose better estimate what would be useful. \n\nBesides, 1GB does not sound bad if priced the same or higher than contract storage.",
+      "createdAt": "2021-08-03T19:31:45.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But this issue (and other issues with translation map) has been noticed. That's why <@!425279588009246720> and others are exploring alternatives like Bridge Contracts: https://ethereum-magicians.org/t/address-space-extension-with-bridge-contracts/6660.",
+      "createdAt": "2021-08-03T19:33:05.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Address Space Extension specification draft\nhttps://notes.ethereum.org/@ipsilon/address-space-extension-exploration",
+      "createdAt": "2021-08-03T19:39:39.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> can we update pinned messages to maybe have single message with short description per published document? Possibly linked with the main author?",
+      "createdAt": "2021-08-03T19:40:53.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you want to draft something up I don't mind.  Alternatively, if you write up a nice message just ask one of the Discord admins to pin yours and delete mine (which I'm 100% on board with).",
+      "createdAt": "2021-08-03T19:45:30.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So I just did an exponential fitting on the data from july 2018 from here: \nhttps://etherscan.io/chart/address\nAnd got `1.4312220437556 * 10^-8` for the exponent (unix time  as the x axis) and R^2 of 0.9974 which should be fitting (although already is wrong by 30M today). In any case what matters is the exponent and not the actual equation, but believing  equation, we should have  by 2023/08/01 this many accounts\n```\n>>> import math\n>>> 0.014785589084287*math.exp(0.000000014312220437556*1691091020)\n479936890.50813836\n```\nWhich is an increase (assuming the same fitting instead of taking real number today) of  285 816 002 accounts. It's a stupid estimation without any real basis. But is a bit larger of an increase than the expected 150M in that file.",
+      "createdAt": "2021-08-03T20:17:22.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ohhh actually this was my first gut feeling when I read the issue, I'll take a look at the pinned messages here when I get some time tonight.",
+      "createdAt": "2021-08-03T20:18:47.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "unless I'm mistaken, the estimation in the document is a 9GB translation map size in two years, not 1GB",
+      "createdAt": "2021-08-03T22:28:25.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "*2 if we assume the exponential curve fitting you did ends up closer to the real number of accounts",
+      "createdAt": "2021-08-03T22:30:41.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think the real question is how much space does the scheme save and how much of a multiple that is relative to the space required for the translation table",
+      "createdAt": "2021-08-03T22:32:23.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "might be interesting to see what the numbers would have been if address extension had been introduced two years ago\nalthough that might be unrepresentative given both high growth + the big push in DeFi only happening a year ago",
+      "createdAt": "2021-08-03T22:33:52.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yep I misread that number, that exponential fitting points to 18GB",
+      "createdAt": "2021-08-03T22:55:13.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What I would like to know is how much of an incentive do we really have to have old contracts interacting with long addresses. Given that simple transactions from short addresses to long addresses require much less of machinery with the advantage that you lose less entropy on the large addresses, I would have expected that during the transition period old contracts would continue behaving as they do and people will just transfer from short accounts to long accounts until the contracts are upgraded.",
+      "createdAt": "2021-08-03T23:04:33.871000+00:00",
+      "attachments": []
+    }
+  ]
+}

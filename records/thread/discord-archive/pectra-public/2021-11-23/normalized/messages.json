@@ -1,0 +1,410 @@
+{
+  "schemaVersion": 1,
+  "channel": "pectra-public",
+  "date": "2021-11-23",
+  "messageCount": 50,
+  "sourceHash": "4346f322fc8cfb2e337a2114cefc55959d4613f0e8774bb4885e650345612bcd",
+  "searchText": "You can have many execution engines talking to one consensus engine, but you cannot have many consensus engines talking to one execution engine. It's also documented in the Engine API spec, https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#load-balancing-and-advanced-configurations I am not sure if clients have enough granularity to be able to add a subset of methods from another namespace. Why extending a surface area for this interface doesn't feel good to you? Basically, CL utilizes a few methods to grab the head of the chain, a block at a follow distance, and logs. So, effectively the surface won't be extended that much If you put the entire `eth_` namespace in the EL<=>CL API then the surface area would be extended a lot, just not *used* very much. If all you need is block headers and logs under specific constrained scenarios it *may* make more sense to expose those specifically in the `engine_` namespace, and expose them in a way that exactly aligns with the needs of the CL. e.g., provide the ability to get logs for a specific block without getting the block body (if the body isn't needed). It would need to change more code on CL as standard libraries like web3j use `eth_` namespace by default, this kind of change would require to add custom endpoints. EL also would need to add custom methods if their semantics stems from original `eth_` calls. Not sure that the result worth complexity in this case I tend to agree with that analysis, but my resolution to that problem is to just favor the CL connecting to both the internal and the public API endpoints. This is the default option. Exposing `eth_` at the same endpoint is an attempt on improving UX by avoiding an extension of \"eth1\" config surface on CL side. If this is insecure in any sense or adds unequal complexity to EL implementations then we should leave two separate endpoints. At the moment, I personally don't see how it could be insecure or too complicated for EL It's worth noting that currently EL clients are exposing everything on a single endpoint. That's going to need to change but it does mean they already have to move `engine_` to the new endpoint. Wat? All of them are doing this? How did that come to pass? That is absolutely horrible from a security standpoint. Was this just something like \"we are doing a hackathon and it is easier to add methods to existing endpoint than add an endpoint and we want to be done by tomorrow at noon so whatever\"? The spec says that it MUST be exposed on a different port and suggests port numbers, https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#underlying-protocol. So, this basically means that implementations don't follow the spec in this regard. There's a fair few things that aren't yet following the spec. kintsugi is meant to require optimistic sync but it isn't implemented yet either from my understanding. We've been setting some very tight timelines so it's not particularly surprising there's a lot of TODO items yet. Why is the HTTP port different from the WebSocket port? WebSocket is designed *explicitly* so that it can be used on the same port as an HTTP server. `https://endpoint.com` will return a single resource. `wss://endpoint.com` will open a websocket. good point, I am wondering why it's different for JSON-RPC API 🤔 It's always been different. No idea why. <@!206016661470314496> Felix (whose Discord handle I can never remember) or <@!211091239112671234> would probably know the answer as I believe this was a Geth thing and all of the other clients copied it to encourage users to switch from Geth to their clients. Could have been an issue with the http server library used by Geth at the time, or perhaps the HTTP server they use doesn't support WS so they had to run two servers side by side (and thus bind to two ports). It is possible whatever the original reason was it no longer applies, in which case I would recommend using a single port for both for *new* API endpoints. <@!194432762315407360> ☝️ looking for input on these two tickets: https://github.com/ethereum/consensus-specs/issues/2732 https://github.com/ethereum/consensus-specs/issues/2735 I think that's it, yes. <@!493136661656502282> helped align that later on, so it's (afaik) possible to run both (or all three - graphql too) on the same port. ``` $ geth --dev --http --http.port 8545 --ws --ws.port 8545 2>&1 | grep \"enabled\\|started\" INFO [11-23|08:44:26.563] WebSocket enabled url=ws://127.0.0.1:8545 INFO [11-23|08:44:26.563] HTTP server started endpoint=127.0.0.1:8545 prefix= cors= vhosts=localhost ``` Yes ,we discussed this in greece. The decision was to open the EL on a separate port, and have it be authenticated. I don't 100% recall what form of authentication we decided to go with, possibly JWT? Why authenticated? Isn't the direction of the connection one in which something like TLS or local network would be good enough? I guess the trust relationship needs to go both ways. 🤔 So, ostensibly, the `private` api is never exposed, and geth rpc only binds to localhost. However, if you shodan the internet, you'll find lots of `8545` ports open, with `admin` and `private` rpc namespace exposed. People are fond of copy-pasting insecure examples. Throw everything and the kitchen sink into the commandline and hope that it works. With that in mind, it would be good to make it _really difficult_ to expose the `engine` api in an insecure way Should the second port be remove from the Engine API spec? Given that there is only a single expected user of an engine endpoint, it seems to be overkill to have authentication. I know that there are issues with users misconfiguring things, but requiring authentication in an attempt to allow misconfigured nodes seems like the wrong solution. will you have to exit to reap >32eth rewards post merge? maybe this is not defined at the current time? Not defined yet <@92308257393086464> as withdrawals will come in the fork after the merge, not the same one. > and logs the CL using `eth_getLogs` to get some data is an example of what I'm referring to. Since the spec doesn't say which logs or what range of logs or anything like that, that means the EL needs to support all possible log queries for all time to satisfy this somewhat hidden requirement, so for example it might suddenly break when EIP-4444 goes live. If instead there was an explicit `engine_getFooLogs` (I'm not 100% sure what the logs are used for so can't say what \"Foo\" should be) then maybe the logs in question could be explicitly kept even after EIP-4444 is approved). My point is that the CL having these implicit requirements for the EL eth_ namespace makes it even harder for us to change the behavior of the JSONRPC eth namespace, since now changes are _consensus breaking_ when in the past they were \"just\" DX issues. Currently, our operational design is to run one prysm wallet for multiple validators, upto 150 validators; how would we go about changing this with respect to the merge and execution engine? Can we run one execution engine per wallet rather than per validator? <dannyryan> Architecture is generally One validator client (VC) One beacon node (BN) One execution engine (EE) Your \"node\" is the joint effort of the BN and EE As with before you can attach any number of validators to a VC to talk to a node hmm... isn't that contradictory to https://discord.com/channels/595666850260713488/692062809701482577/912567504495317012? Ah no. I think the above was in regards to sharing an untrusted endpoint So using infura for this task will be bricked Regardless. My above statement is correct wrt how a staker can consider their mukti-validator setupd Sorry for any confusion Sorry if I'm misunderstanding, but just to confirm for our setup, this would look like: One prysm validator wallet process managing multiple validators One execution engine per wallet process X beacon nodes proportional to number of wallet processes Is that correct? <@!291925846556540928> or someone else? pre-thanks for the help! we run at the scale of ~10-100k validators, so tryna make sure we're running with the best recommendations VC <> BN <> EE VC (what you are calling a prysm wallet) can support N validators For every VC, you need a BN and EE OK awesome <@!291925846556540928>, that's great to hear! https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#load-balancing-and-advanced-configurations gave a slightly misleading lead, so wanted to confirm; we'll test this of course prior to merge, expect it to work smoothly, but just wanna have a headsup <dannyryan> The engine API is made for a BN to drive an EE. There isn’t a notion of what happens when an EE is driven by multiple BNs and so that is undefined. A BN could easily in theory drive multiple EEs <dannyryan> but all of this is unrelated to the validators",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You can have many execution engines talking to one consensus engine, but you cannot have many consensus engines talking to one execution engine.",
+      "createdAt": "2021-11-23T04:57:27.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's also documented in the Engine API spec, https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#load-balancing-and-advanced-configurations",
+      "createdAt": "2021-11-23T05:00:49.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am not sure if clients have enough granularity to be able to add a subset of methods from another namespace. Why extending a surface area for this interface doesn't feel good to you? Basically, CL utilizes a few methods to grab the head of the chain, a block at a follow distance, and logs. So, effectively the surface won't be extended that much",
+      "createdAt": "2021-11-23T05:05:19.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If you put the entire `eth_` namespace in the EL<=>CL API then the surface area would be extended a lot, just not *used* very much.",
+      "createdAt": "2021-11-23T05:10:06.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If all you need is block headers and logs under specific constrained scenarios it *may* make more sense to expose those specifically in the `engine_` namespace, and expose them in a way that exactly aligns with the needs of the CL.",
+      "createdAt": "2021-11-23T05:11:29.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "e.g., provide the ability to get logs for a specific block without getting the block body (if the body isn't needed).",
+      "createdAt": "2021-11-23T05:11:51.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It would need to change more code on CL as standard libraries like web3j use `eth_` namespace by default, this kind of change would require to add custom endpoints. EL also would need to add custom methods if their semantics stems from original `eth_` calls. Not sure that the result worth complexity in this case",
+      "createdAt": "2021-11-23T05:19:19.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I tend to agree with that analysis, but my resolution to that problem is to just favor the CL connecting to both the internal and the public API endpoints.",
+      "createdAt": "2021-11-23T05:20:14.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is the default option. Exposing `eth_` at the same endpoint is an attempt on improving UX by avoiding an extension of \"eth1\" config surface on CL side. If this is insecure in any sense or adds unequal complexity to EL implementations then we should leave two separate endpoints. At the moment, I personally don't see how it could be insecure or too complicated for EL",
+      "createdAt": "2021-11-23T05:28:12.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's worth noting that currently EL clients are exposing everything on a single endpoint. That's going to need to change but it does mean they already have to move `engine_` to the new endpoint.",
+      "createdAt": "2021-11-23T05:30:19.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Wat?",
+      "createdAt": "2021-11-23T05:34:43.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "All of them are doing this?  How did that come to pass?  That is absolutely horrible from a security standpoint.",
+      "createdAt": "2021-11-23T05:35:12.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Was this just something like \"we are doing a hackathon and it is easier to add methods to existing endpoint than add an endpoint and we want to be done by tomorrow at noon so whatever\"?",
+      "createdAt": "2021-11-23T05:35:57.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The spec says that it MUST be exposed on a different port and suggests port numbers, https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#underlying-protocol. So, this basically means that implementations don't follow the spec in this regard.",
+      "createdAt": "2021-11-23T05:40:01.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There's a fair few things that aren't yet following the spec.  kintsugi is meant to require optimistic sync but it isn't implemented yet either from my understanding.",
+      "createdAt": "2021-11-23T05:51:52.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We've been setting some very tight timelines so it's not particularly surprising there's a lot of TODO items yet.",
+      "createdAt": "2021-11-23T05:52:11.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why is the HTTP port different from the WebSocket port?",
+      "createdAt": "2021-11-23T06:10:50.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "WebSocket is designed *explicitly* so that it can be used on the same port as an HTTP server.",
+      "createdAt": "2021-11-23T06:11:10.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`https://endpoint.com` will return a single resource.\n`wss://endpoint.com` will open a websocket.",
+      "createdAt": "2021-11-23T06:12:02.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "good point, I am wondering why it's different for JSON-RPC API 🤔",
+      "createdAt": "2021-11-23T06:14:01.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's always been different. No idea why.",
+      "createdAt": "2021-11-23T06:16:36.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!206016661470314496> Felix (whose Discord handle I can never remember) or <@!211091239112671234> would probably know the answer as I believe this was a Geth thing and all of the other clients copied it to encourage users to switch from Geth to their clients.",
+      "createdAt": "2021-11-23T06:20:08.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Could have been an issue with the http server library used by Geth at the time, or perhaps the HTTP server they use doesn't support WS so they had to run two servers side by side (and thus bind to two ports).",
+      "createdAt": "2021-11-23T06:21:02.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is possible whatever the original reason was it no longer applies, in which case I would recommend using a single port for both for *new* API endpoints.",
+      "createdAt": "2021-11-23T06:21:23.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!194432762315407360> ☝️",
+      "createdAt": "2021-11-23T06:35:53.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "looking for input on these two tickets:\nhttps://github.com/ethereum/consensus-specs/issues/2732\nhttps://github.com/ethereum/consensus-specs/issues/2735",
+      "createdAt": "2021-11-23T06:38:39.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think that's it, yes. <@!493136661656502282> helped align that later on, so it's (afaik) possible to run both (or all three - graphql too) on the same port. \n```\n$ geth --dev --http --http.port 8545 --ws --ws.port 8545 2>&1 | grep \"enabled\\|started\"\nINFO [11-23|08:44:26.563] WebSocket enabled                        url=ws://127.0.0.1:8545\nINFO [11-23|08:44:26.563] HTTP server started                      endpoint=127.0.0.1:8545 prefix= cors= vhosts=localhost\n```",
+      "createdAt": "2021-11-23T07:45:21.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes ,we discussed this in greece. The decision was to open the EL on a separate port, and have it be authenticated. I don't 100% recall what form of authentication we decided to go with, possibly JWT?",
+      "createdAt": "2021-11-23T07:46:47.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why authenticated?  Isn't the direction of the connection one in which something like TLS or local network would be good enough?",
+      "createdAt": "2021-11-23T07:47:35.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess the trust relationship needs to go both ways.  🤔",
+      "createdAt": "2021-11-23T07:47:59.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So, ostensibly, the `private` api is never exposed, and geth rpc only binds to localhost. However, if you shodan the internet, you'll find lots of `8545` ports open, with `admin` and `private` rpc namespace exposed. People are fond of copy-pasting insecure examples. Throw everything and the kitchen sink into the commandline and hope that it works. With that in mind, it would be good to make it _really difficult_ to expose the `engine` api in an insecure way",
+      "createdAt": "2021-11-23T07:49:38.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Should the second port be remove from the Engine API spec?",
+      "createdAt": "2021-11-23T08:30:53.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Given that there is only a single expected user of an engine endpoint, it seems to be overkill to have authentication.  I know that there are issues with users misconfiguring things, but requiring authentication in an attempt to allow misconfigured nodes seems like the wrong solution.",
+      "createdAt": "2021-11-23T08:34:01.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x6c",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "will you have to exit to reap >32eth rewards post merge?",
+      "createdAt": "2021-11-23T15:24:54.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x6c",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "maybe this is not defined at the current time?",
+      "createdAt": "2021-11-23T15:25:04.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not defined yet <@92308257393086464> as withdrawals will come in the fork after the merge, not the same one.",
+      "createdAt": "2021-11-23T18:07:29.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> and logs\n\nthe CL using `eth_getLogs` to get some data is an example of what I'm referring to.  Since the spec doesn't say which logs or what range of logs or anything like that, that means the EL needs to support all possible log queries for all time to satisfy this somewhat hidden requirement, so for example it might suddenly break when EIP-4444 goes live.  If instead there was an explicit `engine_getFooLogs` (I'm not 100% sure what the logs are used for so can't say what \"Foo\" should be) then maybe the logs in question could be explicitly kept even after EIP-4444 is approved).  My point is that the CL having these implicit requirements for the EL eth_ namespace makes it even harder for us to change the behavior of the JSONRPC eth namespace, since now changes are _consensus breaking_ when in the past they were \"just\" DX issues.",
+      "createdAt": "2021-11-23T18:22:19.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ybhutgem",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, our operational design is to run one prysm wallet for multiple validators, upto 150 validators;  how would we go about changing this with respect to the merge and execution engine?  Can we run one execution engine per wallet rather than per validator?",
+      "createdAt": "2021-11-23T19:40:49.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> Architecture  is generally\nOne validator client (VC)\nOne beacon node (BN)\nOne execution engine (EE)\nYour \"node\" is the joint effort of the BN and EE\nAs with before you can attach any number of validators to a VC to talk to a node",
+      "createdAt": "2021-11-23T19:43:01.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ybhutgem",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm... isn't that contradictory to https://discord.com/channels/595666850260713488/692062809701482577/912567504495317012?",
+      "createdAt": "2021-11-23T19:47:15.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah no. I think the above was in regards to sharing an untrusted endpoint",
+      "createdAt": "2021-11-23T19:48:30.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So using infura for this task will be bricked",
+      "createdAt": "2021-11-23T19:48:44.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Regardless. My above statement is correct wrt how a staker can consider their mukti-validator setupd",
+      "createdAt": "2021-11-23T19:49:31.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry for any confusion",
+      "createdAt": "2021-11-23T19:49:46.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ybhutgem",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry if I'm misunderstanding, but just to confirm for our setup, this would look like:\nOne prysm validator wallet process managing multiple validators\nOne execution engine per wallet process\nX beacon nodes proportional to number of wallet processes\n\nIs that correct?",
+      "createdAt": "2021-11-23T19:51:25.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ybhutgem",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!291925846556540928> or someone else?  pre-thanks for the help!  we run at the scale of ~10-100k validators, so tryna make sure we're running with the best recommendations",
+      "createdAt": "2021-11-23T20:23:29.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "VC <> BN <> EE\n\nVC (what you are calling a prysm wallet) can support N validators \nFor every VC, you need a BN and EE",
+      "createdAt": "2021-11-23T20:33:41.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ybhutgem",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "OK awesome <@!291925846556540928>, that's great to hear!  https://github.com/ethereum/execution-apis/blob/main/src/engine/specification.md#load-balancing-and-advanced-configurations gave a slightly misleading lead, so wanted to confirm; we'll test this of course prior to merge, expect it to work smoothly, but just wanna have a headsup",
+      "createdAt": "2021-11-23T20:59:25.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> The engine API is made for a BN to drive an EE. There isn’t a notion of what happens when an EE is driven by multiple BNs and so that is undefined. A BN could easily in theory drive multiple EEs",
+      "createdAt": "2021-11-23T21:20:46.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dannyryan> but all of this is unrelated to the validators",
+      "createdAt": "2021-11-23T21:20:56.693000+00:00",
+      "attachments": []
+    }
+  ]
+}

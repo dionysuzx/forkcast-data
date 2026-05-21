@@ -1,0 +1,574 @@
+{
+  "schemaVersion": 1,
+  "channel": "typed-transactions",
+  "date": "2021-02-05",
+  "messageCount": 69,
+  "sourceHash": "048fdf6722eea32fafd2c6669c459bbf9d6c840f7b4cc2f97e4ffcdcf6609c28",
+  "searchText": "any idea why Geth would disonnect us after we send the GetBlockBodiesMessage? i think the only time geth disconnect is if it can't decode a message <@!489256758989029405> if you try connecting to me i can check my logs and see the disconnect reason `enode://ad67cc27a6e0049948b8cb38a62039ce79371521743e656e38fc7029d0acebcddac0150718e1f577b5cc370aabf28763b050ae831c77ad54e2a0288c1ee13c91@quilt.link:30307` ooh, thanks, let me try now just let me know the timestamp of the disconnect and i'll check yeah, will send you the trace in a moment already got a disconnect 00:41:41.410971 DISCONNECT Remote ClientQuitting channel disconnected sorry, could you try once more? i needed to increase my log level sure 00:45:16.341322 DISCONNECT Remote ClientQuitting channel disconnected 00:45:15.780501 <<< p2p Hello(Nethermind/v1.10.17-13-736553014-20210205/X64-macOS/5.0.1-servicing.20575.16, eth62, eth63, eth64, eth65, wit0) 00:45:15.780833 >>> p2p Hello(Geth/v1.9.26-unstable-03b652e5-20210129/linux-amd64/go1.15.6, eth64, eth65) 00:45:15.780992 <<< eth65 eth.65 chain: 133519467574835 | diff: 1 | best: 0x374f07...14101a | genesis: 0x374f07...14101a | fork: d868ad56 0 00:45:15.812318 >>> eth65 eth.65 chain: 133519467574835 | diff: 72501 | best: 0x01bc55...329596 | genesis: 0x374f07...14101a | fork: d868ad56 0 00:45:15.812394 adding node to refresh queue 00:45:15.812556 <<< eth65 GetBlockHeadersMessage(0|0x01bc55951b31ca00ba96d5af70d68a943ec2295e273d4eb4d103cbb171329596, 1) 00:45:15.844464 >>> eth65 BlockHeadersMessage(1) 00:45:16.237371 <<< eth65 GetBlockHeadersMessage(0|, 192) 00:45:16.307843 >>> eth65 BlockHeadersMessage(192) 00:45:16.308398 <<< eth65 GetBlockBodiesMessage(4) 00:45:16.341322 DISCONNECT Remote ClientQuitting channel disconnected messages sent by you are >>> sent by us are <<< so you respond with headers and then we asked for bodies and this does not come back this is what's showing up for me as the disconnect reason: ``` DEBUG[02-05|01:44:45.713] Message handling failed in `eth` id=a26bdd56 bbd54ff1 conn=inbound err=EOF ``` i think EOF usually means it was trying to decode the message, but reached EOF before completing the decode, but let me see :0 amazing you think it is more likely the frame or the RLP serializer? i would guess the serializer, but i'm trying to check where this error bubbles up from i take that back, i think it reached EOF trying to read the frame hmm actually i can't tell between the two, would need to add some more info to the log to tell what would help you the most, our frame with macs or just the payload? SENDING Nethermind.Network.P2P.Subprotocols.Eth.V62.GetBlockBodiesMessage 158601f085f884a0c7ece0d6e40a7007 4d02a98515d93a2f3ca335c33aca63a7 f75e952e7f35cae2a0da597479bfc052 ce18fe5aa53fca3a20e7a3bdae33883c 7129c2e89ab0bcc4fea0b9d10ad1627e cdb153d857e5f71b0f6fc7d8b2f1c0b1 74673a1d80ae3a7cf133a0aab40151d6 f461753740dd40ca56b2746da428c677 f483bfbacc4671695273cb0000000000 0s are padding at the end a0 is where each of the hashes starts a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2 a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fe is the long string your payload? yes not sure about the start of it yet 1586 okay, i can't seem to decode it with rlp ``` rlpdump --hex 158601f085f884a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fea0b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133a0aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb0000000000 15 01f085f884a0 [ rlp: element is larger than containing list ``` it is not RLP it starts later, let me fin the beginning oh i see ``` rlpdump --hex f884a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fea0b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133a0aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb [ c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2, da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fe, b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133, aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb, ] ``` this looks like it yeah, so this message has it not sure about this: 158601f085 was there any change in framing / serialization in this version of Geth? (I assume it is us but just in case, I ask) it can be: 1) framing 2)snappy 3) rlp i don't believe there was but i'm not familiar enough with the rlpx impl to determine what's going wrong if the error is happening there 15 is the packet type I think not sure about this yet: 8601f085 0x15 is 21 which is adaptive id 16(p2p) +5(eth62.getblockbodies) then 0x86 is 134 which is content length then 0x01 which length of length (1) this is snappy: 01f085 header for the snappy message all looks good when sending ok, interesting you are actually sending bodies back our logger just not very good interesting that you found in your logs EOF might be something else, unrelated all good I think <@!211091239112671234>, <@!213672586264051717> just to sync on jsonrpc, what field did you use for access list tx and receipt. For type i can see it as \"type\":0, \"type\":1 and for access list is \"accessList\", for field inside access list \"address\" and \"storageKeys\"? Yes, looks right. See example here: https://github.com/ethereum/go-ethereum/pull/21502#issuecomment-758659399 So it's all good then? Ping again if we need to investigate something more But are we changing the JSON-RPC object schemas to add information about typed transactions, or not yet? I expected this to be in a future EIP It's not changing for legacy txs... but yes, I see it as a given that we need to extend the json-rpc format to convey the new information",
+  "excerpts": [
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "any idea why Geth would disonnect us after we send the GetBlockBodiesMessage?",
+      "createdAt": "2021-02-05T00:32:41.802000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "7e0c3d7d2d2bb9caba96484501c0ae3ccba56c1062c081742ced7d7a698a2603"
+        }
+      ]
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i think the only time geth disconnect is if it can't decode a message",
+      "createdAt": "2021-02-05T00:36:30.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> if you try connecting to me i can check my logs and see the disconnect reason",
+      "createdAt": "2021-02-05T00:39:31.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`enode://ad67cc27a6e0049948b8cb38a62039ce79371521743e656e38fc7029d0acebcddac0150718e1f577b5cc370aabf28763b050ae831c77ad54e2a0288c1ee13c91@quilt.link:30307`",
+      "createdAt": "2021-02-05T00:39:37.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ooh, thanks, let me try now",
+      "createdAt": "2021-02-05T00:40:24.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "just let me know the timestamp of the disconnect and i'll check",
+      "createdAt": "2021-02-05T00:40:56.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah, will send you the trace in a moment",
+      "createdAt": "2021-02-05T00:41:33.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "already got a disconnect",
+      "createdAt": "2021-02-05T00:41:36.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2021-02-05T00:42:34.412000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "message.txt",
+          "content": "a3bf9bd561d9a4a8510a3f018158c247a91c2dc02ef7a6ab008d2548e52652d9"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "00:41:41.410971 DISCONNECT Remote ClientQuitting channel disconnected",
+      "createdAt": "2021-02-05T00:42:57.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sorry, could you try once more? i needed to increase my log level",
+      "createdAt": "2021-02-05T00:43:43.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sure",
+      "createdAt": "2021-02-05T00:43:52.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "00:45:16.341322 DISCONNECT Remote ClientQuitting channel disconnected",
+      "createdAt": "2021-02-05T00:46:43.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "00:45:15.780501 <<< p2p Hello(Nethermind/v1.10.17-13-736553014-20210205/X64-macOS/5.0.1-servicing.20575.16, eth62, eth63, eth64, eth65, wit0)\n  00:45:15.780833 >>> p2p Hello(Geth/v1.9.26-unstable-03b652e5-20210129/linux-amd64/go1.15.6, eth64, eth65)\n  00:45:15.780992 <<< eth65 eth.65 chain: 133519467574835 | diff: 1 | best: 0x374f07...14101a | genesis: 0x374f07...14101a | fork: d868ad56 0\n  00:45:15.812318 >>> eth65 eth.65 chain: 133519467574835 | diff: 72501 | best: 0x01bc55...329596 | genesis: 0x374f07...14101a | fork: d868ad56 0\n  00:45:15.812394 adding node to refresh queue\n  00:45:15.812556 <<< eth65 GetBlockHeadersMessage(0|0x01bc55951b31ca00ba96d5af70d68a943ec2295e273d4eb4d103cbb171329596, 1)\n  00:45:15.844464 >>> eth65 BlockHeadersMessage(1)\n  00:45:16.237371 <<< eth65 GetBlockHeadersMessage(0|, 192)\n  00:45:16.307843 >>> eth65 BlockHeadersMessage(192)\n  00:45:16.308398 <<< eth65 GetBlockBodiesMessage(4)\n  00:45:16.341322 DISCONNECT Remote ClientQuitting channel disconnected",
+      "createdAt": "2021-02-05T00:46:58.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "messages sent by you are >>>",
+      "createdAt": "2021-02-05T00:47:13.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sent by us are <<<",
+      "createdAt": "2021-02-05T00:47:17.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so you respond with headers",
+      "createdAt": "2021-02-05T00:47:26.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and then we asked for bodies",
+      "createdAt": "2021-02-05T00:47:30.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and this does not come back",
+      "createdAt": "2021-02-05T00:47:34.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this is what's showing up for me as the disconnect reason:\n```\nDEBUG[02-05|01:44:45.713] Message handling failed in `eth`         id=a26bdd56\nbbd54ff1 conn=inbound err=EOF\n```\ni think EOF usually means it was trying to decode the message, but reached EOF before completing the decode, but let me see",
+      "createdAt": "2021-02-05T00:48:54.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": ":0",
+      "createdAt": "2021-02-05T00:49:15.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "amazing",
+      "createdAt": "2021-02-05T00:49:23.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you think it is more likely the frame or the RLP serializer?",
+      "createdAt": "2021-02-05T00:49:39.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i would guess the serializer, but i'm trying to check where this error bubbles up from",
+      "createdAt": "2021-02-05T00:50:05.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i take that back, i think it reached EOF trying to read the frame",
+      "createdAt": "2021-02-05T00:51:55.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmm actually i can't tell between the two, would need to add some more info to the log to tell",
+      "createdAt": "2021-02-05T00:53:50.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "what would help you the most, our frame with macs or just the payload?",
+      "createdAt": "2021-02-05T00:56:27.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "SENDING Nethermind.Network.P2P.Subprotocols.Eth.V62.GetBlockBodiesMessage\n158601f085f884a0c7ece0d6e40a7007\n4d02a98515d93a2f3ca335c33aca63a7\nf75e952e7f35cae2a0da597479bfc052\nce18fe5aa53fca3a20e7a3bdae33883c\n7129c2e89ab0bcc4fea0b9d10ad1627e\ncdb153d857e5f71b0f6fc7d8b2f1c0b1\n74673a1d80ae3a7cf133a0aab40151d6\nf461753740dd40ca56b2746da428c677\nf483bfbacc4671695273cb0000000000",
+      "createdAt": "2021-02-05T00:58:41.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "0s are padding at the end",
+      "createdAt": "2021-02-05T00:58:52.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "a0 is where each of the hashes starts",
+      "createdAt": "2021-02-05T00:59:52.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2",
+      "createdAt": "2021-02-05T01:00:04.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fe",
+      "createdAt": "2021-02-05T01:01:01.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "is the long string your payload?",
+      "createdAt": "2021-02-05T01:01:41.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2021-02-05T01:01:54.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "not sure about the start of it yet",
+      "createdAt": "2021-02-05T01:02:07.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "1586",
+      "createdAt": "2021-02-05T01:02:10.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "okay, i can't seem to decode it with rlp",
+      "createdAt": "2021-02-05T01:02:18.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```\nrlpdump --hex 158601f085f884a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fea0b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133a0aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb0000000000\n15\n01f085f884a0\n[\nrlp: element is larger than containing list\n```",
+      "createdAt": "2021-02-05T01:02:32.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is not RLP",
+      "createdAt": "2021-02-05T01:02:38.769000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it starts later, let me fin the beginning",
+      "createdAt": "2021-02-05T01:02:45.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "oh i see",
+      "createdAt": "2021-02-05T01:02:51.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```\nrlpdump --hex f884a0c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2a0da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fea0b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133a0aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb\n[\n  c7ece0d6e40a70074d02a98515d93a2f3ca335c33aca63a7f75e952e7f35cae2,\n  da597479bfc052ce18fe5aa53fca3a20e7a3bdae33883c7129c2e89ab0bcc4fe,\n  b9d10ad1627ecdb153d857e5f71b0f6fc7d8b2f1c0b174673a1d80ae3a7cf133,\n  aab40151d6f461753740dd40ca56b2746da428c677f483bfbacc4671695273cb,\n]\n```",
+      "createdAt": "2021-02-05T01:03:16.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this looks like it",
+      "createdAt": "2021-02-05T01:03:18.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah, so this message has it",
+      "createdAt": "2021-02-05T01:03:56.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "not sure about this: 158601f085",
+      "createdAt": "2021-02-05T01:04:11.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "was there any change in framing / serialization in this version of Geth?",
+      "createdAt": "2021-02-05T01:08:29.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(I assume it is us but just in case, I ask)",
+      "createdAt": "2021-02-05T01:08:37.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it can be: 1) framing 2)snappy 3) rlp",
+      "createdAt": "2021-02-05T01:09:01.575000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i don't believe there was",
+      "createdAt": "2021-02-05T01:09:02.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but i'm not familiar enough with the rlpx impl to determine what's going wrong if the error is happening there",
+      "createdAt": "2021-02-05T01:09:42.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "15 is the packet type I think",
+      "createdAt": "2021-02-05T01:10:20.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "not sure about this yet: 8601f085",
+      "createdAt": "2021-02-05T01:10:50.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "0x15 is 21 which is adaptive id 16(p2p) +5(eth62.getblockbodies)",
+      "createdAt": "2021-02-05T01:17:57.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "then 0x86 is 134 which is content length",
+      "createdAt": "2021-02-05T01:18:10.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "then 0x01 which length of length (1)",
+      "createdAt": "2021-02-05T01:22:44.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this is snappy: 01f085",
+      "createdAt": "2021-02-05T01:51:18.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "header for the snappy message",
+      "createdAt": "2021-02-05T01:51:29.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "all looks good when sending",
+      "createdAt": "2021-02-05T01:51:46.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, interesting",
+      "createdAt": "2021-02-05T01:56:45.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you are actually sending bodies back",
+      "createdAt": "2021-02-05T01:56:50.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "our logger just not very good",
+      "createdAt": "2021-02-05T01:56:55.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "interesting that you found in your logs EOF",
+      "createdAt": "2021-02-05T01:57:04.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "might be something else, unrelated",
+      "createdAt": "2021-02-05T01:57:16.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "all good I think",
+      "createdAt": "2021-02-05T04:38:41.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!211091239112671234>, <@!213672586264051717>  just to sync on jsonrpc, what field did you use for access list tx and receipt. For type i can see it as \"type\":0, \"type\":1 and for access list is \"accessList\", for field inside access list \"address\" and \"storageKeys\"?",
+      "createdAt": "2021-02-05T07:59:02.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, looks right. See example here: https://github.com/ethereum/go-ethereum/pull/21502#issuecomment-758659399",
+      "createdAt": "2021-02-05T08:03:29.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So it's all good then? Ping again if we need to investigate something more",
+      "createdAt": "2021-02-05T08:04:12.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "adria0",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But are we changing the JSON-RPC object schemas to add information about typed transactions, or not yet? I expected this to be in a future EIP",
+      "createdAt": "2021-02-05T08:27:03.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's not changing for legacy txs... but yes, I see it as a given that we need to extend the json-rpc format to convey the new information",
+      "createdAt": "2021-02-05T08:39:07.634000+00:00",
+      "attachments": []
+    }
+  ]
+}

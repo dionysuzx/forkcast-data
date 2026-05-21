@@ -1,0 +1,336 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-05-17",
+  "messageCount": 40,
+  "sourceHash": "8db347beb12d962793d99b7e1433fcdc6ed190f871b1b3219549f2294050d922",
+  "searchText": "<@&836981603216654336> I think I split baikal I submitted a contract creation which used `0xef` ``` eth.sendRawTransaction(\"0x02f85c82066a0b0110830186a080808b61efef6000526010601ff3c080a07c2ba5a05122aad439dcc1f51ff20800a2ccee2fd9bc42f7317e6d8dd426ecf5a05a7e2f82c02d0eec42266e8c6bb66bc0a94c8b583c2d388dae11253a57df3fbe\") ``` Bytecode: ``` 0x61efef6000526010601ff3 ``` Operations: ``` PUSH2 0xefef, PUSH1 0x00, MSTORE, PUSH1 0x10, PUSH1 0x1f, RETURN ``` ``` INFO [05-17|13:38:14.509] Submitted contract creation hash=0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078 from=0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192 nonce=11 contract=0x9036996E54D0aE6d01f140A5204DA54BA6d35f99 value=0 ``` ``` ERROR[05-17|13:39:16.388] ########## BAD BLOCK ######### Chain config: {ChainID: 1642 Homestead: 0 DAO: <nil> DAOSupport: true EIP150: 0 EIP155: 0 EIP158: 0 Byzantium: 0 Constantinople: 0 Petersburg: 0 Istanbul: 0, Muir Glacier: <nil>, Berlin: 0, London: 500, Engine: clique} Number: 14528 Hash: 0xf2a0971bbaa3aa4ee25a158ba25a6224c8b93941daafdc00ea1dbc5b4e7db2fb 0: cumulative: 100000 gas: 100000 contract: 0x9036996E54D0aE6d01f140A5204DA54BA6d35f99 status: 0 tx: 0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078 logs: [] bloom: 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 state: Error: invalid gas used (remote: 56385 local: 100000) ############################## ``` For some reason, the chain is still progressing. It almost looks like one of the sealers keep minting a bad block. It should be left behind in the dust, but it keeps trying to build it again on top of the canon blocks. Which is very odd ok I will check that on Besu I'm checking it on Nethermind The sealer is `0xA7148e784fe95a7A750335F8b9572EE28D72e765` -- so it's Nethermind I don't understand how this can happen. If my tx was included in the canon chain (which it should be), then the nethermind sealer should reject the canon chain. So it seems like the tx hasn't been included in hte canon chain at all .. And only the nethermind node tries to include it.. but does so in a way which the others reject Here it is (not included in a block yet) ``` eth.getTransaction(\"0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078\") { accessList: [], blockHash: null, blockNumber: null, chainId: \"0x66a\", feeCap: \"0x10\", from: \"0x8a8eafb1cf62bfbeb1741769dae1a9dd47996192\", gas: 100000, gasPrice: 0, hash: \"0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078\", input: \"0x61efef6000526010601ff3\", nonce: 11, r: \"0x7c2ba5a05122aad439dcc1f51ff20800a2ccee2fd9bc42f7317e6d8dd426ecf5\", s: \"0x5a7e2f82c02d0eec42266e8c6bb66bc0a94c8b583c2d388dae11253a57df3fbe\", tip: \"0x1\", to: null, transactionIndex: null, type: \"0x2\", v: \"0x0\", value: 0 } ``` <@!543900561460822016> any idea why the tx is stuck in `pending` and does not make it into a block? Ok, I attached to the sealer IPC, and submitted the tx directly to the node. When I did that, it was finally included in a block `eth.getBlock(\"14629\")`, to be precise I also tried to send the transaction to my Besu node at the same time. but maybe it's your submit that included the transaction I am not sure which one it got included on. But at least it's on the canon chain now (actually, two of them with nonce 11 and 12). So now the Nethermind node should be left behind, and not keep trying to build on top of the canon chain Yes: https://baikal.ethdevops.io/ -- as expected Is this the code that the nethermind sealer is running on? https://github.com/NethermindEth/nethermind/pull/3059/files#r633493333 -- possible error? Yes, sorry for that, and thx a lot <@!211091239112671234> I'll fix it soon Short update: EthereumJS is now also syncing `baikal`, we are now up to 14682 Here is a small benchmark for the OpenEthereum tx pool: https://gist.github.com/sunce86/7755a6360ef4885146163c218df29ccb OE will go with the effective_gas_price option. would it have to do with the `0` gas price? i was having some 1559 txs not get mined with very low gas payment 0 gas price cannot get mined, base fee floor is 7 I just realized that this also means that we can't send any txns in the future anymore of an account which has no funds 🤔 Which is good I guess Oh yeah, that kind of makes sense.. I guess.. but there's a `tip` and a `feeCap` higher than the basefee (I think).. also, I got a few txs in, but then it just refused to broadcast number `11` for some reason To clarify: it eventually _did_ get included when I submitted it directy to the sealer via RPC sendRawTransaction <@!211091239112671234> oh yes i see - in that case i'm pretty sure the reason is that the feeCap/tip is just too low. I submitted some similar txs last week and had the same issue Is this block good block or bad block? A bit confused now, since i am trying to sync up but get bad_block on #14629 Seems this block is on the chain and my verification denies it because of eip 3541 rule There are a flurry of bad blocks mined by Nethermind. Can provide the hash later Where is your 3541 PR? Seems like 3541 isn't implemented yet in OE? We still don't have official PR, I have changes on my local machine... ```let res = self.create(params, &mut substate, &mut tracer, &mut vm_tracer); match &res { Ok(result) => { if result.return_data.len() > 0 && result.return_data[0] == 0xEF && self.info.number >= 500 { return Err(ExecutionError::Internal(\"eip3541 failed\".into())); } }, _ => (), }``` Right.. that error should consume all the gas and not deploy anything. That's what happens on that block, afaik",
+  "excerpts": [
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@&836981603216654336> I think I split baikal",
+      "createdAt": "2021-05-17T11:39:46.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I submitted a contract creation which used `0xef`",
+      "createdAt": "2021-05-17T11:41:08.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\neth.sendRawTransaction(\"0x02f85c82066a0b0110830186a080808b61efef6000526010601ff3c080a07c2ba5a05122aad439dcc1f51ff20800a2ccee2fd9bc42f7317e6d8dd426ecf5a05a7e2f82c02d0eec42266e8c6bb66bc0a94c8b583c2d388dae11253a57df3fbe\")\n```\nBytecode: \n```\n0x61efef6000526010601ff3\n```\nOperations: \n```\nPUSH2 0xefef, PUSH1 0x00, MSTORE, PUSH1 0x10, PUSH1 0x1f, RETURN\n```",
+      "createdAt": "2021-05-17T11:41:50.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\nINFO [05-17|13:38:14.509] Submitted contract creation              hash=0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078 from=0x8A8eAFb1cf62BfBeb1741769DAE1a9dd47996192 nonce=11 contract=0x9036996E54D0aE6d01f140A5204DA54BA6d35f99 value=0\n```",
+      "createdAt": "2021-05-17T11:42:14.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\nERROR[05-17|13:39:16.388] \n########## BAD BLOCK #########\nChain config: {ChainID: 1642 Homestead: 0 DAO: <nil> DAOSupport: true EIP150: 0 EIP155: 0 EIP158: 0 Byzantium: 0 Constantinople: 0 Petersburg: 0 Istanbul: 0, Muir Glacier: <nil>, Berlin: 0, London: 500, Engine: clique}\n\nNumber: 14528\nHash: 0xf2a0971bbaa3aa4ee25a158ba25a6224c8b93941daafdc00ea1dbc5b4e7db2fb\n     0: cumulative: 100000 gas: 100000 contract: 0x9036996E54D0aE6d01f140A5204DA54BA6d35f99 status: 0 tx: 0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078 logs: [] bloom: 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 state: \n\n\nError: invalid gas used (remote: 56385 local: 100000)\n##############################\n```",
+      "createdAt": "2021-05-17T11:42:32.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For some reason, the chain is still progressing. It almost looks like one of the sealers keep minting a bad block. It should be left behind in the dust, but it keeps trying to build it again on top of the canon blocks. Which is very odd",
+      "createdAt": "2021-05-17T11:47:46.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok I will check that on Besu",
+      "createdAt": "2021-05-17T11:51:56.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm checking it on Nethermind",
+      "createdAt": "2021-05-17T11:52:53.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The sealer is `0xA7148e784fe95a7A750335F8b9572EE28D72e765` -- so it's Nethermind",
+      "createdAt": "2021-05-17T11:56:42.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't understand how this can happen. If my tx was included in the canon chain (which it should be), then the nethermind sealer should reject the canon chain. So it seems like the tx hasn't been included in hte canon chain at all",
+      "createdAt": "2021-05-17T12:00:13.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": ".. And only the nethermind node tries to include it.. but does so in a way which the others reject",
+      "createdAt": "2021-05-17T12:00:40.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Here it is  (not included in a block yet)\n```\neth.getTransaction(\"0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078\")\n{\n  accessList: [],\n  blockHash: null,\n  blockNumber: null,\n  chainId: \"0x66a\",\n  feeCap: \"0x10\",\n  from: \"0x8a8eafb1cf62bfbeb1741769dae1a9dd47996192\",\n  gas: 100000,\n  gasPrice: 0,\n  hash: \"0x3d5bef513ec8168ecb95ca86b601796e6413644912abf961791e3b20ee0d9078\",\n  input: \"0x61efef6000526010601ff3\",\n  nonce: 11,\n  r: \"0x7c2ba5a05122aad439dcc1f51ff20800a2ccee2fd9bc42f7317e6d8dd426ecf5\",\n  s: \"0x5a7e2f82c02d0eec42266e8c6bb66bc0a94c8b583c2d388dae11253a57df3fbe\",\n  tip: \"0x1\",\n  to: null,\n  transactionIndex: null,\n  type: \"0x2\",\n  v: \"0x0\",\n  value: 0\n}\n```",
+      "createdAt": "2021-05-17T12:02:13.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!543900561460822016> any idea why the tx is stuck in `pending` and does not make it into a block?",
+      "createdAt": "2021-05-17T12:12:02.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok, I attached to the sealer IPC, and submitted the tx directly to the node. When I did that, it was finally included in a block",
+      "createdAt": "2021-05-17T12:31:01.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`eth.getBlock(\"14629\")`, to be precise",
+      "createdAt": "2021-05-17T12:31:15.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I also tried to send the transaction to my Besu node at the same time.",
+      "createdAt": "2021-05-17T12:32:57.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but maybe it's your submit that included the transaction",
+      "createdAt": "2021-05-17T12:33:28.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am not sure which one it got included on. But at least it's on the canon chain now (actually, two of them with nonce 11 and 12). So now the Nethermind node should be left behind, and not keep trying to build on top of the canon chain",
+      "createdAt": "2021-05-17T12:34:29.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes: https://baikal.ethdevops.io/  -- as expected",
+      "createdAt": "2021-05-17T12:35:02.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "",
+      "createdAt": "2021-05-17T12:35:32.475000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2021-05-17_Ethereum_Network_Status.png",
+          "content": "a375486faaa80326829910114fa2efa185f28e470d954e89b89f5fb4bc7aedaa"
+        }
+      ]
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is this the code that the nethermind sealer is running on? https://github.com/NethermindEth/nethermind/pull/3059/files#r633493333 -- possible error?",
+      "createdAt": "2021-05-17T12:39:45.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, sorry for that, and thx a lot <@!211091239112671234> I'll fix it soon",
+      "createdAt": "2021-05-17T12:48:56.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holgerd77",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Short update: EthereumJS is now also syncing `baikal`, we are now up to 14682",
+      "createdAt": "2021-05-17T12:57:34.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Here is a small benchmark for the OpenEthereum tx pool: https://gist.github.com/sunce86/7755a6360ef4885146163c218df29ccb\nOE will go with the effective_gas_price option.",
+      "createdAt": "2021-05-17T13:06:14.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "would it have to do with the `0` gas price? i was having some 1559 txs not get mined with very low gas payment",
+      "createdAt": "2021-05-17T13:32:38.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "0 gas price cannot get mined, base fee floor is 7",
+      "createdAt": "2021-05-17T13:34:10.975000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just realized that this also means that we can't send any txns in the future anymore of an account which has no funds 🤔  Which is good I guess",
+      "createdAt": "2021-05-17T13:34:50.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh yeah, that kind of makes sense.. I guess.. but there's a `tip` and a `feeCap` higher than the basefee (I think).. also, I got a few txs in, but then it just refused to broadcast number `11` for some reason",
+      "createdAt": "2021-05-17T13:37:33.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "To clarify: it eventually _did_ get included when I submitted it directy to the sealer via RPC sendRawTransaction",
+      "createdAt": "2021-05-17T13:38:19.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!211091239112671234> oh yes i see - in that case i'm pretty sure the reason is that the feeCap/tip is just too low. I submitted some similar txs last week and had the same issue",
+      "createdAt": "2021-05-17T13:42:35.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is this block good block or bad block? A bit confused now, since i am trying to sync up but get bad_block on #14629",
+      "createdAt": "2021-05-17T17:13:40+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Seems this block is on the chain and my verification denies it because of eip 3541 rule",
+      "createdAt": "2021-05-17T17:14:41.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There are a flurry of bad blocks mined by Nethermind.",
+      "createdAt": "2021-05-17T17:36:37.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Can provide the hash later",
+      "createdAt": "2021-05-17T17:37:03.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Where is your 3541 PR?",
+      "createdAt": "2021-05-17T17:37:35.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Seems like 3541 isn't implemented yet in OE?",
+      "createdAt": "2021-05-17T17:40:05.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We still don't have official PR, I have changes on my local machine...",
+      "createdAt": "2021-05-17T18:11:08.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sunce86.",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```let res = self.create(params, &mut substate, &mut tracer, &mut vm_tracer);\nmatch &res {\n   Ok(result) => {\n      if result.return_data.len() > 0 && result.return_data[0] == 0xEF && self.info.number >= 500 {\n         return Err(ExecutionError::Internal(\"eip3541 failed\".into()));\n      }\n   },\n   _ => (),\n}```",
+      "createdAt": "2021-05-17T18:15:51.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right.. that error should consume all the gas and not deploy anything.",
+      "createdAt": "2021-05-17T18:51:59.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That's what happens on that block, afaik",
+      "createdAt": "2021-05-17T18:52:19.544000+00:00",
+      "attachments": []
+    }
+  ]
+}

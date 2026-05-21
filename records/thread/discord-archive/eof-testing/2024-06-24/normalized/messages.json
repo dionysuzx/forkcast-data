@@ -1,0 +1,422 @@
+{
+  "schemaVersion": 1,
+  "channel": "eof-testing",
+  "date": "2024-06-24",
+  "messageCount": 50,
+  "sourceHash": "98f237c50060d9ab31341aa2c71acf59b6d2f09347e63666711fefefe794fccd",
+  "searchText": "I'm getting a bad state root on all tests, even those where no new contract is deployed or anything is sstored. I think it may have something to do with Prague. e.g. ``` {\"pc\":0,\"op\":227,\"gas\":\"0x984468\",\"gasCost\":\"0x5\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"CALLF\"} {\"pc\":0,\"op\":229,\"gas\":\"0x984463\",\"gasCost\":\"0x5\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"JUMPF\"} {\"pc\":1,\"op\":0,\"gas\":\"0x98445e\",\"gasCost\":\"0x0\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"STOP\"} {\"output\":\"\",\"gasUsed\":\"0xa\"} {\"stateRoot\": \"0x124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e\"} [ { \"name\": \"tests/prague/eip7692_eof_v1/eip6206_jumpf/test_jumpf_execution.py::test_jumpf_backward[fork_CancunEIP7692-state_test]\", \"pass\": false, \"stateRoot\": \"0x124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e\", \"fork\": \"Prague\", \"error\": \"post state root mismatch: got 124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e, want 609970c0fcc7f76a0f97d4e07c6c904896c12e15352c3c46e50bed4ca3a2a3bc\" } ] ``` I believe we're never calling ProcessParentBlockHash in statetests and I wonder if other clients do it differently? And if so, which value they use Are you guys deploying the history storage code in state tests? <@425274498732916736> This is my state dump cc <@403707149043105803> <@360491619402776577> 1. I don't know what `ProcessParentBlockHash` is so probably I'm not doing it. 2. Can it be just the gas difference? 3. The same tests should be in Blockchain form where you have the expected post state. It writes the parent block hash to the database Its https://eips.ethereum.org/EIPS/eip-7709 Ok, so this may be it. These tests use config \"Shanghai+EOF\" so no other Prague EIPs. Ah the beaconRootsAddress is set in the blockchain tests, but not in my output Thanks for the tip with the blockchain tests! As I said, we should have single test format 😉 BTW, the 7709 still (?) don't have the system part... will it get it? I really don't understand whats happening. In the blockchain test the following is set: ``` \"0x000f3df6d732807ef1319fb7b8bb8522d0beac02\": { \"nonce\": \"0x01\", \"balance\": \"0x00\", \"code\": \"0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500\", \"storage\": { \"0x03e8\": \"0x03e8\" } }, ``` Which is the 4788 beacon root contract with the correct code, but the storage is set to 1000... why? ParentBeaconBlock is 0x0 both for this and the genesis block <@892053833121923094> When I try to run the blocktest, I error even earlier: ``` cution/jumpf_backward.json INFO [06-24|16:21:25.403] Persisted trie from memory database nodes=4 size=573.00B time=\"5.8µs\" gcnodes=0 gcsize=0.00B gctime=0s livenodes=0 livesize=0.00B test tests/prague/eip7692_eof_v1/eip6206_jumpf/test_jumpf_execution.py::test_jumpf_backward[fork_CancunEIP7692-blockchain_test]: genesis block hash doesn't match test: computed=8c2428746f69, test=b58a08819f02 ``` Ahh I think the genesis error is because evmone doesn't have the empty Requests Hash EOF tests are still on top of Cancun But that still doesn't explain the weird thing stored in beaconroot contract Although, it would be relatively simple to enable on top of Prague by just adding the empty requests hash on top of Cancun's output I think Timestamp of the previous block I think, if we don't specify anything to the `parentBeaconBlockRoot` field, it stores zero, but the timestamp is non-zero regardless Ahh now I get it Besu's T8n does in prague, evmone doesn't. We get different state roots for the state tests, That opens the question, should state-tests's update block hash? Won't they need a parentHash field in the env section now? And should we rely on a \"standard\" parent and beacon root unless we are explicitly testing those features? The old testing code used the hashes of the block numbers for BLOCKHASH. I'm still getting a state root mismatch even though it _looks_ the same too me It does work with the blockchain tests now The state test doesn't work yet for me though The sate-test is missing the beacon root in it's hash state: 0x609970c0fcc7f76a0f97d4e07c6c904896c12e15352c3c46e50bed4ca3a2a3bc ``` { \"0x0000000000000000000000000000000000001000\": { \"code\": \"0xef000101000c020003000a0001000304000000008000020000000000000000e3000261201560015500e4e50001\", \"storage\": { \"0x1\": \"0x2015\" }, \"balance\": \"0x0\", \"nonce\": \"0x1\" }, \"0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba\": { \"balance\": \"0x1f97d\" }, \"0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b\": { \"balance\": \"0x3635c9adc5de996b0a\", \"nonce\": \"0x1\" }, } ``` So for cancun state-tests * Should we add beacon root? (this is after the TX) and for Prague state-tests * Should we add block-hash? (this is before the TX, and may impact BLOCKHASH operation) Or for both, do we do neither operation as state-tests are testing a single sub-block transition. Blockhash needs to be set up in prestate or the parents are zero, and only changes from the TX are considered. That cancun tests are not adding beacon root leads me to the \"no system tx\" path. <@892053833121923094> ^^^ - What should a T8n and state tests tool that properly handles Prague do? <@425343240212971521> has added an option to export evmone's EOF validation tests: https://github.com/ethereum/execution-spec-tests/pull/646 Is this something EEST want's to receive? We need this to generate the blockchain tests, sadly, if we were only generating state tests with t8n then it would be ok, but I think the blockchain tests are just as important. Ideally we should have two different tools for each operation. If t8n doesn't do both of these operations for us, then all blockchain tests will be incorrect We have no way of appending something into the state before or after execution of the transactions by the t8n To clarify, state-tests * Should or should not process the parent block hash prior to the tx * Should or should not process the beacon root update after the tx? Ideally they should not, **but** we have no way of doing this now, so for the time being both t8n and the state tests will need to have both operations Ok, I'll bring Besu's tools in line today. We may need to re-state state tests for cancun as I don't think they were doing beacon root update (which adds the timestamp even if root hash is zeros) We should aim to have `t8n-blockchain` + `t8n-state` in the long term: - `t8n-blockchain`: applies multiple transactions and extra block logic including system-txs - `t8n-state`: applies a single tx and nothing else (might redirect priority fees to a default coinbase) long term as in when we start flipping prague testnets? What about devnet-1 and devnet-2? The thing is I don't think there is that much added benefit to have this ready for devnet-1 <@892053833121923094> how is `max_stack_height` calculated by `Bytecode` exactly? I think it cannot handle any code with jumps correctly at all? it seems it just assumes that code is linear Yes that is correct, it's calculated when two opcodes are added together with this code: https://github.com/ethereum/execution-spec-tests/blob/ffdfc6315d7d6fbede06e287ae52877688b0a29d/src/ethereum_test_tools/vm/opcode.py#L155 okay I think test fixtures should have an \"initcode\" flag and eofparse should have an input flag. (I don't know much about `eof_test.py` yet)",
+  "excerpts": [
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm getting a bad state root on all tests, even those where no new contract is deployed or anything is sstored. I think it may have something to do with Prague. e.g.\n```\n{\"pc\":0,\"op\":227,\"gas\":\"0x984468\",\"gasCost\":\"0x5\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"CALLF\"}\n{\"pc\":0,\"op\":229,\"gas\":\"0x984463\",\"gasCost\":\"0x5\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"JUMPF\"}\n{\"pc\":1,\"op\":0,\"gas\":\"0x98445e\",\"gasCost\":\"0x0\",\"memSize\":0,\"stack\":[],\"depth\":1,\"refund\":0,\"opName\":\"STOP\"}\n{\"output\":\"\",\"gasUsed\":\"0xa\"}\n{\"stateRoot\": \"0x124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e\"}\n[\n  {\n    \"name\": \"tests/prague/eip7692_eof_v1/eip6206_jumpf/test_jumpf_execution.py::test_jumpf_backward[fork_CancunEIP7692-state_test]\",\n    \"pass\": false,\n    \"stateRoot\": \"0x124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e\",\n    \"fork\": \"Prague\",\n    \"error\": \"post state root mismatch: got 124b6e6d3e1975f17437a976a784640e9ad325ec0ff048942966946745713c3e, want 609970c0fcc7f76a0f97d4e07c6c904896c12e15352c3c46e50bed4ca3a2a3bc\"\n  }\n]\n```\nI believe we're never calling ProcessParentBlockHash in statetests and I wonder if other clients do it differently? And if so, which value they use",
+      "createdAt": "2024-06-24T07:42:33.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Are you guys deploying the history storage code in state tests?",
+      "createdAt": "2024-06-24T08:33:50.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@425274498732916736>",
+      "createdAt": "2024-06-24T08:35:45.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is my state dump",
+      "createdAt": "2024-06-24T09:29:32.694000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=ISO-8859-1",
+          "origin_name": "message.txt",
+          "content": "b128e8f840f8af003d08ecc68d398e1905af912a15c2a3c390fc2ba7e65a14a1"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@403707149043105803>",
+      "createdAt": "2024-06-24T09:29:58.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@360491619402776577> \n\n1. I don't know what `ProcessParentBlockHash` is so probably I'm not doing it.\n2. Can it be just the gas difference?\n3. The same tests should be in Blockchain form where you have the expected post state.",
+      "createdAt": "2024-06-24T13:56:39.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "It writes the parent block hash to the database",
+      "createdAt": "2024-06-24T13:57:27.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Its https://eips.ethereum.org/EIPS/eip-7709",
+      "createdAt": "2024-06-24T13:57:57.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok, so this may be it. These tests use config \"Shanghai+EOF\" so no other Prague EIPs.",
+      "createdAt": "2024-06-24T13:59:16.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah the beaconRootsAddress is set in the blockchain tests, but not in my output",
+      "createdAt": "2024-06-24T14:00:20.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks for the tip with the blockchain tests!",
+      "createdAt": "2024-06-24T14:00:29.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Testing",
+      "parent": "",
+      "content": "As I said, we should have single test format 😉",
+      "createdAt": "2024-06-24T14:03:13.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Testing",
+      "parent": "",
+      "content": "BTW, the 7709 still (?) don't have the system part... will it get it?",
+      "createdAt": "2024-06-24T14:05:02.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I really don't understand whats happening. In the blockchain test the following is set: \n```\n\"0x000f3df6d732807ef1319fb7b8bb8522d0beac02\": {\n                \"nonce\": \"0x01\",\n                \"balance\": \"0x00\",\n                \"code\": \"0x3373fffffffffffffffffffffffffffffffffffffffe14604d57602036146024575f5ffd5b5f35801560495762001fff810690815414603c575f5ffd5b62001fff01545f5260205ff35b5f5ffd5b62001fff42064281555f359062001fff015500\",\n                \"storage\": {\n                    \"0x03e8\": \"0x03e8\"\n                }\n            },\n\n```",
+      "createdAt": "2024-06-24T14:18:19.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Which is the 4788 beacon root contract with the correct code, but the storage is set to 1000... why?",
+      "createdAt": "2024-06-24T14:18:56.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "ParentBeaconBlock is 0x0 both for this and the genesis block",
+      "createdAt": "2024-06-24T14:19:46.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094>",
+      "createdAt": "2024-06-24T14:19:51.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "When I try to run the blocktest, I error even earlier: \n```\ncution/jumpf_backward.json \nINFO [06-24|16:21:25.403] Persisted trie from memory database      nodes=4 size=573.00B time=\"5.8µs\" gcnodes=0 gcsize=0.00B gctime=0s livenodes=0 livesize=0.00B\ntest tests/prague/eip7692_eof_v1/eip6206_jumpf/test_jumpf_execution.py::test_jumpf_backward[fork_CancunEIP7692-blockchain_test]: genesis block hash doesn't match test: computed=8c2428746f69, test=b58a08819f02\n```",
+      "createdAt": "2024-06-24T14:22:43.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ahh I think the genesis error is because evmone doesn't have the empty Requests Hash",
+      "createdAt": "2024-06-24T14:27:43.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "EOF tests are still on top of Cancun",
+      "createdAt": "2024-06-24T14:32:26.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "But that still doesn't explain the weird thing stored in beaconroot contract",
+      "createdAt": "2024-06-24T14:34:29.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Although, it would be relatively simple to enable on top of Prague by just adding the empty requests hash on top of  Cancun's output I think",
+      "createdAt": "2024-06-24T14:34:50.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Timestamp of the previous block I think, if we don't specify anything to the `parentBeaconBlockRoot` field, it stores zero, but the timestamp is non-zero regardless",
+      "createdAt": "2024-06-24T14:35:55.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ahh now I get it",
+      "createdAt": "2024-06-24T14:36:53.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "Besu's T8n does in prague, evmone doesn't.  We get different state roots for the state tests, That opens the question, should state-tests's update block hash?  Won't they need a parentHash field in the env section now?  And should we rely on a \"standard\" parent and beacon root unless we are explicitly testing those features?",
+      "createdAt": "2024-06-24T15:22:51.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "The old testing code used the hashes of the block numbers for BLOCKHASH.",
+      "createdAt": "2024-06-24T15:23:20.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm still getting a state root mismatch even though it _looks_ the same too me",
+      "createdAt": "2024-06-24T15:29:41.621000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "de56aad7447f7f273da9da89bc2d05bde6b99177189c1a5a416f1531689fac34"
+        }
+      ]
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "It does work with the blockchain tests now",
+      "createdAt": "2024-06-24T15:30:16.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "The state test doesn't work yet for me though",
+      "createdAt": "2024-06-24T15:30:30.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "The sate-test is missing the beacon root in it's hash state: 0x609970c0fcc7f76a0f97d4e07c6c904896c12e15352c3c46e50bed4ca3a2a3bc\n```\n{\n \"0x0000000000000000000000000000000000001000\": {\n  \"code\": \"0xef000101000c020003000a0001000304000000008000020000000000000000e3000261201560015500e4e50001\",\n  \"storage\": {\n   \"0x1\": \"0x2015\"\n  },\n  \"balance\": \"0x0\",\n  \"nonce\": \"0x1\"\n },\n \"0x2adc25665018aa1fe0e6bc666dac8fc2697ff9ba\": {\n  \"balance\": \"0x1f97d\"\n },\n \"0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b\": {\n  \"balance\": \"0x3635c9adc5de996b0a\",\n  \"nonce\": \"0x1\"\n },\n}\n```",
+      "createdAt": "2024-06-24T15:39:03.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "So for cancun state-tests\n* Should we add beacon root? (this is after the TX)\nand for Prague state-tests\n* Should we add block-hash? (this is before the TX, and may impact BLOCKHASH operation)",
+      "createdAt": "2024-06-24T15:40:21.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "Or for both, do we do neither operation as state-tests are testing a single sub-block transition.  Blockhash needs to be set up in prestate or the parents are zero, and only changes from the TX are considered.",
+      "createdAt": "2024-06-24T15:41:51.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "That cancun tests are not adding beacon root leads me to the \"no system tx\" path.",
+      "createdAt": "2024-06-24T15:42:16.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> ^^^ - What should a T8n and state tests tool that properly handles Prague do?",
+      "createdAt": "2024-06-24T15:58:26.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@425343240212971521> has added an option to export evmone's EOF validation tests: https://github.com/ethereum/execution-spec-tests/pull/646\n\nIs this something EEST want's to receive?",
+      "createdAt": "2024-06-24T16:11:33.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "We need this to generate the blockchain tests, sadly, if we were only generating state tests with t8n then it would be ok, but I think the blockchain tests are just as important.\n\nIdeally we should have two different tools for each operation.",
+      "createdAt": "2024-06-24T16:30:04.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "If t8n doesn't do both of these operations for us, then all blockchain tests will be incorrect",
+      "createdAt": "2024-06-24T16:30:34.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "We have no way of appending something into the state before or after execution of the transactions by the t8n",
+      "createdAt": "2024-06-24T16:31:07.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "To clarify, state-tests \n* Should or should not process the parent block hash prior to the tx\n* Should or should not process the beacon root update after the tx?",
+      "createdAt": "2024-06-24T16:38:59.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ideally they should not, **but** we have no way of doing this now, so for the time being both t8n and the state tests will need to have both operations",
+      "createdAt": "2024-06-24T16:40:52.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok, I'll bring Besu's tools in line today.  We may need to re-state state tests for cancun as I don't think they were doing beacon root update (which adds the timestamp even if root hash is zeros)",
+      "createdAt": "2024-06-24T16:41:52.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "We should aim to have `t8n-blockchain` + `t8n-state` in the long term:\n- `t8n-blockchain`: applies multiple transactions and extra block logic including system-txs\n- `t8n-state`: applies a single tx and nothing else (might redirect priority fees to a default coinbase)",
+      "createdAt": "2024-06-24T16:44:33.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Testing",
+      "parent": "",
+      "content": "long term as in when we start flipping prague testnets?  What about devnet-1 and devnet-2?",
+      "createdAt": "2024-06-24T16:46:33.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "The thing is I don't think there is that much added benefit to have this ready for devnet-1",
+      "createdAt": "2024-06-24T16:47:32.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gumb00",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@892053833121923094> how is `max_stack_height` calculated by `Bytecode` exactly?",
+      "createdAt": "2024-06-24T18:01:20.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gumb00",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think it cannot handle any code with jumps correctly at all?",
+      "createdAt": "2024-06-24T18:01:34.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gumb00",
+      "category": "Testing",
+      "parent": "",
+      "content": "it seems it just assumes that code is linear",
+      "createdAt": "2024-06-24T18:01:49.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes that is correct, it's calculated when two opcodes are added together with this code:\nhttps://github.com/ethereum/execution-spec-tests/blob/ffdfc6315d7d6fbede06e287ae52877688b0a29d/src/ethereum_test_tools/vm/opcode.py#L155",
+      "createdAt": "2024-06-24T18:04:11.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gumb00",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay",
+      "createdAt": "2024-06-24T18:04:49.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gumb00",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think test fixtures should have an \"initcode\" flag and eofparse should have an input flag. \n(I don't know much about `eof_test.py` yet)",
+      "createdAt": "2024-06-24T18:28:26.494000+00:00",
+      "attachments": []
+    }
+  ]
+}

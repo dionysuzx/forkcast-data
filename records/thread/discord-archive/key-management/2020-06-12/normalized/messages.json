@@ -1,0 +1,562 @@
+{
+  "schemaVersion": 1,
+  "channel": "key-management",
+  "date": "2020-06-12",
+  "messageCount": 69,
+  "sourceHash": "4a1a90da43e270c7b507babce0bf0c7401eb709ed76e91223e4be053a86bd681",
+  "searchText": "> Regardless, I think a VC that wants to sign consensus messages needs not be concerned with either concept of a \"wallet\". It just has `n` keystores loaded from some arbitrary directory structure. <@!361447803194441738> True in general, exept for the bit where it has to find the keystores. Which is where a bunch of hte standards come in to play. I always thought of keystore as \"store of information about a key\", and walletstore as \"store of information about a wallet\". A wallet is a combination of data (keystores) and metadata (walletstore, at a minimum), designed to be relatively easy to access as a group. I note that there has been some discussion about if wallets are needed at all: _please_ don't throw this concept away. Eth1 went with the single directory/location approach, and it's a right pain to manage anything at scale. It also forces strange compromises, such as hardware and software keys showing up in the same namespace without any real understanding of which is which (unless you look at paths, which is not fun for a non-technical user). Wallets are really useful for separation. They can separate by function (withdrawal accounts Vs. validators), generation (hierarchical deterministic Vs. non-deterministic), storage (hardware Vs. software), security level (encrypted keystores Vs. plaintext keystores) _etc._ They're basically namespacing for accounts, which matters already with withdrawal and validator keys and will matter more as time goes on. As far as I see it, wallets fall under the description of \"arbitrary directory structure\" which contains keystores. What I'm opposed to is importing a EIP-2386 walletstore into a validator client for the purpose of signing consensus messages. Yeah, I agree that importing the walletstore itself wouldn't be of any use to a validator (although if we start using names of wallets more than the brute force \"all wallets\" style we may need to load it in to decide if we want to load in the accounts under the wallet or not; but in that situation it's more for reference on startup and can be discarded as soon as it's read. And either way, no reason to ever require the wallet passphrase or expose the seed) I'm also a little concerned about a setup that says \"use keys 0..n from some wallet\" instead of \"use some wallet\" since it becomes very easy to run the same validator twice. For example, `my-client --wallet my-wallet --keys 0..5` and `my-client --wallet --1..5` is the difference between getting slashed or not This is true. For me, this is another use of wallets. You can have one wallet for Validator group 1, another for Validator group 2, etc. That way you can choose at a high level which keys to run for different validators but have a clear differentiation (and if we want to avoid slip-ups due to the groups could be 'Red', 'Green', _etc_, although that's more a best practice than a standard) yeah i agree, but i would also say that \"a directory with keystores in it\" has all those properties too and that forcing keystores to live inside one directory alongside the eip-2386 walletstore that generated them only limits flexibility > yeah i agree, but i would also say that \"a directory with keystores in it\" has all those properties too <@!361447803194441738> Are you suggesting multiple directories, one per wallet, or one directory with lots of wallets? What I would suggest is something like this: ``` └── validators ├── 0x8ff4951522ca67f850ebaca5b1b0b9fdfadb6d14898ecb92250b6897e3a877deac76017e6b0bf77c9c6eaabc931b046a │ └── voting-keystore.json └── 0xb4c8949cc2fb16768377e0772ebc10bd29d2888c5cd0781eaf28699ee11c1cd618a0d2c5abcd1a8d06258eef019ed782 ├── .lock ├── voting-keystore.json └── withdrawal-keystore.json ``` no wallets, just directories with keystores in them you could have all the keystores in a single flat directory if you want In my example, `x8ff..` and `0xb4c..` are voting pubkeys So that looks pretty similar to having a directory for each wallet, except you have an implicit wallet with single keystore per wallet One reason to have wallets is to allow for logical grouping; if you had two groups of validators (red and blue), how would that look in your example? The grouping doesn't work here. I'm not really suggesting this as a standard. Perhaps we can just have the standard that theres some \"base directory\" then you do a full tree traversal and import any keystore you find So you could have: ``` - blue - keystore_1.json - keystore_2.json - red - keystore_apples.json - keystore_purple.json ``` But there's no \"wallet\". There's just keystores in a directory. I would suggest we implement locking to prevent concurrent access. So perhaps we lock by creating `.keystore_purple.json.lock`. Again, that feels pretty similar to having wallets in the way that I propose. The only real differences are that each directory has a file with some wallet metadata, and that file/directory names are UUIDs (to avoid any oddness with filesystem interop, as well as to avoid leaking data where people don't want to). Aboslutely agree on having locks; it's something that I wanted to add to the layout EIP (whose number I forget, one sec) Is the \"wallet metadata\" an EIP-2386 walletstore? Yes (the layout EIP is at https://github.com/ethereum/EIPs/pull/2680) But how do you split validators when you have a HD walletstore? I argue that the method of generating the keystores is irrelevant to the validator client > I argue that the method of generating the keystores is irrelevant to the validator client <@!361447803194441738> Up to a point, although having the metadata provides flexibility. For example, a validator may choose to generate accounts on the fly from an HD seed rather than read in individual files. But generating them on the fly from a HD seed prevents splitting validators between clients > But how do you split validators when you have a HD walletstore? <@!361447803194441738> You could split using account specifiers, but more likely you'd have different wallets for different purposes so they'd have their own seeds But I don't think it's reasonable to lock-in your validator->validator-client key distribution at key generation time Also consider that *requiring* metadata makes importing keystores from other places, that have a different wallet system, much more difficult to get right I don't think you are locking in, if your validator can read from multiple wallets > Also consider that *requiring* metadata makes importing keystores from other places, that have a different wallet system, much more difficult to get right <@!203220829473996800> not if you have a standard for that metadata > I don't think you are locking in, if your validator can read from multiple wallets <@!144468805697929216> but it's completely reasonable for these to be on different computers > <@!203220829473996800> not if you have a standard for that metadata I don't think the goal is to have more things to standardize. We just need a minimal and secure way to reach our goals, preferably something so minimal it does not require extensive standardization. > <@!144468805697929216> but it's completely reasonable for these to be on different computers <@!361447803194441738> so we're back to account specifiers? Not sure exactly what this would look like. I think the \"keystores in a directory\" approach is fully compatible with the \"wallet with metadata\" approach, but not vice-versa The \"wallet with metadata\" has clear downsides (i.e., it stops making sense if you want to split a HD wallet across two computers) I don't think the \"wallet with metadata\" is a good idea for a global standard, since it's an opinionation on the general case with clear downsides. I'm not saying the \"wallet with metadata\" shouldnt exist I'm just saying it shouldn't be required. I'd argue that the additional information in the wallet metadata is going to be really important later on, as we expand our definition of what an account looks like. For example, let's consider how to handle hardware wallets on a validator (assuming that a hardware wallet could be built to work with eth2 validators). You need, at a minimum, to know what the wallet is and how to talk to it. If we want wallets to be portable between clients then we need some sort of standard where that data can live. So wallet-level metadata is useful. As for being able to split HD keys between servers: how would you keep track of the index of the next key to generate? Where would this value be stored? > As for being able to split HD keys between servers: how would you keep track of the index of the next key to generate? Where would this value be stored? <@!144468805697929216> This is my point, you can't duplicate a HD wallet. What you *can* do is maintain a single server that generates keystores and then distribute them arbtirarily across validator servers. > I'd argue that the additional information in the wallet metadata is going to be really important later on, as we expand our definition of what an account looks like. For example, let's consider how to handle hardware wallets on a validator (assuming that a hardware wallet could be built to work with eth2 validators). You need, at a minimum, to know what the wallet is and how to talk to it. If we want wallets to be portable between clients then we need some sort of standard where that data can live. So wallet-level metadata is useful. <@!144468805697929216> I don't see how a hardware device won't just be \"a hardware thing with keys on it\". Having \"directories with keystores in them\" doesnt clash with having \"a hardware thing with keys on it\". > <@!144468805697929216> This is my point, you can't duplicate a HD wallet. What you *can* do is maintain a single server that generates keystores and then distribute them arbtirarily across validator servers. <@!361447803194441738> the question still stands: where is the index stored? > <@!361447803194441738> the question still stands: where is the index stored? <@!144468805697929216> It's stored in the EIP-2386 walletstore `nextaccount` From a more practical view: *experimental testnet not-production* version of mass validator key distribution here; https://github.com/protolambda/eth2-val-tools Deploying thousands of validators to different clients for a testnet with tooling is possible, but far from ideal. Being able to reduce it to distributing files and secrets would be much better and easier to get right in a secure way. Metadata adds additional logic to all this that can break and cause incompatibilities. The metadata to link a hardware device is a good idea, but I think it still shouldn't be a requirement to always have meta data. > <@!144468805697929216> It's stored in the EIP-2386 walletstore <@!361447803194441738> Okay so we agree that we need metadata somewhere. Regarding distributing accounts to other servers: if \"distribution server\" has the wallet with th eHD seed on it and generates a bunch of accounts from that, then those accounts want to be distributed to other servers, there's nothing to stop new wallets being created and those files copied over. But again metadata comes in to play: having information about where the accounts come from would be a sensible thing to do in that \"fragment\" wallet. Yes, metadata is a bit more work but it gives useful information to end users as a result. Throwing around 96-character hex strings isn't a useful way to go for most users. Is the metadata a copy of the EIP-2386 wallet? Could be; depends if you want to throw the seed around or not. Theoretically it's protected by the passphrase, and if we trust the crypto then we could. Maybe we want another field in there stating \"this is a fragment; don't create new keys here\". The problem with duplicating the EIP-2386 walletstore is that you no longer have a single source of truth for `nextaccount` and you risk creating duplicate keys. If you want to add metadata I would suggest adding a \"name\" or \"desc\" field to the EIP-2335 keystore (Carl said he was going to put name in t",
+  "excerpts": [
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> Regardless, I think a VC that wants to sign consensus messages needs not be concerned with either concept of a \"wallet\". It just has `n` keystores loaded from some arbitrary directory structure.\n<@!361447803194441738> True in general, exept for the bit where it has to find the keystores.  Which is where a bunch of hte standards come in to play.",
+      "createdAt": "2020-06-12T07:09:06.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I always thought of keystore as \"store of information about a key\", and walletstore as \"store of information about a wallet\".",
+      "createdAt": "2020-06-12T07:09:54.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "A wallet is a combination of data (keystores) and metadata (walletstore, at a minimum), designed to be relatively easy to access as a group.",
+      "createdAt": "2020-06-12T07:10:32.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I note that there has been some discussion about if wallets are needed at all: _please_ don't throw this concept away.  Eth1 went with the single directory/location approach, and it's a right pain to manage anything at scale.  It also forces strange compromises, such as hardware and software keys showing up in the same namespace without any real understanding of which is which (unless you look at paths, which is not fun for a non-technical user).\n\nWallets are really useful for separation.  They can separate by function (withdrawal accounts Vs. validators), generation (hierarchical deterministic Vs. non-deterministic), storage (hardware Vs. software), security level (encrypted keystores Vs. plaintext keystores) _etc._  They're basically namespacing for accounts, which matters already with withdrawal and validator keys and will matter more as time goes on.",
+      "createdAt": "2020-06-12T07:14:39.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "As far as I see it, wallets fall under the description of \"arbitrary directory structure\" which contains keystores. What I'm opposed to is importing a EIP-2386 walletstore into a validator client for the purpose of signing consensus messages.",
+      "createdAt": "2020-06-12T09:57:52.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Yeah, I agree that importing the walletstore itself wouldn't be of any use to a validator",
+      "createdAt": "2020-06-12T10:03:23.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "(although if we start using names of wallets more than the brute force \"all wallets\" style we may need to load it in to decide if we want to load in the accounts under the wallet or not; but in that situation it's more for reference on startup and can be discarded as soon as it's read.  And either way, no reason to ever require the wallet passphrase or expose the seed)",
+      "createdAt": "2020-06-12T10:05:00.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'm also a little concerned about a setup that says \"use keys 0..n from some wallet\" instead of \"use some wallet\" since it becomes very easy to run the same validator twice. For example, `my-client --wallet my-wallet --keys 0..5` and `my-client --wallet --1..5` is the difference between getting slashed or not",
+      "createdAt": "2020-06-12T10:10:41.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "This is true.  For me, this is another use of wallets.  You can have one wallet for Validator group 1, another for Validator group 2, etc.  That way you can choose at a high level which keys to run for different validators but have a clear differentiation (and if we want to avoid slip-ups due to the groups could be 'Red', 'Green', _etc_, although that's more a best practice than a standard)",
+      "createdAt": "2020-06-12T10:17:24.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "yeah i agree, but i would also say that \"a directory with keystores in it\" has all those properties too",
+      "createdAt": "2020-06-12T10:20:31.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "and that forcing keystores to live inside one directory alongside the eip-2386 walletstore that generated them only limits flexibility",
+      "createdAt": "2020-06-12T10:21:02.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> yeah i agree, but i would also say that \"a directory with keystores in it\" has all those properties too\n<@!361447803194441738> Are you suggesting multiple directories, one per wallet, or one directory with lots of wallets?",
+      "createdAt": "2020-06-12T10:23:33.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "What I would suggest is something like this:\n\n```\n└── validators\n    ├── 0x8ff4951522ca67f850ebaca5b1b0b9fdfadb6d14898ecb92250b6897e3a877deac76017e6b0bf77c9c6eaabc931b046a\n    │   └── voting-keystore.json\n    └── 0xb4c8949cc2fb16768377e0772ebc10bd29d2888c5cd0781eaf28699ee11c1cd618a0d2c5abcd1a8d06258eef019ed782\n        ├── .lock\n        ├── voting-keystore.json\n        └── withdrawal-keystore.json\n```",
+      "createdAt": "2020-06-12T10:24:52.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "no wallets, just directories with keystores in them",
+      "createdAt": "2020-06-12T10:25:06.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "you could have all the keystores in a single flat directory if you want",
+      "createdAt": "2020-06-12T10:25:16.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "In my example, `x8ff..` and `0xb4c..` are voting pubkeys",
+      "createdAt": "2020-06-12T10:25:45.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So that looks pretty similar to having a directory for each wallet, except you have an implicit wallet with single keystore per wallet",
+      "createdAt": "2020-06-12T10:26:29.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "One reason to have wallets is to allow for logical grouping; if you had two groups of validators (red and blue), how would that look in your example?",
+      "createdAt": "2020-06-12T10:27:05.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The grouping doesn't work here. I'm not really suggesting this as a standard.",
+      "createdAt": "2020-06-12T10:28:02.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Perhaps we can just have the standard that theres some \"base directory\" then you do a full tree traversal and import any keystore you find",
+      "createdAt": "2020-06-12T10:28:21.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "So you could have:\n\n```\n- blue\n  - keystore_1.json\n  - keystore_2.json\n- red\n  - keystore_apples.json\n  - keystore_purple.json\n```",
+      "createdAt": "2020-06-12T10:29:03.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But there's no \"wallet\". There's just keystores in a directory.",
+      "createdAt": "2020-06-12T10:29:33.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I would suggest we implement locking to prevent concurrent access. So perhaps we lock by creating `.keystore_purple.json.lock`.",
+      "createdAt": "2020-06-12T10:31:17.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Again, that feels pretty similar to having wallets in the way that I propose.  The only real differences are that each directory has a file with some wallet metadata, and that file/directory names are UUIDs (to avoid any oddness with filesystem interop, as well as to avoid leaking data where people don't want to).",
+      "createdAt": "2020-06-12T10:34:58.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Aboslutely agree on having locks; it's something that I wanted to add to the layout EIP (whose number I forget, one sec)",
+      "createdAt": "2020-06-12T10:35:25.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Is the \"wallet metadata\" an EIP-2386 walletstore?",
+      "createdAt": "2020-06-12T10:35:31.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2020-06-12T10:35:41.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "(the layout EIP is at https://github.com/ethereum/EIPs/pull/2680)",
+      "createdAt": "2020-06-12T10:36:04.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But how do you split validators when you have a HD walletstore?",
+      "createdAt": "2020-06-12T10:36:12.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I argue that the method of generating the keystores is irrelevant to the validator client",
+      "createdAt": "2020-06-12T10:36:44.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> I argue that the method of generating the keystores is irrelevant to the validator client\n<@!361447803194441738> Up to a point, although having the metadata provides flexibility.  For example, a validator may choose to generate accounts on the fly from an HD seed rather than read in individual files.",
+      "createdAt": "2020-06-12T10:38:37.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But generating them on the fly from a HD seed prevents splitting validators between clients",
+      "createdAt": "2020-06-12T10:39:16.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> But how do you split validators when you have a HD walletstore?\n<@!361447803194441738> You could split using account specifiers, but more likely you'd have different wallets for different purposes so they'd have their own seeds",
+      "createdAt": "2020-06-12T10:39:29.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But I don't think it's reasonable to lock-in your validator->validator-client key distribution at key generation time",
+      "createdAt": "2020-06-12T10:40:03.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Also consider that *requiring* metadata makes importing keystores from other places, that have a different wallet system, much more difficult to get right",
+      "createdAt": "2020-06-12T10:40:55.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I don't think you are locking in, if your validator can read from multiple wallets",
+      "createdAt": "2020-06-12T10:41:40.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> Also consider that *requiring* metadata makes importing keystores from other places, that have a different wallet system, much more difficult to get right\n<@!203220829473996800> not if you have a standard for that metadata",
+      "createdAt": "2020-06-12T10:41:53.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> I don't think you are locking in, if your validator can read from multiple wallets\n<@!144468805697929216> but it's completely reasonable for these to be on different computers",
+      "createdAt": "2020-06-12T10:42:11.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!203220829473996800> not if you have a standard for that metadata\nI don't think the goal is to have more things to standardize. We just need a minimal and secure way to reach our goals, preferably something so minimal it does not require extensive standardization.",
+      "createdAt": "2020-06-12T10:43:13.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!144468805697929216> but it's completely reasonable for these to be on different computers\n<@!361447803194441738> so we're back to account specifiers?  Not sure exactly what this would look like.",
+      "createdAt": "2020-06-12T10:43:22.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think the \"keystores in a directory\" approach is fully compatible with the \"wallet with metadata\" approach, but not vice-versa",
+      "createdAt": "2020-06-12T10:43:36.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The \"wallet with metadata\" has clear downsides (i.e., it stops making sense if you want to split a HD wallet across two computers)",
+      "createdAt": "2020-06-12T10:44:12.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I don't think the \"wallet with metadata\" is a good idea for a global standard, since it's an opinionation on the general case with clear downsides.",
+      "createdAt": "2020-06-12T10:44:44.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'm not saying the \"wallet with metadata\" shouldnt exist",
+      "createdAt": "2020-06-12T10:45:07.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'm just saying it shouldn't be required.",
+      "createdAt": "2020-06-12T10:45:21.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'd argue that the additional information in the wallet metadata is going to be really important later on, as we expand our definition of what an account looks like.  For example, let's consider how to handle hardware wallets on a validator (assuming that a hardware wallet could be built to work with eth2 validators).  You need, at a minimum, to know what the wallet is and how to talk to it.  If we want wallets to be portable between clients then we need some sort of standard where that data can live.  So wallet-level metadata is useful.",
+      "createdAt": "2020-06-12T10:50:24.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "As for being able to split HD keys between servers: how would you keep track of the index of the next key to generate?  Where would this value be stored?",
+      "createdAt": "2020-06-12T10:51:14.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> As for being able to split HD keys between servers: how would you keep track of the index of the next key to generate?  Where would this value be stored?\n<@!144468805697929216> This is my point, you can't duplicate a HD wallet. What you *can* do is maintain a single server that generates keystores and then distribute them arbtirarily across validator servers.",
+      "createdAt": "2020-06-12T10:52:06.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> I'd argue that the additional information in the wallet metadata is going to be really important later on, as we expand our definition of what an account looks like.  For example, let's consider how to handle hardware wallets on a validator (assuming that a hardware wallet could be built to work with eth2 validators).  You need, at a minimum, to know what the wallet is and how to talk to it.  If we want wallets to be portable between clients then we need some sort of standard where that data can live.  So wallet-level metadata is useful.\n<@!144468805697929216> I don't see how a hardware device won't just be \"a hardware thing with keys on it\". Having \"directories with keystores in them\" doesnt clash with having \"a hardware thing with keys on it\".",
+      "createdAt": "2020-06-12T10:53:18.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!144468805697929216> This is my point, you can't duplicate a HD wallet. What you *can* do is maintain a single server that generates keystores and then distribute them arbtirarily across validator servers.\n<@!361447803194441738> the question still stands: where is the index stored?",
+      "createdAt": "2020-06-12T10:55:10.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!361447803194441738> the question still stands: where is the index stored?\n<@!144468805697929216> It's stored in the EIP-2386 walletstore",
+      "createdAt": "2020-06-12T10:55:23.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "`nextaccount`",
+      "createdAt": "2020-06-12T10:55:39.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "From a more practical view: *experimental testnet not-production* version of mass validator key distribution here; https://github.com/protolambda/eth2-val-tools\nDeploying thousands of validators to different clients for a testnet with tooling is possible, but far from ideal. Being able to reduce it to distributing files and secrets would be much better and easier to get right in a secure way. Metadata adds additional logic to all this that can break and cause incompatibilities.\nThe metadata to link a hardware device is a good idea, but I think it still shouldn't be a requirement to always have meta data.",
+      "createdAt": "2020-06-12T10:56:38.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!144468805697929216> It's stored in the EIP-2386 walletstore\n<@!361447803194441738> Okay so we agree that we need metadata somewhere.\n\nRegarding distributing accounts to other servers: if \"distribution server\" has the wallet with th eHD seed on it and generates a bunch of accounts from that, then those accounts want to be distributed to other servers, there's nothing to stop new wallets being created and those files copied over.  But again metadata comes in to play: having information about where the accounts come from would be a sensible thing to do in that \"fragment\" wallet.\n\nYes, metadata is a bit more work but it gives useful information to end users as a result.  Throwing around 96-character hex strings isn't a useful way to go for most users.",
+      "createdAt": "2020-06-12T11:01:35.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Is the metadata a copy of the EIP-2386 wallet?",
+      "createdAt": "2020-06-12T11:02:04.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Could be; depends if you want to throw the seed around or not.  Theoretically it's protected by the passphrase, and if we trust the crypto then we could.  Maybe we want another field in there stating \"this is a fragment; don't create new keys here\".",
+      "createdAt": "2020-06-12T11:03:21.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "The problem with duplicating the EIP-2386 walletstore is that you no longer have a single source of truth for `nextaccount` and you risk creating duplicate keys.",
+      "createdAt": "2020-06-12T11:03:52.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "If you want to add metadata I would suggest adding a \"name\" or \"desc\" field to the EIP-2335 keystore",
+      "createdAt": "2020-06-12T11:04:15.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "(Carl said he was going to put name in to 2335; yes please)",
+      "createdAt": "2020-06-12T11:04:39.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Well, if we have that field on EIP-2335 then I feel like we have everything we need",
+      "createdAt": "2020-06-12T11:05:09.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I think tagging each keystore is more powerful than just adding a file alongside it",
+      "createdAt": "2020-06-12T11:05:44.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "There's still questions for protection of user information (i.e. not exposing account names/keys in file names) and the like.",
+      "createdAt": "2020-06-12T11:06:15.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "(And apologies but going AFK for 20 minutes or so)",
+      "createdAt": "2020-06-12T11:06:26.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> There's still questions for protection of user information (i.e. not exposing account names/keys in file names) and the like.\n<@!144468805697929216> Is this not also present in your \"wallet with metadata\" approach?",
+      "createdAt": "2020-06-12T11:06:43.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "> <@!144468805697929216> Is this not also present in your \"wallet with metadata\" approach?\n<@!361447803194441738> Sure, which is one of the reasons why it's there.\n\nRather than go back and forth like this (I know it's late over there) I'll put together a doc over the weekend that starts from the use cases and goes forward to the current solution.  We can then go through them and either get rid of particular use cases if we don't think they apply, or challenge the solution if there is a better one, or whatever.  Does that sound like a decent way to proceed?",
+      "createdAt": "2020-06-12T11:31:33.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@144468805697929216> sounds good 👍🏻 thanks for the time zone consideration 🙂",
+      "createdAt": "2020-06-12T11:36:23.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@!203220829473996800> fwiw, we landed keystore support in nimbus just now: https://github.com/status-im/nim-beacon-chain/pull/1093 - hopefully it's useful enough for the testnet production as well",
+      "createdAt": "2020-06-12T13:21:17.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Nice, I'll try that some time 🙂",
+      "createdAt": "2020-06-12T13:31:40.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "carlbeek",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "On the 2335 KDF: I too prefer Argon2 and scrypt over PBKDF2, bcrypt, etc. My fear with argon2 is the number of implementations, language support seems limited often needing a library written by untrusted source. I then wanted to just support scrypt, but I did a [twitter poll](https://twitter.com/CarlBeek/status/1169156867693719553), and PBKDF2 got the most votes by a fair margin. I also learnt my lesson on twitter polls. :/\n\nIMO supporting multiple KDFs unnecessarily increases the complexity, so if we are going to make changes here, I'd like to reduce the number of options.",
+      "createdAt": "2020-06-12T14:43:13.514000+00:00",
+      "attachments": []
+    }
+  ]
+}

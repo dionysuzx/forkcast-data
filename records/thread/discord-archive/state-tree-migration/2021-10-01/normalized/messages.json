@@ -1,0 +1,402 @@
+{
+  "schemaVersion": 1,
+  "channel": "state-tree-migration",
+  "date": "2021-10-01",
+  "messageCount": 49,
+  "sourceHash": "db35534edd918ad27e98b451384d5ab7132e9c87ffed44192877c02827643a1f",
+  "searchText": "Question about verkle and merkle tree R&D in general Has anyone explored making an on-disk storage format and engine based on our merkle tree design? One of the reasons for Erigon being so fast is abscence of nesting one tree in another. Other implementations (geth, OE, etc) store state as merkle-patricia tree inside LSM tree - which is a performance killer because you have to connect disparate guts of MPT all over storage engine's tree. We just have flat state (sorted map, basically) on top of our storage engine's B+Tree. What if we all stored state as tree, but with merklization being part of storage engine directly? Like merklize LevelDB's on-disk LSM tree and store its root in block header instead of having MPT inside LSM? This will probably require writing Ethereum-specific storage engine, but the potential benefits could be huge I am not aware of anyone trying this. I think I agree that there are likely non trivial performance gains to be had in that direction. Hey everyone! I've implemented the basic Pedersen vector commitment scheme from https://raw.githubusercontent.com/AdamISZ/from0k2bp/master/from0k2bp.pdf along with the zero-knowledge proof of it (so to be clear, I'm able to verify the equation at the bottom of page 8 to do a zk-proof of a series of vector). What I'm struggling with is how can I open the vector commitment at a specific position without revealing the whole vector? We can assume for simplicity's sake there is only one vector (though the scheme is the same as the multi-vector case) i.e. if I reveal a value + its position in the vector, what do I have to compute to prove that the commitment (an EC point) matches this opening? Assuming I understand your question, In the verkle trie, multiple times that for a given index `i` in the vector, the value is `v`, so `vector[i] = v` We instead can view this as a polynomial which when you evaluate it at the point `i` we get `v` So instead of `vector[i] = v` , you can think of it as `f(i) = v` In verkle-trie, we have a protocol which takes in a bunch of these claims `f(i) = v` and we form an aggregate polynomial `g(x)` Iff all of the claims `f(i) = v` are correct, then we can prove that `g(z) = y` , where `z` is some random point With this, we can use that polynomial commitment scheme on g(x) to show that g(z) = y . The exact scheme can be seen here: - <https://dankradfeist.de/ethereum/cryptography/2021/06/18/pcs-multiproofs.html> - <https://hackmd.io/@6iQDuIePQjyYBqDChYw_jg/SJeZNp6au> I think my question is maybe more fundamental but let me see if I can precise so if you take https://notes.ethereum.org/@vbuterin/verkle_tree_eip#Verkle-tree-definition the `compute_commitment_root` is responsible for computing a commitment to the children of a verkle tree node (which are themselves either serialized commitments, or the values in the case of the leafs) this function returns an elliptic curve point, which is the dot product of the pedersen basis (a series of \"nothing up my sleeve\" curve points) and the vector given such a commitment (i.e. an elliptic curve point), which commits to a vector of integer values I want to prove that the value at position `x` is `y` (`vector[x] == y`) I can divulge `x` and `y` to the verifier of course but how does he then verify that `x` and `y` are consistent with the commitment? I'll have a look at the scheme you linked, I might be missing part of the story Oh hmm, so just like KZG, we are using IPA as a polynomial commitment scheme. This means that they have an algorithm which is able to verify this claim. Something like `Verify(Commitment, point, output) =? true` The way that they both do it internally is different, for the verkle trie it does not really matter though, it just requires a homomorphic polynomial commitment scheme. ----- I think your question is about how it is done internally in IPA/bulletproofs, I can list a way to do it, but it's not the way that is done in verkle trie, because we aggregate all of the openings. So one way to do it is to take your vector and then interpolate it to a polynomial. This means that we have a function that when we evaluate it as `0` it gives the first element in the vector, and if we evaluate it at `x` it gives `y`. If you imagine that the coefficients of the interpolated polynomial are `<f_0, f_1, f_2, f_3, f_4>`, I form another vector `<1, x, x^2, x^3, x^4, x^5>` , the inner product of these two vectors would be the evaluation of the polynomial `f` So you can use the inner product argument as a polynomial commitment scheme. It's not exactly how it is done in verkle tries however, since lagrange interpolation is quite expensive. We also instead aggregate all of the purported openings and open the aggregated polynomial at a random point which outputs true only if the individual openings were true Hopefully that was somewhat clear I get the general direction of the idea, but many of the connections are missing perhaps the biggest of which, relatedly with what I asked about is this: so sure you can create a polynomial and potentially commit to it but the verifier only has an elliptic curve point commitment how does he know that the polynomial that you're committing too matches the commitement? and from the IP draft, that commitment is a simple pedersen vector commitment, not a polynomial commitement (unless it somehow doubles as one?) - Oh good question, the verifier can make it such that if the prover commits to a different polynomial, the verification will fail with overwhelming probability, I think it's implicit in the links I posted above, by the way the verifier prepares the claim - If we imagine a polynomial f(x) = x^2 + 6x + 7 , then if we evaluate the polynomial at a point t, we see that `f(t) = t^2 + 6t + 7` , this is the same as doing the dot product between the two vectors `<7,6,1> , <1, t, t^2>` , the inner product argument commits two vectors and proves that their inner product, so we can use it as a polynomial commitment scheme mmh do you think we could drop all the verkle-tree sophistication sophistication (including inner product, proof aggregation, etc) and focus on the pure pedersen commitment? like how would you open the pedersen commitement at a given position? (I feel like if all the other stuff is possible, then this should be possible too, and not that hard! perhaps it's not succint though, that's perfectly fine, I'm trying to grasp the basics) for pedersen, the commitment is indeed pretty much exactly what you describe (the verifier sends a challenge, which is used to compute a polynomial whose factors are the member of the vector) but I'm also pretty sure that asking the evaluation of the polynomial at `x = index` doesn't return the value of the vector at that index Yep sure, so in the IPA you commit to two vectors and proves that their inner product is some value. ie given <a, b, c> and <d, e, f> , the inner product argument allows the prover to commit to both vectors and prove that a * d + b * e + c * f = some_value. - Let's say the vector is [x, y, z] . There is a polynomial which has the following evaluations `f(0) = x, f(1) = y, f(2) = z` . You can use an algorithm to figure out this polynomial - Lets say that the coefficients of this polynomial is `<f_0, f_1, f_2>` , then you can take the two vectors `<f_0, f_1, f_2>` , `<2^0, 2^1, 2^2>` and put it into your IPA algorithm and the verification will only pass, if `some_value` is equal to `z` I guess the main point, is that you can view a polynomial evaluation in coefficient form as the inner product of the coefficients of the polynomial and the evaluation points to increasing powers this feels like going in circles 😅 I think maybe the confusing part of the scheme is that the evaluation point is a random point, this is mainly because we use IPA as a sub-protocol sorry 😄 you're not relating this to the pedersen commitment, which **is the only thing the verifier has** I appreciate the effort! The verifier should also have the purported output and the input so sure you can commit to polynomials etc, but how do you convince the verifier that this polynomial is the one that matches the vector for which it has a commitment? right, it has that but if you send him, input, output and commitment to polynomial (+ proof that polynomial(input) = output) that still doesn't tell him that the output is something that lives in the vector that he has a commitement to like the pedersen commitment needs to intervene somewhere in the proof, or it's all disconnected it's like trying to do a merkle proof without using the merkle root do you have a ref/link on the algorithm that turns a vector into a polynomial btw? It's called lagrange interpolation: <https://en.wikipedia.org/wiki/Lagrange_polynomial> So the polynomial commitment scheme is a separate component. If you want you can think of it as just this function: ```rust fn poly_verify(proof, commitment, input, output)-> bool ``` If the commitment is to a polynomial `f` , then that function only returns true when `f(input) = output` ---- A separate part of the verification takes a trusted commitment called the `root` of the tree and from there we create proofs of the nodes in the root, then we take their commitments and prove the nodes within those nodes, etc Here is another resource which might help: <https://vitalik.ca/general/2021/06/18/verkle.html> > A separate part of the verification takes a trusted commitment called the root of the tree and from there we create proofs of the nodes in the root, then we take their commitments and prove the nodes within those nodes, etc this is what I was always asking about! (I linked the Verkle EIP draft to clarify that it's what I'm talking about) and I've read that, to clarify, I'm asking about: > A vector commitment scheme is a special type of hash function, hashing a list <some latex> . But vector commitments have the special property that for a commitment C and a value zi, it's possible to make a short proof that is the commitment to some list where the value at the i'th position is zi > > . In a Verkle proof, this short proof replaces the function of the sister nodes in a Merkle Patricia proof, giving the verifier confidence that a child node really is the child at the given position of its parent node. Oh glad we finally got to an understanding! To clarify, that part is agnostic to the commitment scheme being used I think you mean verkle tree are agnostic to the commitment scheme being used but given that the currently prescribed commitment scheme is pedersen how do I do that? 😂 Yeah that too, and the part where the root is linked is agnostic to the commitment scheme oh do what? > But vector commitments have the special property that for a commitment C and a value zi, it's possible to make a short proof that is the commitment to some list where the value at the i'th position is zi make that proof without revealing the whole vector Oh that's what I mentioned above, the simplest way is to interpolate the vector using lagrange interpolation to get a polynomial, then do the inner product thing above but you haven't addressed > but if you send him, input, output and commitment to polynomial (+ proof that polynomial(input) = output) > that still doesn't tell him that the output is something that lives in the vector that he has a commitement to > like the pedersen commitment needs to intervene somewhere in the proof, or it's all disconnected > it's like trying to do a merkle proof without using the merkle root > do you have a ref/link on the algorithm that turns a vector into a polynomial btw? essentially, how do you prove the lagrange interpolation matches the commitment?",
+  "excerpts": [
+    {
+      "author": "vorot93",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Question about verkle and merkle tree R&D in general\n\nHas anyone explored making an on-disk storage format and engine based on our merkle tree design?\n\nOne of the reasons for Erigon being so fast is abscence of nesting one tree in another. Other implementations (geth, OE, etc) store state as merkle-patricia tree inside LSM tree - which is a performance killer because you have to connect disparate guts of MPT all over storage engine's tree. We just have flat state (sorted map, basically) on top of our storage engine's B+Tree.\n\nWhat if we all stored state as tree, but with merklization being part of storage engine directly? Like merklize LevelDB's on-disk LSM tree and store its root in block header instead of having MPT inside LSM?",
+      "createdAt": "2021-10-01T09:07:06.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vorot93",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This will probably require writing Ethereum-specific storage engine, but the potential benefits could be huge",
+      "createdAt": "2021-10-01T09:09:05.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I am not aware of anyone trying this. I think I agree that there are likely non trivial performance gains to be had in that direction.",
+      "createdAt": "2021-10-01T13:19:50.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Hey everyone!\nI've implemented the basic Pedersen vector commitment scheme from https://raw.githubusercontent.com/AdamISZ/from0k2bp/master/from0k2bp.pdf\nalong with the zero-knowledge proof of it (so to be clear, I'm able to verify the equation at the bottom of page 8 to do a zk-proof of a series of vector).\n\nWhat I'm struggling with is how can I open the vector commitment at a specific position without revealing the whole vector?\nWe can assume for simplicity's sake there is only one vector (though the scheme is the same as the multi-vector case)",
+      "createdAt": "2021-10-01T18:08:03.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i.e. if I reveal a value + its position in the vector, what do I have to compute to prove that the commitment (an EC point) matches this opening?",
+      "createdAt": "2021-10-01T18:10:03.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Assuming I understand your question, In the verkle trie, multiple times that for a given index `i` in the vector, the value is `v`, so `vector[i] = v`",
+      "createdAt": "2021-10-01T18:21:11.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We instead can view this as a polynomial which when you evaluate it at the point `i` we get `v` \n\nSo instead of `vector[i] = v` , you can think of it as `f(i) = v`",
+      "createdAt": "2021-10-01T18:22:47.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In verkle-trie, we have a protocol which takes in a bunch of these claims `f(i) = v` and we form an aggregate polynomial `g(x)`\n\nIff all of the claims `f(i) = v` are correct, then we can prove that `g(z) = y` , where `z` is some random point",
+      "createdAt": "2021-10-01T18:25:50.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "With this, we can use that polynomial commitment scheme on g(x) to show that g(z) = y .\n\nThe exact scheme can be seen here:\n\n- <https://dankradfeist.de/ethereum/cryptography/2021/06/18/pcs-multiproofs.html>\n- <https://hackmd.io/@6iQDuIePQjyYBqDChYw_jg/SJeZNp6au>",
+      "createdAt": "2021-10-01T18:29:06.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think my question is maybe more fundamental\nbut let me see if I can precise",
+      "createdAt": "2021-10-01T18:29:40.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so if you take https://notes.ethereum.org/@vbuterin/verkle_tree_eip#Verkle-tree-definition\nthe `compute_commitment_root` is responsible for computing a commitment to the children of a verkle tree node (which are themselves either serialized commitments, or the values in the case of the leafs)\n\nthis function returns an elliptic curve point, which is the dot product of the pedersen basis (a series of \"nothing up my sleeve\" curve points) and the vector",
+      "createdAt": "2021-10-01T18:31:12.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "given such a commitment (i.e. an elliptic curve point), which commits to a vector of integer values\nI want to prove that the value at position `x` is `y` (`vector[x] == y`)\nI can divulge `x` and `y` to the verifier of course\nbut how does he then verify that `x` and `y` are consistent with the commitment?",
+      "createdAt": "2021-10-01T18:32:47.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'll have a look at the scheme you linked, I might be missing part of the story",
+      "createdAt": "2021-10-01T18:35:19.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh hmm, so just like KZG, we are using IPA as a polynomial commitment scheme. \n\nThis means that they have an algorithm which is able to verify this claim. Something like `Verify(Commitment, point, output) =? true`\n\nThe way that they both do it internally is different, for the verkle trie it does not really matter though, it just requires a homomorphic polynomial commitment scheme.\n\n-----\n\nI think your question is about how it is done internally in IPA/bulletproofs, I can list a way to do it, but it's not the way that is done in verkle trie, because we aggregate all of the openings.\n\nSo one way to do it is to take your vector and then interpolate it to a polynomial. This means that we have a function that when we evaluate it as `0` it gives the first element in the vector, and if we evaluate it at `x` it gives `y`. \n\nIf you imagine that the coefficients of the interpolated polynomial are `<f_0, f_1, f_2, f_3, f_4>`, I form another vector `<1, x, x^2, x^3, x^4, x^5>` , the inner product of these two vectors would be the evaluation of the polynomial `f`",
+      "createdAt": "2021-10-01T18:54:49.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So you can use the inner product argument as a polynomial commitment scheme. \n\nIt's not exactly how it is done in verkle tries however, since lagrange interpolation is quite expensive. We also instead aggregate all of the purported openings and open the aggregated polynomial at a random point which outputs true only if the individual openings were true\n\nHopefully that was somewhat clear",
+      "createdAt": "2021-10-01T18:57:51.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I get the general direction of the idea, but many of the connections are missing",
+      "createdAt": "2021-10-01T19:24:41.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "perhaps the biggest of which, relatedly with what I asked about is this:\nso sure you can create a polynomial and potentially commit to it\nbut the verifier only has an elliptic curve point commitment\nhow does he know that the polynomial that you're committing too matches the commitement?",
+      "createdAt": "2021-10-01T19:25:57.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and from the IP draft, that commitment is a simple pedersen vector commitment, not a polynomial commitement (unless it somehow doubles as one?)",
+      "createdAt": "2021-10-01T19:27:05.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "- Oh good question, the verifier can make it such that if the prover commits to a different polynomial, the verification will fail with overwhelming probability, I think it's implicit in the links I posted above, by the way the verifier prepares the claim\n\n- If we imagine a polynomial f(x) = x^2 + 6x + 7 , then if we evaluate the polynomial at a point t, we see that `f(t) = t^2 + 6t + 7` , this is the same as doing the dot product between the two vectors `<7,6,1> , <1, t, t^2>` , the inner product argument commits two vectors and proves that their inner product, so we can use it as a polynomial commitment scheme",
+      "createdAt": "2021-10-01T19:42:11.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "mmh\ndo you think we could drop all the verkle-tree sophistication sophistication (including inner product, proof aggregation, etc) and focus on the pure pedersen commitment?\n\nlike how would you open the pedersen commitement at a given position?\n(I feel like if all the other stuff is possible, then this should be possible too, and not that hard! perhaps it's not succint though, that's perfectly fine, I'm trying to grasp the basics)\n\nfor pedersen, the commitment is indeed pretty much exactly what you describe (the verifier sends a challenge, which is used to compute a polynomial whose factors are the member of the vector)\n\nbut I'm also pretty sure that asking the evaluation of the polynomial at `x = index` doesn't return the value of the vector at that index",
+      "createdAt": "2021-10-01T19:48:56.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yep sure, so in the IPA you commit to two vectors and proves that their inner product is some value.\n\nie given <a, b, c> and <d, e, f> , the inner product argument allows the prover to commit to both vectors and prove that a * d + b * e + c * f = some_value.\n\n- Let's say the vector is [x, y, z] . There is a polynomial which has the following evaluations `f(0) = x, f(1) = y, f(2) = z` . You can use an algorithm to figure out this polynomial\n\n- Lets say that the coefficients of this polynomial is `<f_0, f_1, f_2>` , then you can take the two vectors `<f_0, f_1, f_2>` ,  `<2^0, 2^1, 2^2>` and put it into your IPA algorithm and the verification will only pass, if `some_value` is equal to `z`",
+      "createdAt": "2021-10-01T19:59:14.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess the main point, is that you can view a polynomial evaluation in coefficient form as the inner product of the coefficients of the polynomial and the evaluation points to increasing powers",
+      "createdAt": "2021-10-01T20:01:10.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this feels like going in circles 😅",
+      "createdAt": "2021-10-01T20:03:30.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think maybe the confusing part of the scheme is that the evaluation point is a random point, this is mainly because we use IPA as a sub-protocol",
+      "createdAt": "2021-10-01T20:03:36.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sorry 😄",
+      "createdAt": "2021-10-01T20:03:49.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you're not relating this to the pedersen commitment, which **is the only thing the verifier has**",
+      "createdAt": "2021-10-01T20:03:50.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I appreciate the effort!",
+      "createdAt": "2021-10-01T20:03:57.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The verifier should also have the purported output and the input",
+      "createdAt": "2021-10-01T20:04:23.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so sure you can commit to polynomials etc, but how do you convince the verifier that this polynomial is the one that matches the vector for which it has a commitment?",
+      "createdAt": "2021-10-01T20:04:29.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right, it has that",
+      "createdAt": "2021-10-01T20:04:41.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but if you send him, input, output and commitment to polynomial (+ proof that polynomial(input) = output)\nthat still doesn't tell him that the output is something that lives in the vector that he has a commitement to",
+      "createdAt": "2021-10-01T20:05:24.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "like the pedersen commitment needs to intervene somewhere in the proof, or it's all disconnected",
+      "createdAt": "2021-10-01T20:06:06.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's like trying to do a merkle proof without using the merkle root",
+      "createdAt": "2021-10-01T20:06:17.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "do you have a ref/link on the algorithm that turns a vector into a polynomial btw?",
+      "createdAt": "2021-10-01T20:12:40.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's called lagrange interpolation: <https://en.wikipedia.org/wiki/Lagrange_polynomial>",
+      "createdAt": "2021-10-01T20:21:09.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So the polynomial commitment scheme is a separate component. If you want you can think of it as just this function:\n\n```rust\nfn poly_verify(proof, commitment, input, output)-> bool\n```\n\nIf the commitment is to a polynomial `f` , then that function only returns true when `f(input) = output`\n\n----\n\nA separate part of the verification takes a trusted commitment called the `root` of the tree and from there we create proofs of the nodes in the root, then we take their commitments and prove the nodes within those nodes, etc",
+      "createdAt": "2021-10-01T20:32:55.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Here is another resource which might help: <https://vitalik.ca/general/2021/06/18/verkle.html>",
+      "createdAt": "2021-10-01T20:39:54.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> A separate part of the verification takes a trusted commitment called the root of the tree and from there we create proofs of the nodes in the root, then we take their commitments and prove the nodes within those nodes, etc\nthis is what I was always asking about!\n(I linked the Verkle EIP draft to clarify that it's what I'm talking about)",
+      "createdAt": "2021-10-01T20:47:29.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and I've read that, to clarify, I'm asking about:\n> A vector commitment scheme is a special type of hash function, hashing a list <some latex> . But vector commitments have the special property that for a commitment  C and a value zi, it's possible to make a short proof that is the commitment to some list where the value at the i'th position is zi\n> \n> . In a Verkle proof, this short proof replaces the function of the sister nodes in a Merkle Patricia proof, giving the verifier confidence that a child node really is the child at the given position of its parent node.",
+      "createdAt": "2021-10-01T20:48:37.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh glad we finally got to an understanding! To clarify, that part is agnostic to the commitment scheme being used",
+      "createdAt": "2021-10-01T20:51:18.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think you mean verkle tree are agnostic to the commitment scheme being used",
+      "createdAt": "2021-10-01T20:52:11.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but given that the currently prescribed commitment scheme is pedersen\nhow do I do that? 😂",
+      "createdAt": "2021-10-01T20:52:43.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah that too, and the part where the root is linked is agnostic to the commitment scheme",
+      "createdAt": "2021-10-01T20:54:15.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "oh do what?",
+      "createdAt": "2021-10-01T20:54:47.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> But vector commitments have the special property that for a commitment  C and a value zi, it's possible to make a short proof that is the commitment to some list where the value at the i'th position is zi\nmake that proof",
+      "createdAt": "2021-10-01T20:55:24.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "without revealing the whole vector",
+      "createdAt": "2021-10-01T20:55:29.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh that's what I mentioned above, the simplest way is to interpolate the vector using lagrange interpolation to get a polynomial, then do the inner product thing above",
+      "createdAt": "2021-10-01T20:56:39.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but you haven't addressed\n> but if you send him, input, output and commitment to polynomial (+ proof that polynomial(input) = output)\n> that still doesn't tell him that the output is something that lives in the vector that he has a commitement to\n> like the pedersen commitment needs to intervene somewhere in the proof, or it's all disconnected\n> it's like trying to do a merkle proof without using the merkle root\n> do you have a ref/link on the algorithm that turns a vector into a polynomial btw?",
+      "createdAt": "2021-10-01T20:57:41.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "norswap",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "essentially, how do you prove the lagrange interpolation matches the commitment?",
+      "createdAt": "2021-10-01T20:58:06.002000+00:00",
+      "attachments": []
+    }
+  ]
+}

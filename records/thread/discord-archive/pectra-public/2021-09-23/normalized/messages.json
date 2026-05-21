@@ -1,0 +1,330 @@
+{
+  "schemaVersion": 1,
+  "channel": "pectra-public",
+  "date": "2021-09-23",
+  "messageCount": 40,
+  "sourceHash": "d1d6316d6ac08c8b0462bbd67b4160f7833cf0c9acbfed88f2e1cf73a530dced",
+  "searchText": "Should the modification to the Header (adding the BeaconRandomness field) be part of the merge spec for the f2f already? Good question. This gap will be filled in the Merge Interop meta spec. The idea is to have it communicated back and forth as a part of `ExecutionPayload` structure without including it into a block that is constructed from the payload. Cool, yeah that's the way it's implemented right now, so I'll leave it like that Oh and the difficulty is hardcoded to 0 still, right? It doesn't require fully featured SSZ implementation to be added to the execution client. Execution client would only need to implement SSZ Union which is encoded as `Selector || serialize(value)` -- pretty much the same as typed transaction is if the value has a `ByteList` SSZ type. I have a preference to implement this on the consensus side as it should be easier in terms of speccing and governance. We would need an EIP for such a change on the execution side, right? Yes, as it's stated by the EIP This EIP proposes SSZ encoding for transaction objects. Introducing SSZ on the execution layer increases implementation complexity. I don't think it worth doing at the Merge. > It doesn't require fully featured SSZ implementation to be added to the execution client. A long time back I tried to make this argument, it didn't go over well with the execution client teams. 😖 No EIP required I think, since this would be part of the consensus/execution API layer which isn't currently using the EIP process I don't think. Engine API currently refers to EIP-2718 in the `transactions` field specification. But I agree that it could be done on the Engine API handler without affecting the execution layer at all, so, transaction gossip won't be affected What the benefit of Option 2 do you see in comparison with Option 1? IMO the only difference is whether the adapter lives in execution client or consensus client. In either case, the adapter *should* live very close to the wire, so it should have relatively little impact on the client overall. I think 2 is better because it allows the consensus client to not have to adopt the technical debt of the execution clients. I think both options are close enough to each other that it doesn't matter much, my preference for putting the adapter in the execution client is mild. The EL clients currently have no notion of SSZ whatsoever, and I would love to keep it that way 🙈 As was mentioned above, you wouldn't actually need an SSZ client. The way SSZ encodes simple unions like this you could very easily write like a 5 line function to deserialize without an actual SSZ encoder. Maybe less than that. I see, so basically ``` switch Selector { case 0: UnmarshalLegacyTx case 1: Unmarshal2930Tx case 2: Unmarshal1559Tx } ``` Not if I have my way! 😆 ```ts switch (tx[0]) { case 1: Unmarshal2930(tx) case 2: Unmarshal1559(tx) case 3: UnmarshalLegacy(tx.slice(1)) case 4: UnmarshalLegacy(tx.slice(1)) } ``` Something like that I think. I haven't looked at SSZ for a while, but I *think* unions are just byte prefixes? That's right, a union is a 1-byte prefix. My proposal for `Union` usage doesn't involve SSZ in the execution layer at all. The Union is translated to the envelope format that's already in use today. But the legacy case has many ugly edges, so I am starting to prefer not using an Union type at all What ugly edge cases do you see if we put wrapped legacy transactions on the wire? May we use `transactions: List[OpaqueTransaction]` and then convert it to the `Union` with related changes to the consensus layer once unwrapped legacy transactions are removed entirely? It will probably be a *very* long time before legacy transactions are removed from the execution layer entirely. However, we may get wrapped legacy transactions sooner than that. What are all the places where consensus clients deal with transactions? Currently, it's only `ExecutionPayload` structure with its JSON encoding as a part of Engine API implementation Consensus client doesn't send/receive transactions between each other or encode them anywhere else? It just gets them from the execution client, stores them, and then locally (in whatever way the client wants) and then sends them back to the execution client later? Sounds correct to me It is *much* harder to change an API than to change an implementation later, which is why I have a pretty strong preference for designing the API for the future and then authoring adapters inside implementations to deal with converting between the future-targeted wire protocol and the current implementation. The question for the API is encoding: 1) Binary format used by execution layer to encode tx objects in the wire 2) Binary SSZ format 3) JSON format, used by execution layer to encode tx objects in JSON-RPC API What about option 3? Then we could use SSZ Union and container per each type to store transaction objects but it increases implementation complexity. Also, option 3 allows for using SSZ on the consensus layer and whatever is used today on the execution layer. Not sure that having different tx objects encoding across layers is valuable. If we use `List[OpaqueTransaction]` today then the only option for the future would be to convert tx objects to the binary format that is used by execution layer For (3) would we have something like this? ```json { \"transactions\": [ { \"type\": 3, \"payload\": some_pre_155_rlp }, { \"type\": 2, \"payload\": some_1559_rlp }, ... ] } ``` Yeah, and if we look for more granular decomposition of the payload (and we do as I understand) we will have to either update Engine API in the future which may be difficulty or do it right now Oh, you are thinking something like this? ```json { \"transactions\": [ { \"type\": 2, \"maxFeePerGas\": 100, \"maxPriorityFeePerGas\": 1, \"nonce\": 5, \"chainId\": 1, \"signature\": { \"r\": ..., \"s\": ..., \"yParity\": 1 }, ... }, { \"type\": 4, \"gasPrice\": 100, \"nonce\": 6, \"chainId\": 1, \"signature\": { \"r\": ..., \"s\": ..., \"v\": 35 }, ... }, ... ] } ``` Yeah, ultimately we want this data to be understandable by both layers. And it could be achieved without unifying binary representation of transaction object. Not sure if there are corner cases where we would like to have the representation unified though. Simplification of this part of the spec that has been mentioned previously, https://github.com/ethereum/EIPs/pull/4203",
+  "excerpts": [
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Should the modification to the Header (adding the BeaconRandomness field) be part of the merge spec for the f2f already?",
+      "createdAt": "2021-09-23T06:18:59.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Good question. This gap will be filled in the Merge Interop meta spec. The idea is to have it communicated back and forth as a part of `ExecutionPayload` structure without including it into a block that is constructed from the payload.",
+      "createdAt": "2021-09-23T06:23:36.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Cool, yeah that's the way it's implemented right now, so I'll leave it like that",
+      "createdAt": "2021-09-23T06:24:57.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh and the difficulty is hardcoded to 0 still, right?",
+      "createdAt": "2021-09-23T06:44:51.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It doesn't require fully featured SSZ implementation to be added to the execution client. Execution client would only need to implement SSZ Union which is encoded as `Selector || serialize(value)` -- pretty much the same as typed transaction is if the value has a `ByteList` SSZ type.\n\nI have a preference to implement this on the consensus side as it should be easier in terms of speccing and governance. We would need an EIP for such a change on the execution side, right?",
+      "createdAt": "2021-09-23T06:45:48.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, as it's stated by the EIP",
+      "createdAt": "2021-09-23T06:46:03.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This EIP proposes SSZ encoding for transaction objects. Introducing SSZ on the execution layer increases implementation complexity. I don't think it worth doing at the Merge.",
+      "createdAt": "2021-09-23T06:49:03.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> It doesn't require fully featured SSZ implementation to be added to the execution client.\nA long time back I tried to make this argument, it didn't go over well with the execution client teams.  😖",
+      "createdAt": "2021-09-23T06:50:41.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No EIP required I think, since this would be part of the consensus/execution API layer which isn't currently using the EIP process I don't think.",
+      "createdAt": "2021-09-23T06:51:29.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Engine API currently refers to EIP-2718 in the `transactions` field specification. But I agree that it could be done on the Engine API handler without affecting the execution layer at all, so, transaction gossip won't be affected",
+      "createdAt": "2021-09-23T06:59:28.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What the benefit of Option 2 do you see in comparison with Option 1?",
+      "createdAt": "2021-09-23T07:03:53.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "IMO the only difference is whether the adapter lives in execution client or consensus client.  In either case, the adapter *should* live very close to the wire, so it should have relatively little impact on the client overall.  I think 2 is better because it allows the consensus client to not have to adopt the technical debt of the execution clients.",
+      "createdAt": "2021-09-23T07:05:30.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think both options are close enough to each other that it doesn't matter much, my preference for putting the adapter in the execution client is mild.",
+      "createdAt": "2021-09-23T07:05:58.487000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The EL clients currently have no notion of SSZ whatsoever, and I would love to keep it that way 🙈",
+      "createdAt": "2021-09-23T07:07:24.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "As was mentioned above, you wouldn't actually need an SSZ client.",
+      "createdAt": "2021-09-23T07:41:38.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The way SSZ encodes simple unions like this you could very easily write like a 5 line function to deserialize without an actual SSZ encoder.",
+      "createdAt": "2021-09-23T07:42:02.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe less than that.",
+      "createdAt": "2021-09-23T07:42:07.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see, so basically \n```\nswitch Selector {\ncase 0: UnmarshalLegacyTx\ncase 1: Unmarshal2930Tx\ncase 2: Unmarshal1559Tx\n}\n```",
+      "createdAt": "2021-09-23T07:44:40.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Not if I have my way!  😆",
+      "createdAt": "2021-09-23T08:06:37.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```ts\nswitch (tx[0]) {\n    case 1: Unmarshal2930(tx)\n    case 2: Unmarshal1559(tx)\n    case 3: UnmarshalLegacy(tx.slice(1))\n    case 4: UnmarshalLegacy(tx.slice(1))\n}\n```",
+      "createdAt": "2021-09-23T08:07:39.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Something like that I think.  I haven't looked at SSZ for a while, but I *think* unions are just byte prefixes?",
+      "createdAt": "2021-09-23T08:08:45.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That's right, a union is a 1-byte prefix.",
+      "createdAt": "2021-09-23T08:10:09.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My proposal for `Union` usage doesn't involve SSZ in the execution layer at all. The Union is translated to the envelope format that's already in use today. But the legacy case has many ugly edges, so I am starting to prefer not using an Union type at all",
+      "createdAt": "2021-09-23T08:47:16.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What ugly edge cases do you see if we put wrapped legacy transactions on the wire?",
+      "createdAt": "2021-09-23T08:50:38.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "May we use `transactions: List[OpaqueTransaction]` and then convert it to the `Union` with related changes to the consensus layer once unwrapped legacy transactions are removed entirely?",
+      "createdAt": "2021-09-23T09:40:03.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It will probably be a *very* long time before legacy transactions are removed from the execution layer entirely.",
+      "createdAt": "2021-09-23T09:51:15.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "However, we may get wrapped legacy transactions sooner than that.",
+      "createdAt": "2021-09-23T09:51:27.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What are all the places where consensus clients deal with transactions?",
+      "createdAt": "2021-09-23T09:52:29.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, it's only `ExecutionPayload` structure with its JSON encoding as a part of Engine API implementation",
+      "createdAt": "2021-09-23T09:53:26.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Consensus client doesn't send/receive transactions between each other or encode them anywhere else?",
+      "createdAt": "2021-09-23T09:55:07.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It just gets them from the execution client, stores them, and then locally (in whatever way the client wants) and then sends them back to the execution client later?",
+      "createdAt": "2021-09-23T09:56:18.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sounds correct to me",
+      "createdAt": "2021-09-23T10:09:44.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is *much* harder to change an API than to change an implementation later, which is why I have a pretty strong preference for designing the API for the future and then authoring adapters inside implementations to deal with converting between the future-targeted wire protocol and the current implementation.",
+      "createdAt": "2021-09-23T10:17:06.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The question for the API is encoding:\n1) Binary format used by execution layer to encode tx objects in the wire\n2) Binary SSZ format\n3) JSON format, used by execution layer to encode tx objects in JSON-RPC API\n\nWhat about option 3? Then we could use SSZ Union and container per each type to store transaction objects but it increases implementation complexity. Also, option 3 allows for using SSZ on the consensus layer and whatever is used today on the execution layer. Not sure that having different tx objects encoding across layers is valuable.",
+      "createdAt": "2021-09-23T10:25:02.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If we use `List[OpaqueTransaction]` today then the only option for the future would be to convert tx objects to the binary format that is used by execution layer",
+      "createdAt": "2021-09-23T10:26:18.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For (3) would we have something like this?\n```json\n{\n    \"transactions\": [\n        { \"type\": 3, \"payload\": some_pre_155_rlp },\n        { \"type\": 2, \"payload\": some_1559_rlp },\n        ...\n    ]\n}\n```",
+      "createdAt": "2021-09-23T10:45:08.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, and if we look for more granular decomposition of the payload (and we do as I understand) we will have to either update Engine API in the future which may be difficulty or do it right now",
+      "createdAt": "2021-09-23T10:58:45.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, you are thinking something like this?\n```json\n{\n    \"transactions\": [\n        {\n            \"type\": 2,\n            \"maxFeePerGas\": 100,\n            \"maxPriorityFeePerGas\": 1,\n            \"nonce\": 5,\n            \"chainId\": 1,\n            \"signature\": { \"r\": ..., \"s\": ..., \"yParity\": 1 },\n            ...\n        },\n        {\n            \"type\": 4,\n            \"gasPrice\": 100,\n            \"nonce\": 6,\n            \"chainId\": 1,\n            \"signature\": { \"r\": ..., \"s\": ..., \"v\": 35 },\n            ...\n        },\n        ...\n    ]\n}\n```",
+      "createdAt": "2021-09-23T11:09:54.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, ultimately we want this data to be understandable by both layers. And it could be achieved without unifying binary representation of transaction object. Not sure if there are corner cases where we would like to have the representation unified though.",
+      "createdAt": "2021-09-23T11:17:01.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Simplification of this part of the spec that has been mentioned previously, https://github.com/ethereum/EIPs/pull/4203",
+      "createdAt": "2021-09-23T11:30:06.842000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,736 @@
+{
+  "schemaVersion": 1,
+  "channel": "future-eoa",
+  "date": "2020-06-15",
+  "messageCount": 90,
+  "sourceHash": "730717e05d0feb418f8e51029c138c86193718062b5cbb6b43b3ed404cf9e7f7",
+  "searchText": "<@543900561460822016> I think implementations should be able to use an off-the-shelf RLP decoder to read the transaction. This means that you would give the full payload to the decoder, and the decoder would not need to know that it is decoding a transaction. The decoder would simply return a tuple of either two items (2718 transaction) or 10 items (legacy transaction). In the 2718 case, the client/tool/app would switch on the first tuple item and interpret the second tuple item (which was just a byte array to the RLP decoder) accordingly. ```ts decodedEnvelope = rlpDecode(transactionBytes) if (decodedEnvelope.length == 2) { switch (decodedEnvelope[0]) { case 0: decodedTransaction = rlpDecode(decodedEnvelope[1]) // TODO: handle legacy transaction break case 1: decodedTransaction = rlpDecode(decodedEnvelope[1]) // TODO: handle eip-2711 transaction break case 3: decodedTransaction = sszDecode(decodedEnvelope[1]) // TODO: handle Type 3 transaction break default: throw new Error('unknown transaction type') } } else if (decodedEnvelope.length == 9) { // TODO: handle legacy transaction } else { throw new unexpected number of items in transaction') } ``` The key here is that in the above code, rlpDecoder and sszDecoder are off the shelf tools that just accept byte arrays as input, they aren't custom functions with knowledge of what a transaction is. Couldn’t we do something like this? ```ts decodedEnvelope = rlpDecode(transactionBytes) switch (decodedEnvelope.type) { case 0: decodedTransaction = rlpDecode(decodedEnvelope.payload) // TODO: handle legacy transaction break case 1: decodedTransaction = rlpDecode(decodedEnvelope.payload) // TODO: handle eip-2711 transaction break case 3: decodedTransaction = sszDecode(decodedEnvelope.payload) // TODO: handle Type 3 transaction break default: throw new Error('unknown transaction type') } ``` That would make legacy transactions invalid <@543900561460822016> Since for them, the first item in the tuple is a nonce in that case, not `0`. Did you get a chance to read my post on the discussion forum? I explained why I don’t think the protocol needs to maintain compatibility with legacy txs. I’m curious to hear your thoughts Yeah, but I had just woken up and haven't grokked it yet. Plan to read it again in a bit. 🙂 My gut tells me that we need to maintain support for legacy transactions in tooling. I *think* what you are saying is that the client can transform legacy transactions into new type-0 transactions, but we cannot do that because the whole thing is signed, including the transaction type and we cannot have the user re-sign (without updating all tooling as part of hard fork). <@543900561460822016> That is, we cannot wrap legacy transactions into new transactions without the signer participating. I just dropped two comments on the EIP-2718 thread about 1. defining rules for signing and hashing for transactions under the new type. 2. adding a \"fee bomb\" to the legacy transaction type as a way to achieve full deprecation of the legacy format. I'm still leaning somewhat strongly in favor of the transaction format being enveloped as `[TransactionType, raw_txn_bytes]` and having each format define how that second array of bytes is to be encoded. It seems to be the option that gives us maximum flexibility. I respect that we can probably achieve most or maybe even all of that flexibility via single layer structure, but my thinking can be simplified to this: If the two are roughly the same, then I chose the envelope because it gives us strong decoupling since it builds strong separation between the inner format of the transaction and the outer envelope. A single layer structure, while potentially *simpler* also mixes the individual transaction parameter detals with the outer *generic* envelope, and this allows for unknown-unknowns to sneak in. So if they are roughly equivalent, I prefer the envelope because it provides stronger guarantees that the outer envelope and the inner transaction format do not incidentally collide in some unforseen manner, **and** it more easily allows for the inner transaction format to not be RLP based. There is another approach. Introduce a \"magic\" byte or couple of bytes that can never be the beginning of a correct RLP, and use it as a prefix for anything non-legacy. And after the magic byte, you can go wild 🙂 it is similar to what has been done to CREATE2 address generation, there was `0xff` magic byte added for purpose of not being a valid RLP I don't think there is any single leading byte that is invalid in RLP? Even 0xff is valid RLP I believe. theoretically no, practically yes Though, arguably it is *silly*. Um, I think it's that there are bytes that are invalid to start an RLP list. I don't believe so. However, 0xff leading byte means that would mean and 8-byte length, which is crazy big. yes, that is the idea those 8 bytes are untrimmed, so the length needs to be at least 2^56 ~~That flowchart isn't right is it?~~ which is, you know, something something atoms in the universe > That flowchart isn't right is it? <@!301186049323958275> maybe it is not right, but I never found errors in it. I made it back in 2016 🙂 I just fail at doing hex to decimal in my head. For some reason I thought `f7` was smaller than it is. 😬 if you start using `0xff` prefix, couple of things will blow out of memory (if they don't sanitise RLP before allocating memory), but it will be fixed quickly you can also use `0xff00` magic, which is definitely invalid RLP Why is that invalid RLP? Just because it overflows? If so, the `00` doesn't add value. because BigEndian trimmed int would not start with the zero byte Why would you interpret that second byte as a big endian trimmed INT? Taking a step back, I think you are saying that is invalid Ethereum data. RLP doesn't have a concept of numbers. RLP only understands lists and byte arrays. because `0xff` prefix means that it encodes the sequence of RLP-substructures with the length >= 56, and the total length of these sub-structures is encoded as a Big Endian int which follows Ethereum has an un-named protocol (the fact that it has no name drives me nuts) where it defines how one encodes numbers prior to RLP encoding them. RLP encodes 3 types - bytes, byte sequences and sequences of sub-structures (which you call lists) I suppose you are right, that would be technically invalid. Though, I suspect most decoders probably just read the 8 bytes and cast them to a 256-bit integer, then look at the value. list appear when you start writing RLP encoding/decoding libraries So `0xff00000000` would likely decode as valid in a lot of decoders, even though it probably isn't technically correct. but RLP does not even prepend such \"list\" with number of elements, so it is silly to call them lists 🙂 The wiki calls them lists. 🤷 I'm just a follower. 😄 if any RLP decoder does not fail on `0xff00`, it is an invalid decoder 🙂 Yes, I found RLP confusing in the beginning as well, because it is actually a poor design 🙂 While I don't disagree, that feels like a really easy to make mistake and I'm not a fan of *relying* on RLP decoders to do the right thing there. and whoever wrote Wiki probably looked at the code It was just a suggestion, which may make your life easier, if you accept this little technicality 🙂 That is, if we can avoid one extra foot gun, it feels like we should unless there is a compelling argument to include the foot gun. My default is to go with the easiest to grok/read solution and look for compelling arguments that optimizations are *necessary*. So far, I haven't seen a particularly compelling argument (for me) that we should bother doing anything more complex than `rlp([TransactionType, payload])`. ok, then I can do a different magic, which will nevertheless require a few exabytes of memory if decoded as RLP 🙂 Which I believe to be the easiest to grok/read option. I personally think you might be introducing a bit of contradiction in your assumption. You assume that people who will implement these things are very technical (can grok your EIP) and not very technical (can't grok RLP) at the same time I assume that RLP is a primitive every client has, because it is used all over the place in Ethereum. I don't expect every client or tool authors to understand its inner workings, but I do expect that they either understand its inner workings **or** have access to a general purpose RLP encoder/decoder library. This is because RLP is used in a number of places in Ethereum and you can't really function in the space without having access to an RLP encoder/decoder. Unless perhaps your argument <@456226577798135808> is that you think we should work on ditching RLP from all of Ethereum? And this would be the first step toward achieving that goal? no, I do not hold this ambition anymore, but I think RLP has couple of unpleasant properties Such as? but I do not want to divert this conversation into that 1) you cannot easily \"count\" number of sub-structures, you actually have to start parsing them. That makes it a bit harder to use number of sub-structures as a discriminator 2) it is not very well suited for generating large structures, because you have to know the size in advance to present the prefix. You also cannot always know the length of the prefix either. It would be better to support chunking or something for large structures I think it is well suited for small structures that do not evolve but for anything else - it is quite sub-optimal ```ts const envelope = rlpDecode(bytes) assert(envelope.length == 2) switch (envelope[0]) { case 0: const [nonce, gasPrice, gasLimit, to, value, data, senderV, senderR, senderS] = rlpDecode(envelope[1]) // TODO: process transaction break; case 1: const decoded = envelope[1] assert(decoded.length == 14) const subType = decoded[0] switch (subType) { case 0: // TODO break } break } } ``` That is the pseudocode for processing a transaction that I would like to see \"matched or beaten\" (in terms of readability/maintainability/simplicity) by an alternative proposal. I'm not a fan of discriminating on length, because you end up having to do silly things in order to avoid conflicting on length. I would *much* rather have an actual discriminant, and in RLP such a discriminant is as small as 1 byte which isn't too bad. I think for (2) you mean it is not good for streaming? It can handle large structures fine, but you have to process from the inside out. I suppose in some cases that may be problematic/annoying if the structure is large enough that keeping it all in memory is problematic. And I will agree, that writing an encoder/decoder would have been much easier if list prefixes counted the number of items in the list, rather than the number of bytes in the list. That was probably my biggest annoyance when writing an encoder/decoder... having to work inside out. <@364458974906548225> Did you mean 👍 here? https://ethereum-magicians.org/t/eip-2711-separate-gas-payer-from-msg-sender/4353/35 Yes, just updated, thanks for catching that FYI, I keep wanting to \"stir the pot\" with the idea of building this new transaction type protocol on SSZ which has some nice *bonus* things like the native trie hashing, but choosing to do so is also choosing to engage in the inevitable political discussion that goes with introducing SSZ into Eth1.x protocol stuff. Disclaimer that I'm a big fan of SSZ and feel that doing away with RLP would be awesome Is SSZ documented anywhere? Searching isn't proving helpful. https://github.com/ethereum/eth2.0-specs/blob/dev/ssz/simple-serialize.md currently burried in eth2 specs. <@!291925846556540928> and I have discussed the need to get it extracted into something stand-alone since it doesn't need ot be coupled with a \"blockchain\" spec Language support is currently reasonably widespread due to eth2 clients existing across a bunch of different languages. No JS I'm guessing though? Lodestar would likely have implemented something.... but I don't actu",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@543900561460822016> I think implementations should be able to use an off-the-shelf RLP decoder to read the transaction.",
+      "createdAt": "2020-06-15T01:40:29.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This means that you would give the full payload to the decoder, and the decoder would not need to know that it is decoding a transaction.",
+      "createdAt": "2020-06-15T01:41:46.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The decoder would simply return a tuple of either two items (2718 transaction) or 10 items (legacy transaction).",
+      "createdAt": "2020-06-15T01:43:04.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In the 2718 case, the client/tool/app would switch on the first tuple item and interpret the second tuple item (which was just a byte array to the RLP decoder) accordingly.",
+      "createdAt": "2020-06-15T01:46:03.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```ts\ndecodedEnvelope = rlpDecode(transactionBytes)\nif (decodedEnvelope.length == 2) {\n    switch (decodedEnvelope[0]) {\n        case 0:\n            decodedTransaction = rlpDecode(decodedEnvelope[1])\n            // TODO: handle legacy transaction\n            break\n        case 1:\n            decodedTransaction = rlpDecode(decodedEnvelope[1])\n            // TODO: handle eip-2711 transaction\n            break\n        case 3:\n            decodedTransaction = sszDecode(decodedEnvelope[1])\n            // TODO: handle Type 3 transaction\n            break\n        default:\n            throw new Error('unknown transaction type')\n    }\n} else if (decodedEnvelope.length == 9) {\n    // TODO: handle legacy transaction\n} else {\n    throw new unexpected number of items in transaction')\n}\n```",
+      "createdAt": "2020-06-15T01:52:56.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The key here is that in the above code, rlpDecoder and sszDecoder are off the shelf tools that just accept byte arrays as input, they aren't custom functions with knowledge of what a transaction is.",
+      "createdAt": "2020-06-15T01:57:02.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Couldn’t we do something like this?\n\n```ts\ndecodedEnvelope = rlpDecode(transactionBytes)\n\n switch (decodedEnvelope.type) {\n        case 0:\n            decodedTransaction = rlpDecode(decodedEnvelope.payload)\n            // TODO: handle legacy transaction\n            break\n        case 1:\n            decodedTransaction = rlpDecode(decodedEnvelope.payload)\n            // TODO: handle eip-2711 transaction\n            break\n        case 3:\n            decodedTransaction = sszDecode(decodedEnvelope.payload)\n            // TODO: handle Type 3 transaction\n            break\n        default:\n            throw new Error('unknown transaction type')\n    }\n```",
+      "createdAt": "2020-06-15T03:38:32.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That would make legacy transactions invalid  <@543900561460822016>",
+      "createdAt": "2020-06-15T05:35:48.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Since for them, the first item in the tuple is a nonce in that case, not `0`.",
+      "createdAt": "2020-06-15T05:36:28.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Did you get a chance to read my post on the discussion forum? I explained why I don’t think the protocol needs to maintain compatibility with legacy txs. I’m curious to hear your thoughts",
+      "createdAt": "2020-06-15T06:03:50.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, but I had just woken up and haven't grokked it  yet.  Plan to read it again in a bit.  🙂",
+      "createdAt": "2020-06-15T06:31:09.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My gut tells me that we need to maintain support for legacy transactions in tooling.  I *think* what you are saying is that the client can transform legacy transactions into new type-0 transactions, but we cannot do that because the whole thing is signed, including the transaction type and we cannot have the user re-sign (without updating all tooling as part of hard fork).  <@543900561460822016>",
+      "createdAt": "2020-06-15T06:33:53.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is, we cannot wrap legacy transactions into new transactions without the signer participating.",
+      "createdAt": "2020-06-15T06:42:48.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I just dropped two comments on the EIP-2718 thread about\n\n1. defining rules for signing and hashing for transactions under the new type.\n2. adding a \"fee bomb\" to the legacy transaction type as a way to achieve full deprecation of the legacy format.",
+      "createdAt": "2020-06-15T17:19:16.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm still leaning somewhat strongly in favor of the transaction format being enveloped as  `[TransactionType, raw_txn_bytes]` and having each format define how that second array of bytes is to be encoded.  It seems to be the option that gives us maximum flexibility.  I respect that we can probably achieve most or maybe even all of that flexibility via single layer structure, but my thinking can be simplified to this:\n\nIf the two are roughly the same, then I chose the envelope because it gives us strong decoupling since it builds strong separation between the inner format of the transaction and the outer envelope.  A single layer structure, while potentially *simpler* also mixes the individual transaction parameter detals with the outer *generic* envelope, and this allows for unknown-unknowns to sneak in.  So if they are roughly equivalent, I prefer the envelope because it provides stronger guarantees that the outer envelope and the inner transaction format do not incidentally collide in some unforseen manner, **and** it more easily allows for the inner transaction format to not be RLP based.",
+      "createdAt": "2020-06-15T17:26:08.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There is another approach. Introduce a \"magic\" byte or couple of bytes that can never be the beginning of a correct RLP, and use it as a prefix for anything non-legacy. And after the magic byte, you can go wild 🙂",
+      "createdAt": "2020-06-15T17:28:35.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is similar to what has been done to CREATE2 address generation, there was `0xff` magic byte added for purpose of not being a valid RLP",
+      "createdAt": "2020-06-15T17:29:29.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think there is any single leading byte that is invalid in RLP?",
+      "createdAt": "2020-06-15T18:10:02.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Even 0xff is valid RLP I believe.",
+      "createdAt": "2020-06-15T18:10:23.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "theoretically no, practically yes",
+      "createdAt": "2020-06-15T18:10:25.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Though, arguably it is *silly*.",
+      "createdAt": "2020-06-15T18:10:28.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Um, I think it's that there are bytes that are invalid to start an RLP list.",
+      "createdAt": "2020-06-15T18:10:39.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-06-15T18:12:31.213000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "e30088bae80ff0c4a59b5d180ba8ece8b8ec6e60bccf9afd2da712e3c371442e"
+        }
+      ]
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't believe so.  However, 0xff leading byte means that would mean and 8-byte length, which is crazy big.",
+      "createdAt": "2020-06-15T18:12:39.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, that is the idea",
+      "createdAt": "2020-06-15T18:12:47.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "those 8 bytes are untrimmed, so the length needs to be at least 2^56",
+      "createdAt": "2020-06-15T18:13:25.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "~~That flowchart isn't right is it?~~",
+      "createdAt": "2020-06-15T18:13:45.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "which is, you know, something something atoms in the universe",
+      "createdAt": "2020-06-15T18:13:49.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> That flowchart isn't right is it?\n<@!301186049323958275> maybe it is not right, but I never found errors in it. I made it back in 2016 🙂",
+      "createdAt": "2020-06-15T18:14:25.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I just fail at doing hex to decimal in my head.",
+      "createdAt": "2020-06-15T18:14:37.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For some reason I thought `f7` was smaller than it is.  😬",
+      "createdAt": "2020-06-15T18:14:53.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if you start using `0xff` prefix, couple of things will blow out of memory (if they don't sanitise RLP before allocating memory), but it will be fixed quickly",
+      "createdAt": "2020-06-15T18:17:52.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you can also use `0xff00` magic, which is definitely invalid RLP",
+      "createdAt": "2020-06-15T18:18:49.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why is that invalid RLP?  Just because it overflows?  If so, the `00` doesn't add value.",
+      "createdAt": "2020-06-15T18:20:00.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "because BigEndian trimmed int would not start with the zero byte",
+      "createdAt": "2020-06-15T18:20:19.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why would you interpret that second byte as a big endian trimmed INT?",
+      "createdAt": "2020-06-15T18:20:44.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Taking a step back, I think you are saying that is invalid Ethereum data.",
+      "createdAt": "2020-06-15T18:21:09.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "RLP doesn't have a concept of numbers.",
+      "createdAt": "2020-06-15T18:21:13.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "RLP only understands lists and byte arrays.",
+      "createdAt": "2020-06-15T18:21:22.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "because `0xff` prefix means that it encodes the sequence of RLP-substructures with the length >= 56, and the total length of these sub-structures is encoded as a Big Endian int which follows",
+      "createdAt": "2020-06-15T18:21:49.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ethereum has an un-named protocol (the fact that it has no name drives me nuts) where it defines how one encodes numbers prior to RLP encoding them.",
+      "createdAt": "2020-06-15T18:21:59.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "RLP encodes 3 types - bytes, byte sequences and sequences of sub-structures (which you call lists)",
+      "createdAt": "2020-06-15T18:22:26.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I suppose you are right, that would be technically invalid.  Though, I suspect most decoders probably just read the 8 bytes and cast them to a 256-bit integer, then look at the value.",
+      "createdAt": "2020-06-15T18:23:16.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "list appear when you start writing RLP encoding/decoding libraries",
+      "createdAt": "2020-06-15T18:23:23.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So `0xff00000000` would likely decode as valid in a lot of decoders, even though it probably isn't technically correct.",
+      "createdAt": "2020-06-15T18:23:47.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but RLP does not even prepend such \"list\" with number of elements, so it is silly to call them lists 🙂",
+      "createdAt": "2020-06-15T18:23:59.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The wiki calls them lists.  🤷 I'm just a follower.  😄",
+      "createdAt": "2020-06-15T18:24:25.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if any RLP decoder does not fail on `0xff00`, it is an invalid decoder 🙂",
+      "createdAt": "2020-06-15T18:24:44.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, I found RLP confusing in the beginning as well, because it is actually a poor design 🙂",
+      "createdAt": "2020-06-15T18:25:06.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "While I don't disagree, that feels like a really easy to make mistake and I'm not a fan of *relying* on RLP decoders to do the right thing there.",
+      "createdAt": "2020-06-15T18:25:22.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and whoever wrote Wiki probably looked at the code",
+      "createdAt": "2020-06-15T18:25:23.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It was just a suggestion, which may make your life easier, if you accept this little technicality 🙂",
+      "createdAt": "2020-06-15T18:25:52.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is, if we can avoid one extra foot gun, it feels like we should unless there is a compelling argument to include the foot gun.",
+      "createdAt": "2020-06-15T18:26:01.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My default is to go with the easiest to grok/read solution and look for compelling arguments that optimizations are *necessary*.",
+      "createdAt": "2020-06-15T18:26:30.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So far, I haven't seen a particularly compelling argument (for me) that we should bother doing anything more complex than `rlp([TransactionType, payload])`.",
+      "createdAt": "2020-06-15T18:27:01.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, then I can do a different magic, which will nevertheless require a few exabytes of memory if decoded as RLP 🙂",
+      "createdAt": "2020-06-15T18:27:10.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which I believe to be the easiest to grok/read option.",
+      "createdAt": "2020-06-15T18:27:16.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I personally think you might be introducing a bit of contradiction in your assumption. You assume that people who will implement these things are very technical (can grok your EIP) and not very technical  (can't grok RLP) at the same time",
+      "createdAt": "2020-06-15T18:29:01.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I assume that RLP is a primitive every client has, because it is used all over the place in Ethereum.",
+      "createdAt": "2020-06-15T18:29:23.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't expect every client or tool authors to understand its inner workings, but I do expect that they either understand its inner workings **or** have access to a general purpose RLP encoder/decoder library.",
+      "createdAt": "2020-06-15T18:30:00.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is because RLP is used in a number of places in Ethereum and you can't really function in the space without having access to an RLP encoder/decoder.",
+      "createdAt": "2020-06-15T18:30:34.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Unless perhaps your argument <@456226577798135808> is that you think we should work on ditching RLP from all of Ethereum?",
+      "createdAt": "2020-06-15T18:30:53.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And this would be the first step toward achieving that goal?",
+      "createdAt": "2020-06-15T18:31:01.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "no, I do not hold this ambition anymore, but I think RLP has couple of unpleasant properties",
+      "createdAt": "2020-06-15T18:31:32.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Such as?",
+      "createdAt": "2020-06-15T18:31:42.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but I do not want to divert this conversation into that",
+      "createdAt": "2020-06-15T18:31:54.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "1) you cannot easily \"count\" number of sub-structures, you actually have to start parsing them. That makes it a bit harder to use number of sub-structures as a discriminator",
+      "createdAt": "2020-06-15T18:33:33.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2) it is not very well suited for generating large structures, because you have to know the size in advance to present the prefix. You also cannot always know the length of the prefix either. It would be better to support chunking or something for large structures",
+      "createdAt": "2020-06-15T18:34:50.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think it is well suited for small structures that do not evolve",
+      "createdAt": "2020-06-15T18:35:17.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but for anything else - it is quite sub-optimal",
+      "createdAt": "2020-06-15T18:35:29.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "```ts\nconst envelope = rlpDecode(bytes)\nassert(envelope.length == 2)\nswitch (envelope[0]) {\n    case 0:\n        const [nonce, gasPrice, gasLimit, to, value, data, senderV, senderR, senderS] = rlpDecode(envelope[1])\n        // TODO: process transaction\n        break;\n    case 1:\n        const decoded = envelope[1]\n        assert(decoded.length == 14)\n        const subType = decoded[0]\n        switch (subType) {\n            case 0:\n                // TODO\n                break\n        }\n        break\n    }\n}\n```",
+      "createdAt": "2020-06-15T18:36:03.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is the pseudocode for processing a transaction that I would like to see \"matched or beaten\" (in terms of readability/maintainability/simplicity) by an alternative proposal.",
+      "createdAt": "2020-06-15T18:36:30.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not a fan of discriminating on length, because you end up having to do silly things in order to avoid conflicting on length.  I would *much* rather have an actual discriminant, and in RLP such a discriminant is as small as 1 byte which isn't too bad.",
+      "createdAt": "2020-06-15T18:38:39.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think for (2) you mean it is not good for streaming?",
+      "createdAt": "2020-06-15T18:39:11.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It can handle large structures fine, but you have to process from the inside out.  I suppose in some cases that may be problematic/annoying if the structure is large enough that keeping it all in memory is problematic.",
+      "createdAt": "2020-06-15T18:39:58.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And I will agree, that writing an encoder/decoder would have been much easier if list prefixes counted the number of items in the list, rather than the number of bytes in the list.",
+      "createdAt": "2020-06-15T18:40:29.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That was probably my biggest annoyance when writing an encoder/decoder... having to work inside out.",
+      "createdAt": "2020-06-15T18:40:55.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@364458974906548225> Did you mean 👍 here? https://ethereum-magicians.org/t/eip-2711-separate-gas-payer-from-msg-sender/4353/35",
+      "createdAt": "2020-06-15T19:00:46.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, just updated, thanks for catching that",
+      "createdAt": "2020-06-15T19:01:21.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "FYI, I keep wanting to \"stir the pot\" with the idea of building this new transaction type protocol on SSZ which has some nice *bonus* things like the native trie hashing, but choosing to do so is also choosing to engage in the inevitable political discussion that goes with introducing SSZ into Eth1.x protocol stuff.",
+      "createdAt": "2020-06-15T19:04:27.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Disclaimer that I'm a big fan of SSZ and feel that doing away with RLP would be awesome",
+      "createdAt": "2020-06-15T19:04:59.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is SSZ documented anywhere?  Searching isn't proving helpful.",
+      "createdAt": "2020-06-15T19:06:36.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/eth2.0-specs/blob/dev/ssz/simple-serialize.md",
+      "createdAt": "2020-06-15T19:07:07.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "currently burried in eth2 specs.  <@!291925846556540928> and I have discussed the need to get it extracted into something stand-alone since it doesn't need ot be coupled with a \"blockchain\" spec",
+      "createdAt": "2020-06-15T19:07:31.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Language support is currently reasonably widespread due to eth2 clients existing across a bunch of different languages.",
+      "createdAt": "2020-06-15T19:07:54.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No JS I'm guessing though?",
+      "createdAt": "2020-06-15T19:08:26.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Lodestar would likely have implemented something.... but I don't actually know.",
+      "createdAt": "2020-06-15T19:08:47.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "list of implementations: https://github.com/ethereum/eth2.0-specs/blob/dev/ssz/simple-serialize.md#implementations",
+      "createdAt": "2020-06-15T19:09:05.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, JS support 🙂 \nthanks lodestar!",
+      "createdAt": "2020-06-15T19:28:07.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "As for separating into it's own spec, should be able to pull it out in next couple of weeks. been hard to prioritize more administrative feeling things but there's a bunch of value in getting it out",
+      "createdAt": "2020-06-15T19:28:41.377000+00:00",
+      "attachments": []
+    }
+  ]
+}

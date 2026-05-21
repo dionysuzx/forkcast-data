@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "channel": "cl-testing",
+  "date": "2022-06-29",
+  "messageCount": 38,
+  "sourceHash": "bf6bc6b1f1bddc3bacb07fc22a089cd733f57d37fddfe5915f8a740b006ecebe",
+  "searchText": "I see your point. Thank you. I will bring this up next week when we have our contributors call. Besu throwing errors: > nioEventLoopGroup-3-4 | ERROR | FastSyncDownloader | Encountered an unexpected error during fast sync. Restarting fast sync in PT5S seconds. > java.util.concurrent.CompletionException: org.hyperledger.besu.ethereum.eth.manager.exceptions.MaxRetriesReachedException: Task failed: MAX_RETRIES_REACHED repeatedly. Is this expected? ty, please keep me in the loop! (it seemed to recover -- it's \"Completed importing chain segment\" many times as well, but those error messages stand out in logs enough to wonder about) Hey <@&595683609080365088> , I found an issue where prysm is accepting beacon blocks where the execution payload references a terminal block with an invalid total difficulty, test `invalid-terminal-block-payload-lower-ttd` in this PR: https://github.com/ethereum/hive/pull/569 Basically the test sets up 4 nodes, 3 validating nodes with a certain `TTD`, and a node with no validators but `TTD==TTD-N`, where `N` is the difficulty of the terminal block (so `parent.TotalDifficulty >= TTD-N`). So according to the non-validating node, the terminal block should be invalid because its parent (or one of its ancestors) reaches `TTD`. However prysm is importing this block. Lighthouse and Teku are correctly rejecting this block... interesting, I'll look I'm producing logs right now, will send them to you via dm so you are saying we reach the TTD block, then PoW keeps building on that chain and Prysm still accepts it? Yes, it seems like it accepts any block as terminal PoW even when the block that reached the TTD is a parent/ancestor of such block logs: bn-04.log is the node with a different TTD that's incorrectly accepting the block I tried both scenarios where the parent block barely reaches TTD, and other where there are several blocks before the terminal block that already reached the TTD, both cases it accepts the block Scenario where the TTD is higher than the other nodes passes ok, the block is correctly rejected... where do you see it receiving a new PoW block after TTD has happened? I query using `/eth/v2/beacon/blocks/` looking for the execution hash that's on the simulator logs, let me share that too.. OK so you call `/eth/v2/beacon/blocks/{some_terminal_child_block_hash}` and it returns something? I call using slot number, beginning from the last slot number to the beginning and compare the execution block hash which slot? last slot being `(currentTimestamp - genesis) / secondsPerSlot` im trying to read the logs and connect the dots. do you know the slot number? must be slot 79 according to the simulator logs So what was wrong with the block at slot 79? confused about the scenario `Node with bad TTD included beacon block with correct TTD` what was the bad TTD and what was the correct TTD I see beacon node 4 has the same TTD as the others, 500 logs from all 4 beacon nodes indicate to me that TTD is 500 Ah, the TTD is only configured in the execution client but at that point the EL should return that the TTD is invalid when it sends the newPayload ? it's weird because the other test is passing (TTD is configured higher) did you configure the prysm ttd? No, I think this is an issue on the test, but the EL should still tell the CL that the payload is invalid ok yeah, that seems like the main issue Yes sorry about that, I think there's still something happening here because the TTD of the EL is set to the other value and the same test case is passing for the other clients... Is there something we can improve here? We haven't tested much mismatched config between EL and CL Let me run again to see if I can spot what's happening, even when the CL has the correct TTD, the EL with the incorrect TTD should return `INVALID` when the transition payload is received ok, this is due to a known issue on geth, it's doing a re-org to a chain it should deem invalid because it has an invalid terminal block: ``` TRACE[06-29|22:08:39.299] Engine API request received method=ForkchoiceUpdated head=d549d0..3e7470 finalized=000000..000000 safe=000000..000000 INFO [06-29|22:08:39.300] Left PoW stage INFO [06-29|22:08:39.300] Forkchoice requested sync to new head number=251 hash=d549d0..3e7470 ``` The test passes when nethermind is used as execution client.",
+  "excerpts": [
+    {
+      "author": "daniellehrner",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see your point. Thank you. I will bring this up next week when we have our contributors call.",
+      "createdAt": "2022-06-29T12:08:05.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Besu throwing errors:\n>  nioEventLoopGroup-3-4 | ERROR | FastSyncDownloader | Encountered an unexpected error during fast sync. Restarting fast sync in PT5S seconds.\n> java.util.concurrent.CompletionException: org.hyperledger.besu.ethereum.eth.manager.exceptions.MaxRetriesReachedException: Task failed: MAX_RETRIES_REACHED\n\nrepeatedly. Is this expected?",
+      "createdAt": "2022-06-29T12:25:11.322000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "besu.log",
+          "content": "b5e21444768d7475c26d4a22ef5cf789e4458e285bd5c73d2b0315f99d86518f"
+        }
+      ]
+    },
+    {
+      "author": "lightclient",
+      "category": "Testing",
+      "parent": "",
+      "content": "ty, please keep me in the loop!",
+      "createdAt": "2022-06-29T12:27:01.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(it seemed to recover -- it's \"Completed importing chain segment\" many times as well, but those error messages stand out in logs enough to wonder about)",
+      "createdAt": "2022-06-29T12:43:18.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hey <@&595683609080365088> , I found an issue where prysm is accepting beacon blocks where the execution payload references a terminal block with an invalid total difficulty, test `invalid-terminal-block-payload-lower-ttd` in this PR: https://github.com/ethereum/hive/pull/569\n\nBasically the test sets up 4 nodes, 3 validating nodes with a certain `TTD`, and a node with no validators but `TTD==TTD-N`, where `N` is the difficulty of the terminal block (so `parent.TotalDifficulty >= TTD-N`). So according to the non-validating node, the terminal block should be invalid because its parent (or one of its ancestors) reaches `TTD`. However prysm is importing this block. Lighthouse and Teku are correctly rejecting this block...",
+      "createdAt": "2022-06-29T21:18:41.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "interesting, I'll look",
+      "createdAt": "2022-06-29T21:21:41.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm producing logs right now, will send them to you via dm",
+      "createdAt": "2022-06-29T21:22:12.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "so you are saying we reach the TTD block, then PoW keeps building on that chain and Prysm still accepts it?",
+      "createdAt": "2022-06-29T21:24:45.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes, it seems like it accepts any block as terminal PoW even when the block that reached the TTD is a parent/ancestor of such block",
+      "createdAt": "2022-06-29T21:25:55.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "logs:",
+      "createdAt": "2022-06-29T21:30:51.076000+00:00",
+      "attachments": [
+        {
+          "type": "application/zip",
+          "origin_name": "prysm-bad-terminal-block.zip",
+          "content": "44447bf49807ce85d9ff44d633e6187e2d381774e992d1f81a7dad9cd0d86eaa"
+        }
+      ]
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "bn-04.log is the node with a different TTD that's incorrectly accepting the block",
+      "createdAt": "2022-06-29T21:31:18.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I tried both scenarios where the parent block barely reaches TTD, and other where there are several blocks before the terminal block that already reached the TTD, both cases it accepts the block",
+      "createdAt": "2022-06-29T21:32:48.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Scenario where the TTD is higher than the other nodes passes ok, the block is correctly rejected...",
+      "createdAt": "2022-06-29T21:33:40.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "where do you see it receiving a new PoW block after TTD has happened?",
+      "createdAt": "2022-06-29T21:34:30.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I query using `/eth/v2/beacon/blocks/` looking for the execution hash",
+      "createdAt": "2022-06-29T21:35:12.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "that's on the simulator logs, let me share that too..",
+      "createdAt": "2022-06-29T21:35:30.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-06-29T21:36:43.027000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "sim.log",
+          "content": "c7f881c6186258731a4b7accaf4d69b1fda964dc910124487101fb42d333f39e"
+        }
+      ]
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "OK so you call `/eth/v2/beacon/blocks/{some_terminal_child_block_hash}` and it returns something?",
+      "createdAt": "2022-06-29T21:36:47.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I call using slot number, beginning from the last slot number to the beginning and compare the execution block hash",
+      "createdAt": "2022-06-29T21:37:25.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "which slot?",
+      "createdAt": "2022-06-29T21:37:53.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "last slot being `(currentTimestamp - genesis) / secondsPerSlot`",
+      "createdAt": "2022-06-29T21:38:25.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "im trying to read the logs and connect the dots. do you know the slot number?",
+      "createdAt": "2022-06-29T21:38:46.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "must be slot 79 according to the simulator logs",
+      "createdAt": "2022-06-29T21:39:27.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "So what was wrong with the block at slot 79?",
+      "createdAt": "2022-06-29T21:41:16.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "confused about the scenario `Node with bad TTD included beacon block with correct TTD`",
+      "createdAt": "2022-06-29T21:41:45.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "what was the bad TTD and what was the correct TTD",
+      "createdAt": "2022-06-29T21:41:55.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see beacon node 4 has the same TTD as the others, 500",
+      "createdAt": "2022-06-29T21:42:51.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "logs from all 4 beacon nodes indicate to me that TTD is 500",
+      "createdAt": "2022-06-29T21:44:34.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, the TTD is only configured in the execution client",
+      "createdAt": "2022-06-29T21:46:43.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "but at that point the EL should return that the TTD is invalid when it sends the newPayload ?",
+      "createdAt": "2022-06-29T21:47:51.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's weird because the other test is passing (TTD is configured higher)",
+      "createdAt": "2022-06-29T21:48:16.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "did you configure the prysm ttd?",
+      "createdAt": "2022-06-29T21:48:21.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "No, I think this is an issue on the test, but the EL should still tell the CL that the payload is invalid",
+      "createdAt": "2022-06-29T21:49:13.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok yeah, that seems like the main issue",
+      "createdAt": "2022-06-29T21:49:44.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes sorry about that, I think there's still something happening here because the TTD of the EL is set to the other value and the same test case is passing for the other clients...",
+      "createdAt": "2022-06-29T21:54:34.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is there something we can improve here? We haven't tested much mismatched config between EL and CL",
+      "createdAt": "2022-06-29T21:57:47.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let me run again to see if I can spot what's happening, even when the CL has the correct TTD, the EL with the incorrect TTD should return `INVALID` when the transition payload is received",
+      "createdAt": "2022-06-29T22:04:40.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok, this is due to a known issue on geth, it's doing a re-org to a chain it should deem invalid because it has an invalid terminal block:\n```\nTRACE[06-29|22:08:39.299] Engine API request received              method=ForkchoiceUpdated head=d549d0..3e7470 finalized=000000..000000 safe=000000..000000\nINFO [06-29|22:08:39.300] Left PoW stage \nINFO [06-29|22:08:39.300] Forkchoice requested sync to new head    number=251 hash=d549d0..3e7470\n```\nThe test passes when nethermind is used as execution client.",
+      "createdAt": "2022-06-29T22:38:50.862000+00:00",
+      "attachments": []
+    }
+  ]
+}

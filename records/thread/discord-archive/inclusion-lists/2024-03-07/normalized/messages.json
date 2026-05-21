@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "inclusion-lists",
+  "date": "2024-03-07",
+  "messageCount": 136,
+  "sourceHash": "251f80c524c22db5c39dae9c4834ebc358034977094be560fc0979b3152d0191",
+  "searchText": "<mikeneuder> agree this all looks like minor design differences that shouldn’t impact the PoC/scoping process <mikeneuder> also added an agenda item to plan another IL breakout room: https://github.com/ethereum/pm/issues/973#issuecomment-1982454614 <tbenr> A nit: `previous_proposer_index` should be set when `Upgrading the state` (re @fradamt: Made what I think are the needed changes to the CL spec https://github.com/ethereum/consensus-specs/commit/bca66b05a21dd02871bf1edf1fffc664d171990c) <mikeneuder> heyo! based on the ACDC today, i made an upstream PR in the consensus spec repo: https://github.com/ethereum/consensus-specs/pull/3617. this pulls moslty from fradamts latest version incorporating hsiao-wei’s portions too! will keep editing from here, but hoping this can be the source of truth (re @tbenr: A nit: previous_proposer_index should be set when Upgrading the state) <mikeneuder> i tried to make the description comprehensive, and will update it if/when the spec moves link to current IL specs/proposals? or is it all in that PR <mikeneuder> i think fradamts summary captures it well <mikeneuder> fwiw, these small modifications arent really “different designs”. just small differences <mikeneuder> https://ethresear.ch/t/unconditional-inclusion-lists/18500 so it doesn't create a condition where previous proposer broadcasts block + (list of ILs) and if next proposer doesn't get them for whatever reason in time (latency, gossip failures, etc) can't propose, or? second bullet point or the IL has to be there but the split views just related to the block header <mikeneuder> i mean this is why i think its easier to broadcast them together <mikeneuder> i prefer commit in block and gossip il together with beacon block yes, so far that's my main instinctive skepticism here. blobs being separate was ... probably warranted? anyway, separated discussion from a year ago. but point being that even if justified that created a lot of network deadlocks/races/processing inconsistency/testing difficulty and created a need for a quarantine for \"almost valid\" blocks <mikeneuder> right. why not do them together? to avoid all races i.e. blocks without blobs yet arrived I do not want yet another such quarantine absent a strong argument for it they're attack surfaces in various ways okay, well, that's my first specific/concrete feedback then, on the current IL design <mikeneuder> commit and gossip IL and block together was my initial version hehe ok, why did it get separated then? <mikeneuder> not sure. ig i thought you all preferred them gossiped separately the general argument with blobs is they're big and there are several of them in last interop meeting can send multiple in parallel <mikeneuder> right. ils feel simpler to bundle with block yes, ILs are presumably small? <mikeneuder> and it doesnt compromise on fixing the free da problem <mikeneuder> ya (re @InclusionList_bot: <tersec> yes, ILs are presumably small?) if there are IL-specific reasons to want separate broadcasting, alright, but I think it'd be lower-risk and to bundle them. the reasons for the blobs being separated can be further discussed if that's of interest, but those began as bundled until it was convincing enough in that specific case it was worth splitting. would suggest same course here, not cargo-culting that one as some kind of general principle how many transactions, order of magnitude, are anticipated in ```python class InclusionListSidecar(Container): transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST] proposer_index: ValidatorIndex parent_root: Root slot: Slot signed_inclusion_list_summary: SignedInclusionListSummary ``` ? <mikeneuder> cool! sounds good to me. will wait for @potuz0 to comment too yeah he was around for the blob discussions too <mikeneuder> ya i prefer limiting by gas consumption (eg 2mm gas) rather than number of txns. we set the const to 16 to start (re @InclusionList_bot: <tersec> how many transactions, order of magnitude, are anticipated in ```python class InclusionListSidecar(Container): transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST] proposer_index: ValidatorIndex parent_root: Root slot: Slot signed_inclusion_list_summary: SignedInclusionListSummary ``` ?) <mikeneuder> i like the general 1/10 size of full block idea <mikeneuder> just as a gut check small enough to start with not-separate-broadcast then, yes <mikeneuder> for sure ```python class PayloadAttributes(object): timestamp: uint64 prev_randao: Bytes32 suggested_fee_recipient: ExecutionAddress withdrawals: Sequence[Withdrawal] parent_beacon_block_root: Root inclusion_list_transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST] # [New in EIP7547] ``` will be another constraint on that size anyway i.e. it's easily doubling the size or more of that structure usually that's a localhost arrangement, but not always <fradamt> This needs to be updated, the payload attributes do not need to be changed I think we need to update the validator spec for this, last time I checked, it's slightly behind. Happy to look more into it tonight <fradamt> The EL will have the IL already <potuz0> The payload attributes should not include the IL <fradamt> Yes the PR mentions that validator.md and fork-choice.md have to be updated (re @InclusionList_bot: <terence0083> I think we need to update the validator spec for this, last time I checked, it's slightly behind. Happy to look more into it tonight) <terencechain> Yeah. We really should update the execution API another question is, these are all CL/EL interactions. but the whole point of these, I thought, was to react to builder/MEV/etc. Does this EIP address that per se at all? it mainly defines beacon chain mechanics historically, the pure CL/EL system hasn't had broad-based censorship challenges of which I'm aware <@654267572107083777> the reason I want the list to be sent separately is to not have to tweak external p2p libraries for dos protection. That is, we rely on a hash to quickly see a block that we have already received and drop it. By binding the two messages an honest proposer can send different P2P messages that are strictly the same block. This is something new. It's not a blocker but I think it's more of a headache to work with than the already tested path of blobs. Secondly it allows the proposer to send the IL almost a slot in advance, which makes for the builder of N also to be aware of this and make become more execution efficient because of the multiple ILs-per-block possibility? Yes The ability to send the IL before hand makes it easy for propagation and better usage of the CPU okay, well, will look into this, but it's my biggest please, no, veto reaction so far to anything of this, I'll say that integrating separate blob broadcast in a robust way has absolutely not been simple Agree it was months of fuzzing finding endless-seeming edge cases But there's only one set of blobs for a block yeah, so there is some motivation I'm partly viewing this based on experiences, too, with sync committee/aggregate messages, which don't block the next block but one can see as a sort of casual simulation of sorts how many get in, and, on mainnet, it's typically high 90s-% but it's not 100% they're sent a bit later in the slot, to be fair noob q: why can there be multiple ILs per block? explained by https://ethresear.ch/t/no-free-lunch-a-new-inclusion-list-design/16389 (just now reading) but I'm not convinced yet it has to be unbounded numbers of ILs another thing that probably is handled fine but the NFL design description is odd about is handling of missed slots: > By signing over the list of (`address`, `gasLimit`) pairs, the proposer is saying: “I commit that during slot `n` or slot `n+1`, a transaction from address will be included as long as the remaining gas in the slot `n+1` payload is less than `gasLimit`.” is it really only slot `n+1` or is it the next block it seems like the basic claims of the ethresear.ch post, the plausible deniability, are satisfiable with two ILs more generally, this all requires CLs to be significantly more aware of transactions as non-block-boxes than currently. not sure that's necessarily bad, but it ties into the questions about using SSZ (or some other format) for transactions. right now CLs don't know/care, and this adds another dependency at least based on https://ethresear.ch/t/no-free-lunch-a-new-inclusion-list-design/16389#appendix-1-rebuilder-encoding-strategy-11 Yeah but now the IL can even be sent 10 seconds before the slot starts It's a substantial difference Note: The proposer can send multiple ILs but it's important node only re-gossip one & import one IL or it becomes a cheap dos vector yeah, sure, but doesn't even two ILs allow plausible deniability? <potuz0> Even one <potuz0> That's one of the things I like about not committing, even if you get an IL with your tx, you can't trust the proposer that it will be included which means it's not critical that they be sent separate just in case one wants to send 10 of them <potuz0> It's not critical, as I said above I believe it's just easier to deal with this and allow them to be sent and verified in the dead part of the slot, and having to tweak the P2P libraries to consider different hashes for the same message <fradamt> Yes, this doesn't matter. Even if an IL is sent with the block, you could always also send the same block with a different IL (re @InclusionList_bot: <tersec> which means it's not critical that they be sent separate just in case one wants to send 10 of them) I don't believe for a moment the \"just easier\" for separate block-to-block critical things <potuz0> Yeah, so dealing with this, even if it doesn't happen, is what I think it's a bit of a headache (re @fradamt: Yes, this doesn't matter. Even if an IL is sent with the block, you could always also send the same block with a different IL) <potuz0> But it may be fine too It's not ideal to tweak p2p block's validation step to allow the same block with different inclusion lists. Maybe it's easier than I thought. Haven't looked... I am not sure pinging <@476250636548308992>, will this involve libp2p for us? I guess, I saw the same argument early on with blobs. but it was not true, and lots of edge cases hadn't been anticipated, and by the time it was clear, even though maybe it would have been worthwhile anyway, that was underestimated oh, it's just like optimistic sync and we know how to do that but it's not. but the different hashes for same messages, I guess maybe I don't understand this part. the block is what it is So fwiw, if we go with separated, prysm will send this list together with FCU, which happens at around 2-3 seconds in the happy case so it's possible I'm underestimating that difficulty too, the bundled case difficulty The bundled case is fine too IMO, it's definitely easier to deal with validation in a synchronous way, bad thing is that the EL needs to execute N while validating the IL for N+1 Has anyone measured the performance penality for such? If i understand the conversation correctly, it is simply about maintaining a gossip validation cache for particular slot + proposer index to verify that the node has only seen 1 IL. That is easy enough to do, we do something very similar for other gossip messages Nah it's a different issue, it's that different messages will be sending the same block, it's probably fine but I'm guessing we will have two tweak libp2p i.e. block+IL1 and block+IL2 what about block+List[IL,max 2] but isn't the point to gossip IL1 to some peers and gossip IL2 to some peers? the plausible deniability, fair enough, yeah this breaks that That is fine too, you can just drop a message if you have already seen block + IL1 first and you receive a new message sith the same block I guess, `block+IL1` and `block+IL2` are just separate messages, for libp2p I don't see why it'd need special-casing Yeah i dont think we do need to special case it here The issue is that we wo",
+  "excerpts": [
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> agree this all looks like minor design differences that shouldn’t impact the PoC/scoping process",
+      "createdAt": "2024-03-07T05:51:36.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> also added an agenda item to plan another IL breakout room: https://github.com/ethereum/pm/issues/973#issuecomment-1982454614",
+      "createdAt": "2024-03-07T05:54:39.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<tbenr> A nit: \n`previous_proposer_index` should be set when `Upgrading the state` (re @fradamt: Made what I think are the needed changes to the CL spec https://github.com/ethereum/consensus-specs/commit/bca66b05a21dd02871bf1edf1fffc664d171990c)",
+      "createdAt": "2024-03-07T13:00:33.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> heyo! based on the ACDC today, i made an upstream PR in the consensus spec repo: https://github.com/ethereum/consensus-specs/pull/3617. this pulls moslty from fradamts latest version incorporating hsiao-wei’s portions too! will keep editing from here, but hoping this can be the source of truth (re @tbenr: A nit: \nprevious_proposer_index should be set when Upgrading the state)",
+      "createdAt": "2024-03-07T20:16:24.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> i tried to make the description comprehensive, and will update it if/when the spec moves",
+      "createdAt": "2024-03-07T20:17:21.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "link to current IL specs/proposals?",
+      "createdAt": "2024-03-07T20:24:51.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or is it all in that PR",
+      "createdAt": "2024-03-07T20:25:02.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> i think fradamts summary captures it well",
+      "createdAt": "2024-03-07T20:29:17.208000+00:00",
+      "attachments": [
+        {
+          "type": "image/jpeg",
+          "origin_name": "file_0.jpg",
+          "content": "e04f5c2c0a627aeed48f537b0bb17e6d963ceb99dd7e3b25462a62c065b1e837"
+        }
+      ]
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> fwiw, these small modifications arent really “different designs”. just small differences",
+      "createdAt": "2024-03-07T20:29:52.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> https://ethresear.ch/t/unconditional-inclusion-lists/18500",
+      "createdAt": "2024-03-07T20:30:15.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it doesn't create a condition where previous proposer broadcasts block + (list of ILs) and if next proposer doesn't get them for whatever reason in time (latency, gossip failures, etc) can't propose, or?",
+      "createdAt": "2024-03-07T20:30:51.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "second bullet point",
+      "createdAt": "2024-03-07T20:31:13.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or the IL has to be there but the split views just related to the block header",
+      "createdAt": "2024-03-07T20:31:45.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> i mean this is why i think its easier to broadcast them together",
+      "createdAt": "2024-03-07T20:31:46.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> i prefer commit in block and gossip il together with beacon block",
+      "createdAt": "2024-03-07T20:32:13.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, so far that's my main instinctive skepticism here. blobs being separate was ... probably warranted? anyway, separated discussion from a year ago. but point being that even if justified that created a lot of network deadlocks/races/processing inconsistency/testing difficulty",
+      "createdAt": "2024-03-07T20:32:57.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and created a need for a quarantine for \"almost valid\" blocks",
+      "createdAt": "2024-03-07T20:33:34.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> right. why not do them together? to avoid all races",
+      "createdAt": "2024-03-07T20:33:45.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i.e. blocks without blobs yet arrived",
+      "createdAt": "2024-03-07T20:33:46.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do not want yet another such quarantine absent a strong argument for it",
+      "createdAt": "2024-03-07T20:34:00.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "they're attack surfaces in various ways",
+      "createdAt": "2024-03-07T20:34:10.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "okay, well, that's my first specific/concrete feedback then, on the current IL design",
+      "createdAt": "2024-03-07T20:34:39.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> commit and gossip IL and block together was my initial version hehe",
+      "createdAt": "2024-03-07T20:35:42.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, why did it get separated then?",
+      "createdAt": "2024-03-07T20:35:55.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> not sure. ig i thought you all preferred them gossiped separately",
+      "createdAt": "2024-03-07T20:36:35.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the general argument with blobs is they're big and there are several of them",
+      "createdAt": "2024-03-07T20:36:58.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in last interop meeting",
+      "createdAt": "2024-03-07T20:37:05.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can send multiple in parallel",
+      "createdAt": "2024-03-07T20:37:25.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> right. ils feel simpler to bundle with block",
+      "createdAt": "2024-03-07T20:37:30.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, ILs are presumably small?",
+      "createdAt": "2024-03-07T20:37:40.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> and it doesnt compromise on fixing the free da problem",
+      "createdAt": "2024-03-07T20:37:41.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> ya (re @InclusionList_bot: <tersec> yes, ILs are presumably small?)",
+      "createdAt": "2024-03-07T20:37:49.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if there are IL-specific reasons to want separate broadcasting, alright, but I think it'd be lower-risk and to bundle them. the reasons for the blobs being separated can be further discussed if that's of interest, but those began as bundled until it was convincing enough in that specific case it was worth splitting. would suggest same course here, not cargo-culting that one",
+      "createdAt": "2024-03-07T20:39:31.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "as some kind of general principle",
+      "createdAt": "2024-03-07T20:39:37.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "how many transactions, order of magnitude, are anticipated in\n```python\n\nclass InclusionListSidecar(Container):\n    transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST]\n    proposer_index: ValidatorIndex\n    parent_root: Root\n    slot: Slot\n    signed_inclusion_list_summary: SignedInclusionListSummary\n```\n?",
+      "createdAt": "2024-03-07T20:41:38.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> cool! sounds good to me. will wait for @potuz0 to comment too",
+      "createdAt": "2024-03-07T20:41:51.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah he was around for the blob discussions too",
+      "createdAt": "2024-03-07T20:42:21.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> ya i prefer limiting by gas consumption (eg 2mm gas) rather than number of txns. we set the const to 16 to start (re @InclusionList_bot: <tersec> how many transactions, order of magnitude, are anticipated in\n```python\n\nclass InclusionListSidecar(Container):\n    transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST]\n    proposer_index: ValidatorIndex\n    parent_root: Root\n    slot: Slot\n    signed_inclusion_list_summary: SignedInclusionListSummary\n```\n?)",
+      "createdAt": "2024-03-07T20:42:25.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> i like the general 1/10 size of full block idea",
+      "createdAt": "2024-03-07T20:42:42.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> just as a gut check",
+      "createdAt": "2024-03-07T20:42:55.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "small enough to start with not-separate-broadcast then, yes",
+      "createdAt": "2024-03-07T20:43:06.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> for sure",
+      "createdAt": "2024-03-07T20:43:19.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```python\n\nclass PayloadAttributes(object):\n    timestamp: uint64\n    prev_randao: Bytes32\n    suggested_fee_recipient: ExecutionAddress\n    withdrawals: Sequence[Withdrawal]\n    parent_beacon_block_root: Root\n    inclusion_list_transactions: List[Transaction, MAX_TRANSACTIONS_PER_INCLUSION_LIST]  # [New in EIP7547]\n```\nwill be another constraint on that size anyway",
+      "createdAt": "2024-03-07T20:46:54.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i.e. it's easily doubling the size or more of that structure",
+      "createdAt": "2024-03-07T20:47:06.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "usually that's a localhost arrangement, but not always",
+      "createdAt": "2024-03-07T20:47:20.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<fradamt> This needs to be updated, the payload attributes do not need to be changed",
+      "createdAt": "2024-03-07T20:47:58.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we need to update the validator spec for this, last time I checked, it's slightly behind. Happy to look more into it tonight",
+      "createdAt": "2024-03-07T20:48:03.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<fradamt> The EL will have the IL already",
+      "createdAt": "2024-03-07T20:48:04.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> The payload attributes should not include the IL",
+      "createdAt": "2024-03-07T20:48:13.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<fradamt> Yes the PR mentions that validator.md and fork-choice.md have to be updated (re @InclusionList_bot: <terence0083> I think we need to update the validator spec for this, last time I checked, it's slightly behind. Happy to look more into it tonight)",
+      "createdAt": "2024-03-07T20:48:37.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<terencechain> Yeah. We really should update the execution API",
+      "createdAt": "2024-03-07T20:48:44.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "another question is, these are all CL/EL interactions. but the whole point of these, I thought, was to react to builder/MEV/etc. Does this EIP address that per se at all?",
+      "createdAt": "2024-03-07T20:50:17.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it mainly defines beacon chain mechanics",
+      "createdAt": "2024-03-07T20:50:33.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "historically, the pure CL/EL system hasn't had broad-based censorship challenges of which I'm aware",
+      "createdAt": "2024-03-07T20:53:35.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@654267572107083777> the reason I want the list to be sent separately is to not have to tweak external p2p libraries for dos protection. That is, we rely on a hash to quickly see a block that we have already received and drop it. By binding the two messages an honest proposer can send different P2P messages that are strictly the same block. This is something new. It's not a blocker but I think it's more of a headache to work with than the already tested path of blobs. Secondly it allows the proposer to send the IL almost a slot in advance, which makes for the builder of N also to be aware of this and make become more execution efficient",
+      "createdAt": "2024-03-07T20:53:50.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because of the multiple ILs-per-block possibility?",
+      "createdAt": "2024-03-07T20:54:46.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2024-03-07T20:54:52.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The ability to send the IL before hand makes it easy for propagation and better usage of the CPU",
+      "createdAt": "2024-03-07T20:55:39.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "okay, well, will look into this, but it's my biggest please, no, veto reaction so far to anything of this, I'll say that",
+      "createdAt": "2024-03-07T20:55:43.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "integrating separate blob broadcast in a robust way has absolutely not been simple",
+      "createdAt": "2024-03-07T20:56:06.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Agree",
+      "createdAt": "2024-03-07T20:56:19.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it was months of fuzzing finding endless-seeming edge cases",
+      "createdAt": "2024-03-07T20:56:23.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But there's only one set of blobs for a block",
+      "createdAt": "2024-03-07T20:56:31.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, so there is some motivation",
+      "createdAt": "2024-03-07T20:57:08.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm partly viewing this based on experiences, too, with sync committee/aggregate messages, which don't block the next block but one can see as a sort of casual simulation of sorts how many get in, and, on mainnet, it's typically high 90s-% but it's not 100%",
+      "createdAt": "2024-03-07T20:59:13.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "they're sent a bit later in the slot, to be fair",
+      "createdAt": "2024-03-07T20:59:51.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "rjected",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "noob q: why can there be multiple ILs per block?",
+      "createdAt": "2024-03-07T21:03:08.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "explained by https://ethresear.ch/t/no-free-lunch-a-new-inclusion-list-design/16389 (just now reading)",
+      "createdAt": "2024-03-07T21:03:32.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but I'm not convinced yet it has to be unbounded numbers of ILs",
+      "createdAt": "2024-03-07T21:03:55.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "another thing that probably is handled fine but the NFL design description is odd about is handling of missed slots:\n> By signing over the list of (`address`, `gasLimit`) pairs, the proposer is saying: “I commit that during slot `n` or slot `n+1`, a transaction from address will be included as long as the remaining gas in the slot `n+1` payload is less than `gasLimit`.”",
+      "createdAt": "2024-03-07T21:06:13.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is it really only slot `n+1` or is it the next block",
+      "createdAt": "2024-03-07T21:06:25.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it seems like the basic claims of the ethresear.ch post, the plausible deniability, are satisfiable with two ILs",
+      "createdAt": "2024-03-07T21:07:46.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "more generally, this all requires CLs to be significantly more aware of transactions as non-block-boxes than currently. not sure that's necessarily bad, but it ties into the questions about using SSZ (or some other format) for transactions. right now CLs don't know/care, and this adds another dependency",
+      "createdAt": "2024-03-07T21:10:05.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "at least based on https://ethresear.ch/t/no-free-lunch-a-new-inclusion-list-design/16389#appendix-1-rebuilder-encoding-strategy-11",
+      "createdAt": "2024-03-07T21:13:02.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah but now the IL can even be sent 10 seconds before the slot starts",
+      "createdAt": "2024-03-07T21:31:36.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's a substantial difference",
+      "createdAt": "2024-03-07T21:31:52.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Note: The proposer can send multiple ILs but it's important node only re-gossip one & import one IL or it becomes a cheap dos vector",
+      "createdAt": "2024-03-07T21:36:04.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, sure, but doesn't even two ILs allow plausible deniability?",
+      "createdAt": "2024-03-07T21:38:30.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Even one",
+      "createdAt": "2024-03-07T21:39:26.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> That's one of the things I like about not committing, even if you get an IL with your tx, you can't trust the proposer that it will be included",
+      "createdAt": "2024-03-07T21:40:12.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "which means it's not critical that they be sent separate just in case one wants to send 10 of them",
+      "createdAt": "2024-03-07T21:40:31.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> It's not critical, as I said above I believe it's just easier to deal with this and allow them to be sent and verified in the dead part of the slot, and having to tweak the P2P libraries to consider different hashes for the same message",
+      "createdAt": "2024-03-07T21:41:43.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<fradamt> Yes, this doesn't matter. Even if an IL is sent with the block, you could always also send the same block with a different IL (re @InclusionList_bot: <tersec> which means it's not critical that they be sent separate just in case one wants to send 10 of them)",
+      "createdAt": "2024-03-07T21:42:00.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't believe for a moment the \"just easier\" for separate block-to-block critical things",
+      "createdAt": "2024-03-07T21:42:17.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Yeah, so dealing with this, even if it doesn't happen, is what I think it's a bit of a headache (re @fradamt: Yes, this doesn't matter. Even if an IL is sent with the block, you could always also send the same block with a different IL)",
+      "createdAt": "2024-03-07T21:42:31.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> But it may be fine too",
+      "createdAt": "2024-03-07T21:42:36.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's not ideal to tweak p2p block's validation step to allow the same block with different inclusion lists. Maybe it's easier than I thought. Haven't looked...",
+      "createdAt": "2024-03-07T21:43:56.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am not sure pinging <@476250636548308992>, will this involve libp2p for us?",
+      "createdAt": "2024-03-07T21:44:41.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess, I saw the same argument early on with blobs. but it was not true, and lots of edge cases hadn't been anticipated, and by the time it was clear, even though maybe it would have been worthwhile anyway, that was underestimated",
+      "createdAt": "2024-03-07T21:45:35.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh, it's just like optimistic sync and we know how to do that",
+      "createdAt": "2024-03-07T21:45:44.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but it's not.",
+      "createdAt": "2024-03-07T21:45:52.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but the different hashes for same messages, I guess maybe I don't understand this part. the block is what it is",
+      "createdAt": "2024-03-07T21:48:41.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So fwiw, if we go with separated, prysm will send this list together with FCU, which happens at around 2-3 seconds in the happy case",
+      "createdAt": "2024-03-07T21:49:05.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it's possible I'm underestimating that difficulty too, the bundled case difficulty",
+      "createdAt": "2024-03-07T21:49:27.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The bundled case is fine too IMO, it's definitely easier to deal with validation in a synchronous way, bad thing is that the EL needs to execute N while validating the IL for N+1",
+      "createdAt": "2024-03-07T21:50:41.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Has anyone measured the performance penality for such?",
+      "createdAt": "2024-03-07T21:51:26.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If i understand the conversation correctly, it is simply about maintaining a gossip validation cache for  particular slot + proposer index to verify that the node has only seen 1 IL. That is easy enough to do, we do something very similar for other gossip messages",
+      "createdAt": "2024-03-07T21:54:24.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Nah it's a different issue, it's that different messages will be sending the same block, it's probably fine but I'm guessing we will have two tweak libp2p",
+      "createdAt": "2024-03-07T22:05:10.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i.e. block+IL1 and block+IL2",
+      "createdAt": "2024-03-07T22:06:21.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what about block+List[IL,max 2]",
+      "createdAt": "2024-03-07T22:06:47.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but isn't the point to gossip IL1 to some peers and gossip IL2 to some peers?",
+      "createdAt": "2024-03-07T22:07:34.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the plausible deniability, fair enough, yeah",
+      "createdAt": "2024-03-07T22:07:55.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this breaks that",
+      "createdAt": "2024-03-07T22:07:59.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That is fine too, you can just drop a message if you have already seen block + IL1 first and you receive a new message sith the same block",
+      "createdAt": "2024-03-07T22:08:43.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess, `block+IL1` and `block+IL2` are just separate messages, for libp2p",
+      "createdAt": "2024-03-07T22:08:49.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't see why it'd need special-casing",
+      "createdAt": "2024-03-07T22:09:06.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah i dont think we do need to special case it here",
+      "createdAt": "2024-03-07T22:10:05.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The issue is that we won't drop it immediately at the libp2p level",
+      "createdAt": "2024-03-07T22:10:31.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We will have to process the message to find out and drop",
+      "createdAt": "2024-03-07T22:10:46.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Its not the only gossip topic where you could receive 2 distinct libp2p message and only propagate 1",
+      "createdAt": "2024-03-07T22:10:50.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ex: att aggregates",
+      "createdAt": "2024-03-07T22:10:59.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, I see now what you're getting at at least",
+      "createdAt": "2024-03-07T22:11:10.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but that's one reason there are reject/ignores at different levels",
+      "createdAt": "2024-03-07T22:11:28.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "one could already spam the block channel with blocks which aren't gossip-valid but which aren't libp2p dups",
+      "createdAt": "2024-03-07T22:11:47.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and then the reject/ignore provide the feedback mechanism for that peer",
+      "createdAt": "2024-03-07T22:12:01.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "exactly, yeah",
+      "createdAt": "2024-03-07T22:12:10.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, this is already true for malicious near-but-not-exact-copies, and for cases of not-actually-many-ILs, it's very bounded",
+      "createdAt": "2024-03-07T22:17:57.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "instead of remembering one hash per block it's 2 or 3 or 5",
+      "createdAt": "2024-03-07T22:18:11.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(in libp2p)",
+      "createdAt": "2024-03-07T22:18:20.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mikeneuder> for simplicity of the Proof-of-Concept version, can we all get behind:\n\n1. unconditional (guaranteed inclusion with a 3mm gas limit on the IL)\n2. anywhere-in-block (the transactions in the slot N IL must appear anywhere in either the slot N payload or the slot N+1 payload) \n3. committed to in beacon block (the slot N beacon block contains a slot N IL summary)\n4. gossiped-with-block (the IL is part of the beacon block p2p object, same topic)",
+      "createdAt": "2024-03-07T23:07:33.101000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "channel": "cl-testing",
+  "date": "2022-05-18",
+  "messageCount": 17,
+  "sourceHash": "ed7e065b87351db8634aee40ff3bc67d7305fd20a97fca793596e53f1b00a8c6",
+  "searchText": "I now have nimbus targeting the new unified JsonRPCService in besu, but it appears that it isn't providing `eth_subscribe`? ``` WRN 2022-05-17 20:30:30.819-04:00 Eth1 chain monitoring failure, restarting topics=\"eth1\" err=\"subscribeForBlockHeaders(p.web3, blockHeaderHandler, errorHandler) failed 3 times. Last error: {\\\"code\\\":-32604,\\\"message\\\":\\\"Method not enabled\\\"}\" ``` Also, the commit claims that it `Removes websocket specific configs`, but `--rpc-ws-enabled` and `--rpc-ws-port` can still be passed, which results in a lot of unhandled exceptions. Also, it seems I have to run besu with `--engine-jwt-enabled=false` to see any fcu messages with nimbus. Is jwt via websocket not working on the unified port? Most of those are things only someone from Besu can address, but it's possible https://github.com/hyperledger/besu/issues/3796 is related. It might be worth trying http web3 URLs again, from Nimbus. Current (last couple days) `kiln-dev-auth` re-enables http:// URLs because an httpclient assertion bug was fixed (in general, not just for merge). (the issue wrt that bug is that from what I can understand, and someone who knows Besu better can certainly correct me on this, is that there's an apparent mismatch between Besu's model of the JWT token auth and ws:// connections only being set up once, thus the timestamp not changing each time there's a new request. It works for http:// setups with less connection reuse from Nimbus) Just tried the new unified port on besu, ran into the same issue as you :\\ As suggested by tersec, I'll try switching nimbus to http and see if it helps (also Besu complains about lack of `exchangeTransitionConfiguration` calls, so I implemented it: https://github.com/status-im/nimbus-eth2/pull/3494/commits/e48c2912774ead030c19ab2583091ffdeae1353a) <@654267572107083777> <@827653956955406406> I've switched nimbus to use http now. The additional benefit is that I can now re-add the JSON-RPC snooper into the mix and see what's being passed. I see `eth_getLogs` and `eth_getBlockByNumber` calls but no exchange transition :\\ haha, good timing 😛 it calls `exchangeTransitionConfiguration` when in Bellatrix fork, but regardless of merge. What's the most correct time period during which to call this, since Nimbus doesn't necessarily know whether its web3 endpoint for phase0/altair supports it? https://github.com/ethereum/execution-apis/blob/v1.0.0-alpha.8/src/engine/specification.md#engine_exchangetransitionconfigurationv1 doesn't specify that I can discern ^ Seems to work! existing websocket configs for non-engine apis haven't adopted this yet, so thats why `rpc-ws` is still required. `eth_subscribe` not working is unexpected though, I will look into that you are correct, and this should've been remedied at the same time we started using a single port. can you send me the configs used to start both besu and nimbus when you experienced this? `./besu/build/install/besu/bin/besu --data-path \"/home/seamonkey/eth/kiln-nimbus-besu\" --network=kiln --rpc-http-enabled=true --rpc-http-host=\"0.0.0.0\" --rpc-http-cors-origins=\"*\" --host-allowlist=\"*\" --engine-host-allowlist=\"*\" --engine-jwt-enabled=true --Xmerge-support=true --engine-jwt-secret=/tmp/jwtsecret --p2p-port 13469 --rpc-http-port=8579 --p2p-host \"1.2.3.4\" --engine-rpc-port=8581 --data-storage-format=BONSAI --engine-rpc-enabled` `nimbus-eth2/build/nimbus_beacon_node --network=. --web3-url=ws://127.0.0.1:8581 --log-level=INFO --bootstrap-file=bootstrap_nodes.txt --terminal-total-difficulty-override=20000000000000 --data-dir=/home/seamonkey/eth/kiln-nimbus-besu --bootstrap-node=enr:-Iq4QMCTfIMXnow27baRUb35Q8iiFHSIDBJh6hQM5Axohhf4b6Kr_cOCu0htQ5WvVqKvFgY28893DHAg8gnBAXsAVqmGAX53x8JggmlkgnY0gmlwhLKAlv6Jc2VjcDI1NmsxoQK6S-Cii_KmfFdUJL2TANL3ksaKUnNXvTCv1tLwXs0QgIN1ZHCCIyk --nat=extip:1.2.3.4 --tcp-port=13470 --udp-port=13470 --graffiti=\"nimbus-besu seamonkey.tech\" --rest --rest-port=9092 --suggested-fee-recipient=\"0xA721da3d06813E764E94A23E377cC3E1729fCFD5\" --jwt-secret=/tmp/jwtsecret` To be clear, there are no errors saying auth failed. besu just doesn't seem to be seeing any updates coming from nimbus. Switching nimbus from ws to http allows it to sync *and* gets rid of the `Method not found` for `eth_subscribe`. thx!",
+  "excerpts": [
+    {
+      "author": "seamonkey82",
+      "category": "Testing",
+      "parent": "",
+      "content": "I now have nimbus targeting the new unified JsonRPCService in besu, but it appears that it isn't providing `eth_subscribe`?\n```\nWRN 2022-05-17 20:30:30.819-04:00 Eth1 chain monitoring failure, restarting  topics=\"eth1\" err=\"subscribeForBlockHeaders(p.web3, blockHeaderHandler, errorHandler) failed 3 times. Last error: {\\\"code\\\":-32604,\\\"message\\\":\\\"Method not enabled\\\"}\"\n```\nAlso, the commit claims that it `Removes websocket specific configs`, but `--rpc-ws-enabled` and `--rpc-ws-port` can still be passed, which results in a lot of unhandled exceptions.",
+      "createdAt": "2022-05-18T00:35:21.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "seamonkey82",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also, it seems I have to run besu with `--engine-jwt-enabled=false` to see any fcu messages with nimbus.  Is jwt via websocket not working on the unified port?",
+      "createdAt": "2022-05-18T00:56:11.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Most of those are things only someone from Besu can address, but it's possible https://github.com/hyperledger/besu/issues/3796 is related. It might be worth trying http web3 URLs again, from Nimbus. Current (last couple days) `kiln-dev-auth` re-enables http:// URLs because an httpclient assertion bug was fixed (in general, not just for merge).",
+      "createdAt": "2022-05-18T07:04:45.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(the issue wrt that bug is that from what I can understand, and someone who knows Besu better can certainly correct me on this, is that there's an apparent mismatch between Besu's model of the JWT token auth and ws:// connections only being set up once, thus the timestamp not changing each time there's a new request. It works for http:// setups with less connection reuse from Nimbus)",
+      "createdAt": "2022-05-18T07:06:38.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Just tried the new unified port on besu, ran into the same issue as you :\\\n\nAs suggested by tersec, I'll try switching nimbus to http and see if it helps",
+      "createdAt": "2022-05-18T09:55:57.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(also Besu complains about lack of `exchangeTransitionConfiguration` calls, so I implemented it: https://github.com/status-im/nimbus-eth2/pull/3494/commits/e48c2912774ead030c19ab2583091ffdeae1353a)",
+      "createdAt": "2022-05-18T10:20:48.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@654267572107083777> <@827653956955406406> I've switched nimbus to use http now. The additional benefit is that I can now re-add the JSON-RPC snooper into the mix and see what's being passed. \n\nI see `eth_getLogs` and `eth_getBlockByNumber` calls but no exchange transition :\\",
+      "createdAt": "2022-05-18T10:20:54.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "haha, good timing 😛",
+      "createdAt": "2022-05-18T10:21:00.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "it calls `exchangeTransitionConfiguration` when in Bellatrix fork, but regardless of merge. What's the most correct time period during which to call this, since Nimbus doesn't necessarily know whether its web3 endpoint for phase0/altair supports it?",
+      "createdAt": "2022-05-18T10:27:44.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ethereum/execution-apis/blob/v1.0.0-alpha.8/src/engine/specification.md#engine_exchangetransitionconfigurationv1 doesn't specify that I can discern",
+      "createdAt": "2022-05-18T10:29:59.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "^ Seems to work!",
+      "createdAt": "2022-05-18T10:51:08.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad",
+      "category": "Testing",
+      "parent": "",
+      "content": "existing websocket configs for non-engine apis haven't adopted this yet, so thats why `rpc-ws` is still required. `eth_subscribe` not working is unexpected though, I will look into that",
+      "createdAt": "2022-05-18T12:59:35.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad",
+      "category": "Testing",
+      "parent": "",
+      "content": "you are correct, and this should've been remedied at the same time we started using a single port.",
+      "createdAt": "2022-05-18T13:02:50.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you send me the configs used to start both besu and nimbus when you experienced this?",
+      "createdAt": "2022-05-18T13:13:00.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "seamonkey82",
+      "category": "Testing",
+      "parent": "",
+      "content": "`./besu/build/install/besu/bin/besu --data-path \"/home/seamonkey/eth/kiln-nimbus-besu\" --network=kiln --rpc-http-enabled=true --rpc-http-host=\"0.0.0.0\" --rpc-http-cors-origins=\"*\" --host-allowlist=\"*\" --engine-host-allowlist=\"*\" --engine-jwt-enabled=true --Xmerge-support=true --engine-jwt-secret=/tmp/jwtsecret --p2p-port 13469 --rpc-http-port=8579 --p2p-host \"1.2.3.4\" --engine-rpc-port=8581 --data-storage-format=BONSAI --engine-rpc-enabled`\n\n`nimbus-eth2/build/nimbus_beacon_node --network=. --web3-url=ws://127.0.0.1:8581 --log-level=INFO --bootstrap-file=bootstrap_nodes.txt --terminal-total-difficulty-override=20000000000000 --data-dir=/home/seamonkey/eth/kiln-nimbus-besu --bootstrap-node=enr:-Iq4QMCTfIMXnow27baRUb35Q8iiFHSIDBJh6hQM5Axohhf4b6Kr_cOCu0htQ5WvVqKvFgY28893DHAg8gnBAXsAVqmGAX53x8JggmlkgnY0gmlwhLKAlv6Jc2VjcDI1NmsxoQK6S-Cii_KmfFdUJL2TANL3ksaKUnNXvTCv1tLwXs0QgIN1ZHCCIyk --nat=extip:1.2.3.4 --tcp-port=13470 --udp-port=13470 --graffiti=\"nimbus-besu seamonkey.tech\" --rest --rest-port=9092 --suggested-fee-recipient=\"0xA721da3d06813E764E94A23E377cC3E1729fCFD5\" --jwt-secret=/tmp/jwtsecret`\n\nTo be clear, there are no errors saying auth failed.  besu just doesn't seem to be seeing any updates coming from nimbus.",
+      "createdAt": "2022-05-18T20:11:25.172000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "ebd7d992d6cdc7d6942f4a87eff9d7c7a1e5b2e1e900f75e8ed9138e4a03b6e6"
+        }
+      ]
+    },
+    {
+      "author": "seamonkey82",
+      "category": "Testing",
+      "parent": "",
+      "content": "Switching nimbus from ws to http allows it to sync *and* gets rid of the `Method not found` for `eth_subscribe`.",
+      "createdAt": "2022-05-18T20:19:09.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad",
+      "category": "Testing",
+      "parent": "",
+      "content": "thx!",
+      "createdAt": "2022-05-18T21:36:21.606000+00:00",
+      "attachments": []
+    }
+  ]
+}

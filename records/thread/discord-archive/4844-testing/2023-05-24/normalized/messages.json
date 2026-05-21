@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 1,
+  "channel": "4844-testing",
+  "date": "2023-05-24",
+  "messageCount": 33,
+  "sourceHash": "110fb9a0893ef574abdd35e9f24f99e0056f418fe3a60db1e0f20887c43fdad9",
+  "searchText": "Myweah it makes things a bit different, becauae then this header field becomes something that \"validates\" the body, but does not define the header chain Workable I guess, it's all semantics, but it's one less field that can be verified header-only Hey all, I found a missing validation in the 4844 spec which could lead to either a consensus fault or an infinite blob-capacity issue 😅 The blocks are targeting 2 blobs are are capped to 4 The cap is not validated anywhere according to the spec ``` def validate_block(block: Block) -> None: ... num_blobs = 0 for tx in block.transactions: ... # the signer must be able to afford the transaction assert signer(tx).balance >= tx.gas * tx.max_fee_per_gas + get_total_data_gas(tx) * tx.max_fee_per_data_gas # ensure that the user was willing to at least pay the current data gasprice assert tx.max_fee_per_data_gas >= get_data_gasprice(parent(block).header) num_blobs += len(tx.blob_versioned_hashes) # check that the excess data gas is correct expected_edg = calc_excess_data_gas(parent(block).header, num_blobs) assert expected_edg == block.excess_data_gas ``` Note, `num_blobs` is permitted to be arbitrary, so whilst a single tx might at max contain 4 blobs, there's nothing stopping every single tx in a block to contain 4 blobs each The Go code from Optimism/Coinbase actually conforms to the above spec and will allow arbitrarily many blobs https://github.com/ethereum/go-ethereum/pull/26283/files#diff-066287ece438b27f896b9c7e86fc3283328e35d0cc07f83a259bcbfc3a773b26R82 So at best, it's a consensus fault if other clients implemented it correctly - and not conforming to the spec Or at worse a DoS vector if all clients implemented the spec to the letter We need a check of num_blobs against MAX_DATA_GAS_PER_BLOCK Proposal: ``` def validate_block(block: Block) -> None: ... num_blobs = 0 for tx in block.transactions: ... # the signer must be able to afford the transaction assert signer(tx).balance >= tx.gas * tx.max_fee_per_gas + get_total_data_gas(tx) * tx.max_fee_per_data_gas # ensure that the user was willing to at least pay the current data gasprice assert tx.max_fee_per_data_gas >= get_data_gasprice(parent(block).header) num_blobs += len(tx.blob_versioned_hashes) # check that the excess data gas is correct asset num_blobs <= MAX_DATA_GAS_PER_BLOCK / DATA_GAS_PER_BLOB // <----------------------- ADDED expected_edg = calc_excess_data_gas(parent(block).header, num_blobs) assert expected_edg == block.excess_data_gas ``` Or asset num_blocks * DATA_GAS_PER_BLOB <= MAX_DATA_GAS_PER_BLOCK for sure <dankrad> @peter this is currently verified by the CL spec: https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/beacon-chain.md#execution-payload I don't really see a reason to not have the check in el tho (or rather in el too) Also there's no mention of this is the spec, would be nice to add it there too <dankrad> this is the spec <dankrad> the full 4844 spec is the EL (part of the EIP) and CL (which is what I sent) still at least a note should be added to the el then why it's not necessary, as it stands, the el spec is ambiguous in itself another thing to keep in mind is that you might want to validate a block outside of newPayload e.g. snap sync in that case should you or should you not detect these errors? these are kind of the reasons it feels strange that we so storngly not want to check something that we could check e.g. the spec says I should verify that excessDataGas is correct? Why not have the CL verify that? Seems arbitrary a bit My expectation is that we should veryfy everything as strongly as can and I'd rather check in 2 places than none by some strange accident I guess tx hash is `keccak256(BLOB_TX_TYPE || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, max_fee_per_data_gas, blob_versioned_hashes, y_parity, r, s]))`. Found no mention of it in the spec go-kzg-4844 has just released new version 0.3.0 -- The main change being the endian switch in consensus-specs PR 3354 : <https://github.com/ethereum/consensus-specs/pull/3354> The doc comments in go-kzg-4844 have been updated to note that it now conforms to the consensus-specs at commit `017a8495f7671f5fff2075a9bfc9238c1a0982f8` greetings other 4844 friends, I wanna introduce <@680245613258211336> who is going to be working with me getting 4844 implemented on Besu.",
+  "excerpts": [
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Myweah it makes things a bit different, becauae then this header field becomes something that \"validates\" the body, but does not define the header chain",
+      "createdAt": "2023-05-24T04:38:09.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Workable I guess, it's all semantics, but it's one less field that can be verified header-only",
+      "createdAt": "2023-05-24T04:38:25.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey all, I found a missing validation in the 4844 spec which could lead to either a consensus fault or an infinite blob-capacity issue 😅",
+      "createdAt": "2023-05-24T08:29:58.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The blocks are targeting 2 blobs are are capped to 4",
+      "createdAt": "2023-05-24T08:30:10.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The cap is not validated anywhere according to the spec",
+      "createdAt": "2023-05-24T08:30:18.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\ndef validate_block(block: Block) -> None:\n    ...\n\n    num_blobs = 0\n    for tx in block.transactions:\n        ...\n\n        # the signer must be able to afford the transaction\n        assert signer(tx).balance >= tx.gas * tx.max_fee_per_gas + get_total_data_gas(tx) * tx.max_fee_per_data_gas\n\n        # ensure that the user was willing to at least pay the current data gasprice\n        assert tx.max_fee_per_data_gas >= get_data_gasprice(parent(block).header)\n\n        num_blobs += len(tx.blob_versioned_hashes)\n\n    # check that the excess data gas is correct\n    expected_edg = calc_excess_data_gas(parent(block).header, num_blobs)\n    assert expected_edg == block.excess_data_gas\n```",
+      "createdAt": "2023-05-24T08:30:33.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Note, `num_blobs` is permitted to be arbitrary, so whilst a single tx might at max contain 4 blobs, there's nothing stopping every single tx in a block to contain 4 blobs each",
+      "createdAt": "2023-05-24T08:31:13.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The Go code from Optimism/Coinbase actually conforms to the above spec and will allow arbitrarily many blobs https://github.com/ethereum/go-ethereum/pull/26283/files#diff-066287ece438b27f896b9c7e86fc3283328e35d0cc07f83a259bcbfc3a773b26R82",
+      "createdAt": "2023-05-24T08:32:10.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So at best, it's a consensus fault if other clients implemented it correctly - and not conforming to the spec",
+      "createdAt": "2023-05-24T08:32:27.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or at worse a DoS vector if all clients implemented the spec to the letter",
+      "createdAt": "2023-05-24T08:32:55.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We need a check of num_blobs against MAX_DATA_GAS_PER_BLOCK",
+      "createdAt": "2023-05-24T08:34:55.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Proposal:",
+      "createdAt": "2023-05-24T08:35:00.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\ndef validate_block(block: Block) -> None:\n    ...\n\n    num_blobs = 0\n    for tx in block.transactions:\n        ...\n\n        # the signer must be able to afford the transaction\n        assert signer(tx).balance >= tx.gas * tx.max_fee_per_gas + get_total_data_gas(tx) * tx.max_fee_per_data_gas\n\n        # ensure that the user was willing to at least pay the current data gasprice\n        assert tx.max_fee_per_data_gas >= get_data_gasprice(parent(block).header)\n\n        num_blobs += len(tx.blob_versioned_hashes)\n\n    # check that the excess data gas is correct\n    asset num_blobs <= MAX_DATA_GAS_PER_BLOCK / DATA_GAS_PER_BLOB // <----------------------- ADDED\n    expected_edg = calc_excess_data_gas(parent(block).header, num_blobs)\n    assert expected_edg == block.excess_data_gas\n```",
+      "createdAt": "2023-05-24T08:36:16.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or \nasset num_blocks * DATA_GAS_PER_BLOB  <= MAX_DATA_GAS_PER_BLOCK",
+      "createdAt": "2023-05-24T08:36:54.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "for sure",
+      "createdAt": "2023-05-24T08:37:01.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> @peter this is currently verified by the CL spec: https://github.com/ethereum/consensus-specs/blob/dev/specs/deneb/beacon-chain.md#execution-payload",
+      "createdAt": "2023-05-24T11:46:09.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't really see a reason to not have the check in el tho (or rather in el too)",
+      "createdAt": "2023-05-24T12:16:02.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Also there's no mention of this is the spec, would be nice to add it there too",
+      "createdAt": "2023-05-24T12:19:12.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> this is the spec",
+      "createdAt": "2023-05-24T12:19:25.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<dankrad> the full 4844 spec is the EL (part of the EIP) and CL (which is what I sent)",
+      "createdAt": "2023-05-24T12:19:45.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "still at least a note should be added to the el then why it's not necessary, as it stands, the el spec is ambiguous in itself",
+      "createdAt": "2023-05-24T12:23:44.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "another thing to keep in mind is that you might want to validate a block outside of newPayload",
+      "createdAt": "2023-05-24T12:24:16.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "e.g. snap sync",
+      "createdAt": "2023-05-24T12:24:19.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "in that case should you or should you not detect these errors?",
+      "createdAt": "2023-05-24T12:24:33.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "these are kind of the reasons it feels strange that we so storngly not want to check something that we could check",
+      "createdAt": "2023-05-24T12:25:08.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "e.g. the spec says I should verify that excessDataGas is correct?",
+      "createdAt": "2023-05-24T12:26:13.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why not have the CL verify that?",
+      "createdAt": "2023-05-24T12:26:17.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Seems arbitrary a bit",
+      "createdAt": "2023-05-24T12:26:38.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My expectation is that we should veryfy everything as strongly as can",
+      "createdAt": "2023-05-24T12:26:48.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and I'd rather check in 2 places than none by some strange accident",
+      "createdAt": "2023-05-24T12:27:00.399000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess tx hash is `keccak256(BLOB_TX_TYPE || rlp([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list, max_fee_per_data_gas, blob_versioned_hashes, y_parity, r, s]))`. Found no mention of it in the spec",
+      "createdAt": "2023-05-24T14:42:16.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "go-kzg-4844 has just released new version 0.3.0 -- The main change being the endian switch in consensus-specs PR 3354 : <https://github.com/ethereum/consensus-specs/pull/3354>\n\nThe doc comments in go-kzg-4844 have been updated to note that it now conforms to the consensus-specs at commit `017a8495f7671f5fff2075a9bfc9238c1a0982f8`",
+      "createdAt": "2023-05-24T22:08:03.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "robocopsgonemad",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "greetings other 4844 friends, I wanna introduce <@680245613258211336> who is going to be working with me getting 4844 implemented on Besu.",
+      "createdAt": "2023-05-24T23:39:26.362000+00:00",
+      "attachments": []
+    }
+  ]
+}

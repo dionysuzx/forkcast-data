@@ -1,0 +1,938 @@
+{
+  "schemaVersion": 1,
+  "channel": "typed-transactions",
+  "date": "2021-02-26",
+  "messageCount": 116,
+  "sourceHash": "ba692687b57a08f26ff55fe2ccc5a764f17c783de7f9e1b4abafba5b7c6dffa2",
+  "searchText": "Precompile can be called by an EOA. EOAs calling the precompile should be relatively rare though I can imagine people using it to sponsor their own transactions. E.g., get airdrop tokens out of their own accounts and to sweep accounts and such. Aight, so how likely are UNGAS or other gas unobservability type proposals? Why does UNGAS matter? One of the changes suggested was returning the gas used for the call, that way even if UNGAS or something similar would come around and disable `GAS`, this particular use case would continue to work. I do generally dislike planning an EIP around what _may_ come in the future though. Which use case are you trying to solve for exactly? The one where someone loops until they are out of gas? Yeah. Basically where you have to reserve gas so something can run after `CALL_PRECOMPILE` That won't help you reserve gas I don't think? It will just tell you that you ran out. It's kind of a two part problem: You need gas observability even if `GAS` is nerfed, so we return `usedgas`. There is a lower bound guaranteed to be specified off-chain (with `mingas`), so it's safe to strictly set the gas sent with the transaction. Doesn't the fact that you can limit gas provided to the call entirely solve the problem? Yes, but at least one (and I can't remember which) ungas-styled proposal changes CALL to always forward all gas. It would just be safe to _not_ forward all gas because `mingas` is set off-chain @/vbuterin goes into it a little bit here: https://ethresear.ch/t/counter-proposal-to-oil-karma-per-account-gas-limits/7433 I think I'm ambivalent. If the options are \"return gas used\" vs \"return void\", then even though I don't care much about returning gas used, it seems pretty low cost. Though, maybe it increases implementation complexity to return gas used? Right now the returndata from `CALL_PRECOMPILE` is one byte (1 == success, 0 == failure), followed by the returndata from the callee. Since there's already that one extra byte... I don't think I'd mind adding gas used. What do you mean \"that one extra byte\"? I forgot that in the EVM there are no exceptions, only returns. That puts me pretty firmly into the \"don't return gas used\" camp. The return data from `CALL_PRECOMPILE` is `SUCCESS || returndata(callee)`. The extra byte I'm referring to is `SUCCESS`. So instead it would be `SUCCESS || GAS_USED || returndata(callee)` `returndata(callee)` is done through memory I thought? All three are success/failure isn't done through the stack? success/failure of the precompile has to be separated from success/failure of the callee, no? Why? If the callee failed, it should increment whatever replay protection the invoker is using Feels like it would be simpler to have the precompile revert on failure, which includes failure of the inner call (in which case it would propogate the revert). That is up to the caller to do. What is caller? Like the sponsor, or the invoker? Invoker. (or the sponsor, depends on how you have things setup I suppose) Yeah, for sure. For this scenario there would have to be an invoker contract (because when sponsor == invoker, you don't have any replay protection for the sponsee) Alright, so the callee reverts, but the sponsor still wants to deduct value from the sponsee's balance. How does the invoker know if the call reverted because of a bad signature, or because the inner call reverted? (on a weird sidenode, discord seems to spike to 100% CPU usage when you type 🤣 ) It doesn't, and I don't think it needs to. So you'd penalize the sponsor in that case? Why would it penalize the sponsor? Sponsor sends the transaction-like package. `CALL_PRECOMPILE` fails, sponsor doesn't get funds. I see, the idea is that the invoker may be withdrawing funds from the sponsee as a next step. Yeah, or approving an ERC-20 or something. I feel like this is a problem to be solved at a higher layer? By the time `CALL_PRECOMPILE` is called the invoker should be very confident it will not fail for malformed data reasons. And the sponsee should not be using invokers that are malicious (e.g., that have the *ability* to send less than mingas or not forward value). Won't that end up duplicating a lot of checks? Like two `BALANCE` checks, two ecrecovers, etc `CALL_PRECOMPILE` failures should, IMO, be considered a programming error. I suspect in most cases the invoker will blindly forward all attached value, not be chipping in some of its own, so it doesn't need to do any balance checks. Signature validation is a fair argument though. How about this: CALL_PRECOMPILE can have well defined revert reason codes, and when the callee reverts it can verify that the callee isn't trying to spoof one of its error codes (and if it is it will rewrite to CALL_PRECOMPILE error code). Inside CALL_PRECOMPILE: ```ts result = call{from: signer, value: value}(data) if (result == false) { if (returndata == BAD_SIG || returndata == WRONG_GAS || ...) { revert(CALLEE_OVERLAPPED_REVERT_CODE) } else { revert(returndata) } } else { return(returndata) } ``` (pseudocode of course) Given page size for return data is 32 bytes, we can choose randomly selected values for revert reason constants such that the only way an overlap could occur is if the callee was maliciously trying to overlap. Alternatively, we could do UTF-8 encoded reverts with something like `precompile error: xxxxxxxxxxxxxx` which again should only overlap with a callee revert reason if they are being malicious (strings have the nice property of being easier to debug). You think that's significantly better than a constant one byte prefix? I'm pretty against bitpacking. It adds complexity that *everyone* needs to deal with and understand. Revert reasons are something that every tool and dapp developer already \"gets\" so they'll do the right thing for free. Revert reasons are already pretty complicated, but that's hidden in solidity. (for some definition of complicated) Sure, but it is something that everyone already has to deal with (tools, users, contracts, etc.) and it is a well established/defined pattern. I would want to see a pretty compelling argument to have a special one-off mechanism for dealing with call failures that doesn't align with the way *everything else* deals with failure. I _think_ this is how GSN does it: https://github.com/opengsn/gsn/blob/9856bdd7b55a779452fa7f30eebe39ef36a7b411/contracts/RelayHub.sol#L212 Yeah, I'm not a fan of that (for the reasons above). This is one reason to go for an opcode Why does an opcode change things here? re: opcode vs precompile I would likely defer to client developers on this. In my mental model of how I would build a client, precompiles are easier to add than opcodes, but that may be an inappropriate intuition. They're both fairly easy But a precompile can only return one boolean plus a blob of bytes, where an opcode can push multiple values. As mentioned above, I don't care much about that benefit. 🙂 Not having to deal with delegatecall as <@543900561460822016> mentioned above would be nice though. Delegatecall isn't much of a problem, really. You can just treat it as a regular call like the other precompiles. `CALL_PRECOMPILE` doesn't read/write any state (anymore) What about `STATIC_CALL`? Would behave like static calling into the callee normally, but setting sender and origin No idea why you'd want to do that, but maybe someone would want to? shower thought: with the proposed schema, it would be possible to wrap multiple levels of sponsoring, right? So entering CALL_PRECOMPILE `n` times and each time entering a new `origin`, and then recursively backing out again. No practicalities in mind, just a thought.. ? Also, I don't think the evm-level implementation should be too coloured by solidity or how wallets are constructed today, but rather focusing on what's best for the platform Do you think this would be better suited as a precompile or an opcode in the call family? Not sure. On one hand, it 'feels' like a precompile. But precompiles are a bit nasty, since you can call them in N ways (call, static, delegate, codecall) and the semantics of that can be a bit funky to determine. But opcodes are problematic because they're evaluated differently... And then again, this could be it's own call-type, so it would fit snugly along `call` as `sponsoredcall`... I don't know I guess it's a bit strange to have four call-type opcodes, and one call-type precompile, which you need to call to make it call So right now I'm leaning towards it feeling more like an opcode, but I'm swaying like grass in the wind <@543900561460822016> also made the good (IMO) argument that this would be the first precompile that isn't pure. It would break anyone using `tx.origin == msg.sender` as a reentrancy guard Only if we change ORIGIN semantics though, right? yes FWIW I also feel like an opcode makes more sense, with the nonce/replay protection moved out of the precompile that precompile feels a bit less self-contained. Also from an implementation stand-point as someone just now looking at how the EVM and precompiles are implemented I can see a clear way to implement it as an opcode, but implementing it as a precompile requires larger refactors (because it's the first \"impure\" precompile so would need access to the EVM and StateDB). I get a https error on https://explorer.yolov3.ethdevops.io/ I don't think it came back up when the network was reset for the 2930 changes, even if I bypass the cert warning I still get a 503. Can someone give me the state root of block 0 of yolov3? ya just a sec `0x18fe5753b162ee86c08809d8cfde565e2ca40c869c5f34b19f9e4478759e35e3` Thanks! 😄 Full block just in case you need it: https://gist.github.com/ryanschneider/18d1bb10354c5d3e4d3de772cda6e70e Ah great! 😄 Don't I need the fork hashes to sync with the network? Due to devp2p? Do you maybe have the fork hashes? <@!388751025789468672> I'm not 100% sure I know what that means 🙂 Do you mean from before the reset? These fork hashes https://eips.ethereum.org/EIPS/eip-2124 It is to check that we are on the correct chain, mainly to ensure we are not connecting to eth classic nodes Thanks, today I learned. 🙂 I'll see if I can find them in the geth codebase. Might also be in the genesis config Martin posted some time back. Ah I checked Martin's file, but sadly these do not note the fork hashes Ya I don't see it defined in geth either (`.EIP150BlockHash` would be set if it were): https://github.com/ethereum/go-ethereum/blob/744707a490705f292b0558aa6807b3848a9c4bf9/params/config.go#L226 Isn't the networkId and chainId being unique enough though? Sadly I don't know enough about this specific EIP, only that it uses these hashes to filter out the wrong peers, which would be my initial thought where a problem could be if I have a bootnode but cannot sync <@!543900561460822016> ran into something like this, I think. Oh which sync protocol are you trying? IIRC fast sync was broken on the bootnode at some point and I'm not sure if it was re-deployed after being fixed, I've been using full sync I guess you could also trying setting the fork hash to `0xf1f2876e8500c77afcc03228757b39477eceffccf645b734967fe3c7e16967b7` (the hash of block 0) I just did that in geth and it seems to be working (I'm resyncing ok from an empty chain) (oh but setting it to an invalid hash _also_ works so I must be missing something else to fully turn on the feature) Actually n/m EIP-150 is a totally different \"verify fork hash\" step 😊 Ok, found it: https://github.com/ethereum/go-ethereum/blob/e01096f531862b982833732514376cead8d58e82/eth/handler.go#L257 I don't see it exposed anywhere so added a logger to dump it am getting `0xa308affe`",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Precompile can be called by an EOA.",
+      "createdAt": "2021-02-26T02:31:48.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "EOAs calling the precompile should be relatively rare though",
+      "createdAt": "2021-02-26T02:44:00.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can imagine people using it to sponsor their own transactions.",
+      "createdAt": "2021-02-26T02:53:14.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "E.g., get airdrop tokens out of their own accounts and to sweep accounts and such.",
+      "createdAt": "2021-02-26T02:53:35.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Aight, so how likely are UNGAS or other gas unobservability type proposals?",
+      "createdAt": "2021-02-26T03:42:07.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why does UNGAS matter?",
+      "createdAt": "2021-02-26T03:52:14.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "One of the changes suggested was returning the gas used for the call, that way even if UNGAS or something similar would come around and disable `GAS`, this particular use case would continue to work.",
+      "createdAt": "2021-02-26T04:10:38.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I do generally dislike planning an EIP around what _may_ come in the future though.",
+      "createdAt": "2021-02-26T04:11:49.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which use case are you trying to solve for exactly?",
+      "createdAt": "2021-02-26T04:14:04.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The one where someone loops until they are out of gas?",
+      "createdAt": "2021-02-26T04:14:16.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah. Basically where you have to reserve gas so something can run after `CALL_PRECOMPILE`",
+      "createdAt": "2021-02-26T04:14:56.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That won't help you reserve gas I don't think?  It will just tell you that you ran out.",
+      "createdAt": "2021-02-26T04:22:46.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's kind of a two part problem:\n\nYou need gas observability even if `GAS` is nerfed, so we return `usedgas`.\n\nThere is a lower bound guaranteed to be specified off-chain (with `mingas`), so it's safe to strictly set the gas sent with the transaction.",
+      "createdAt": "2021-02-26T04:24:33.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Doesn't the fact that you can limit gas provided to the call entirely solve the problem?",
+      "createdAt": "2021-02-26T04:25:03.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yes, but at least one (and I can't remember which) ungas-styled proposal changes CALL to always forward all gas.",
+      "createdAt": "2021-02-26T04:26:50.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It would just be safe to _not_ forward all gas because `mingas` is set off-chain",
+      "createdAt": "2021-02-26T04:28:04.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "@/vbuterin goes into it a little bit here: https://ethresear.ch/t/counter-proposal-to-oil-karma-per-account-gas-limits/7433",
+      "createdAt": "2021-02-26T04:30:43.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think I'm ambivalent.  If the options are \"return gas used\" vs \"return void\", then even though I don't care much about returning gas used, it seems pretty low cost.",
+      "createdAt": "2021-02-26T04:33:26.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Though, maybe it increases implementation complexity to return gas used?",
+      "createdAt": "2021-02-26T04:33:34.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right now the returndata from `CALL_PRECOMPILE` is one byte (1 == success, 0 == failure), followed by the returndata from the callee.",
+      "createdAt": "2021-02-26T04:34:21.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Since there's already that one extra byte... I don't think I'd mind adding gas used.",
+      "createdAt": "2021-02-26T04:34:43.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What do you mean \"that one extra byte\"?",
+      "createdAt": "2021-02-26T04:39:22.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I forgot that in the EVM there are no exceptions, only returns.  That puts me pretty firmly into the \"don't return gas used\" camp.",
+      "createdAt": "2021-02-26T04:39:48.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The return data from `CALL_PRECOMPILE` is `SUCCESS || returndata(callee)`. The extra byte I'm referring to is `SUCCESS`.",
+      "createdAt": "2021-02-26T04:41:07.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So instead it would be `SUCCESS || GAS_USED || returndata(callee)`",
+      "createdAt": "2021-02-26T04:41:31.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`returndata(callee)` is done through memory I thought?",
+      "createdAt": "2021-02-26T04:41:36.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "All three are",
+      "createdAt": "2021-02-26T04:41:41.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "success/failure isn't done through the stack?",
+      "createdAt": "2021-02-26T04:41:53.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "success/failure of the precompile has to be separated from success/failure of the callee, no?",
+      "createdAt": "2021-02-26T04:42:12.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why?",
+      "createdAt": "2021-02-26T04:42:26.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If the callee failed, it should increment whatever replay protection the invoker is using",
+      "createdAt": "2021-02-26T04:42:53.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Feels like it would be simpler to have the precompile revert on failure, which includes failure of the inner call (in which case it would propogate the revert).",
+      "createdAt": "2021-02-26T04:42:57.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is up to the caller to do.",
+      "createdAt": "2021-02-26T04:43:12.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What is caller? Like the sponsor, or the invoker?",
+      "createdAt": "2021-02-26T04:43:44.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Invoker.",
+      "createdAt": "2021-02-26T04:43:48.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(or the sponsor, depends on how you have things setup I suppose)",
+      "createdAt": "2021-02-26T04:44:02.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, for sure. For this scenario there would have to be an invoker contract (because when sponsor == invoker, you don't have any replay protection for the sponsee)",
+      "createdAt": "2021-02-26T04:44:38.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Alright, so the callee reverts, but the sponsor still wants to deduct value from the sponsee's balance.",
+      "createdAt": "2021-02-26T04:45:18.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "How does the invoker know if the call reverted because of a bad signature, or because the inner call reverted?",
+      "createdAt": "2021-02-26T04:45:42.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(on a weird sidenode, discord seems to spike to 100% CPU usage when you type 🤣 )",
+      "createdAt": "2021-02-26T04:47:20.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It doesn't, and I don't think it needs to.",
+      "createdAt": "2021-02-26T04:47:22.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So you'd penalize the sponsor in that case?",
+      "createdAt": "2021-02-26T04:48:01.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why would it penalize the sponsor?",
+      "createdAt": "2021-02-26T04:48:22.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sponsor sends the transaction-like package. `CALL_PRECOMPILE` fails, sponsor doesn't get funds.",
+      "createdAt": "2021-02-26T04:48:47.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I see, the idea is that the invoker may be withdrawing funds from the sponsee as a next step.",
+      "createdAt": "2021-02-26T04:49:28.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, or approving an ERC-20 or something.",
+      "createdAt": "2021-02-26T04:49:46.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I feel like this is a problem to be solved at a higher layer?",
+      "createdAt": "2021-02-26T04:49:54.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By the time `CALL_PRECOMPILE` is called the invoker should be very confident it will not fail for malformed data reasons.",
+      "createdAt": "2021-02-26T04:50:21.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And the sponsee should not be using invokers that are malicious (e.g., that have the *ability* to send less than mingas or not forward value).",
+      "createdAt": "2021-02-26T04:50:49.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Won't that end up duplicating a lot of checks? Like two `BALANCE` checks, two ecrecovers, etc",
+      "createdAt": "2021-02-26T04:51:49.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`CALL_PRECOMPILE` failures should, IMO, be considered a programming error.",
+      "createdAt": "2021-02-26T04:51:52.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I suspect in most cases the invoker will blindly forward all attached value, not be chipping in some of its own, so it doesn't need to do any balance checks.",
+      "createdAt": "2021-02-26T04:52:40.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Signature validation is a fair argument though.",
+      "createdAt": "2021-02-26T04:52:56.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "How about this:  CALL_PRECOMPILE can have well defined revert reason codes, and when the callee reverts it can verify that the callee isn't trying to spoof one of its error codes (and if it is it will rewrite to CALL_PRECOMPILE error code).",
+      "createdAt": "2021-02-26T04:53:46.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Inside CALL_PRECOMPILE:\n```ts\nresult = call{from: signer, value: value}(data)\nif (result == false) {\n    if (returndata == BAD_SIG || returndata == WRONG_GAS || ...) {\n        revert(CALLEE_OVERLAPPED_REVERT_CODE)\n    } else {\n        revert(returndata)\n    }\n} else {\n    return(returndata)\n}\n```",
+      "createdAt": "2021-02-26T04:56:26.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(pseudocode of course)",
+      "createdAt": "2021-02-26T04:56:41.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Given page size for return data is 32 bytes, we can choose randomly selected values for revert reason constants such that the only way an overlap could occur is if the callee was maliciously trying to overlap.",
+      "createdAt": "2021-02-26T04:58:24.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Alternatively, we could do UTF-8 encoded reverts with something like `precompile error: xxxxxxxxxxxxxx` which again should only overlap with a callee revert reason if they are being malicious (strings have the nice property of being easier to debug).",
+      "createdAt": "2021-02-26T04:59:18.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You think that's significantly better than a constant one byte prefix?",
+      "createdAt": "2021-02-26T05:00:18.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm pretty against bitpacking.",
+      "createdAt": "2021-02-26T05:00:29.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It adds complexity that *everyone* needs to deal with and understand.",
+      "createdAt": "2021-02-26T05:00:43.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Revert reasons are something that every tool and dapp developer already \"gets\" so they'll do the right thing for free.",
+      "createdAt": "2021-02-26T05:01:04.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Revert reasons are already pretty complicated, but that's hidden in solidity.",
+      "createdAt": "2021-02-26T05:09:06.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(for some definition of complicated)",
+      "createdAt": "2021-02-26T05:09:30.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sure, but it is something that everyone already has to deal with (tools, users, contracts, etc.) and it is a well established/defined pattern.",
+      "createdAt": "2021-02-26T05:10:55.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I would want to see a pretty compelling argument to have a special one-off mechanism for dealing with call failures that doesn't align with the way *everything else* deals with failure.",
+      "createdAt": "2021-02-26T05:11:28.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I _think_ this is how GSN does it: https://github.com/opengsn/gsn/blob/9856bdd7b55a779452fa7f30eebe39ef36a7b411/contracts/RelayHub.sol#L212",
+      "createdAt": "2021-02-26T05:19:23.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, I'm not a fan of that (for the reasons above).",
+      "createdAt": "2021-02-26T05:22:03.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is one reason to go for an opcode",
+      "createdAt": "2021-02-26T05:33:48.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why does an opcode change things here?",
+      "createdAt": "2021-02-26T05:56:12.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "re: opcode vs precompile I would likely defer to client developers on this.  In my mental model of how I would build a client, precompiles are easier to add than opcodes, but that may be an inappropriate intuition.",
+      "createdAt": "2021-02-26T05:57:09.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "They're both fairly easy",
+      "createdAt": "2021-02-26T06:05:11.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But a precompile can only return one boolean plus a blob of bytes, where an opcode can push multiple values.",
+      "createdAt": "2021-02-26T06:05:44.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "As mentioned above, I don't care much about that benefit.  🙂",
+      "createdAt": "2021-02-26T06:07:16.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not having to deal with delegatecall as <@543900561460822016> mentioned above would be nice though.",
+      "createdAt": "2021-02-26T06:07:54.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Delegatecall isn't much of a problem, really. You can just treat it as a regular call like the other precompiles.",
+      "createdAt": "2021-02-26T06:08:32.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`CALL_PRECOMPILE` doesn't read/write any state (anymore)",
+      "createdAt": "2021-02-26T06:08:55.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What about `STATIC_CALL`?",
+      "createdAt": "2021-02-26T06:09:51.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Would behave like static calling into the callee normally, but setting sender and origin",
+      "createdAt": "2021-02-26T06:11:04.582000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No idea why you'd want to do that, but maybe someone would want to?",
+      "createdAt": "2021-02-26T06:11:42.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "shower thought: with the proposed schema, it would be possible to wrap multiple levels of sponsoring, right? So entering CALL_PRECOMPILE `n` times and each time entering a new `origin`, and then recursively backing out again. No practicalities in mind, just a thought.. ?",
+      "createdAt": "2021-02-26T13:51:53.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, I don't think the evm-level implementation should be too coloured by solidity or how wallets are constructed today, but rather focusing on what's best for the platform",
+      "createdAt": "2021-02-26T13:53:22.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Do you think this would be better suited as a precompile or an opcode in the call family?",
+      "createdAt": "2021-02-26T13:54:47.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Not sure. On one hand, it 'feels' like a precompile. But precompiles are a bit nasty, since you can call them in N ways (call, static, delegate, codecall) and the semantics of that can be a bit funky to determine. But opcodes are problematic because they're evaluated differently... And then again, this could be it's own call-type, so it would fit snugly along `call` as `sponsoredcall`... I don't know",
+      "createdAt": "2021-02-26T14:07:35.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess it's a bit strange to have four call-type opcodes, and one call-type precompile, which you need to call to make it call",
+      "createdAt": "2021-02-26T14:08:23.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So right now I'm leaning towards it feeling more like an opcode, but I'm swaying like grass in the wind",
+      "createdAt": "2021-02-26T14:09:02.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@543900561460822016> also made the good (IMO) argument that this would be the first precompile that isn't pure.",
+      "createdAt": "2021-02-26T16:23:22.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It would break anyone using `tx.origin == msg.sender` as a reentrancy guard",
+      "createdAt": "2021-02-26T16:29:50.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Only if we change ORIGIN semantics though, right?",
+      "createdAt": "2021-02-26T16:30:10.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2021-02-26T16:33:10.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "FWIW I also feel like an opcode makes more sense, with the nonce/replay protection moved out of the precompile that precompile feels a bit less self-contained.  Also from an implementation stand-point as someone just now looking at how the EVM and precompiles are implemented I can see a clear way to implement it as an opcode, but implementing it as a precompile requires larger refactors (because it's the first \"impure\" precompile so would need access to the EVM and StateDB).",
+      "createdAt": "2021-02-26T17:44:20.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I get a https error on https://explorer.yolov3.ethdevops.io/",
+      "createdAt": "2021-02-26T21:34:47.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think it came back up when the network was reset for the 2930 changes, even if I bypass the cert warning I still get a 503.",
+      "createdAt": "2021-02-26T21:54:35.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Can someone give me the state root of block 0 of yolov3?",
+      "createdAt": "2021-02-26T21:59:59.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ya just a sec",
+      "createdAt": "2021-02-26T22:03:38.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`0x18fe5753b162ee86c08809d8cfde565e2ca40c869c5f34b19f9e4478759e35e3`",
+      "createdAt": "2021-02-26T22:05:40.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Thanks! 😄",
+      "createdAt": "2021-02-26T22:06:08.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Full block just in case you need it: https://gist.github.com/ryanschneider/18d1bb10354c5d3e4d3de772cda6e70e",
+      "createdAt": "2021-02-26T22:07:10.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah great! 😄",
+      "createdAt": "2021-02-26T22:07:44.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Don't I need the fork hashes to sync with the network? Due to devp2p? Do you maybe have the fork hashes? <@!388751025789468672>",
+      "createdAt": "2021-02-26T22:11:17.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm not 100% sure I know what that means 🙂  Do you mean from before the reset?",
+      "createdAt": "2021-02-26T22:13:54.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "These fork hashes https://eips.ethereum.org/EIPS/eip-2124",
+      "createdAt": "2021-02-26T22:14:36.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is to check that we are on the correct chain, mainly to ensure we are not connecting to eth classic nodes",
+      "createdAt": "2021-02-26T22:14:55.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Thanks, today I learned. 🙂  I'll see if I can find them in the geth codebase.",
+      "createdAt": "2021-02-26T22:17:32.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Might also be in the genesis config Martin posted some time back.",
+      "createdAt": "2021-02-26T22:18:19.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah I checked Martin's file, but sadly these do not note the fork hashes",
+      "createdAt": "2021-02-26T22:19:07.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ya I don't see it defined in geth either (`.EIP150BlockHash` would be set if it were): https://github.com/ethereum/go-ethereum/blob/744707a490705f292b0558aa6807b3848a9c4bf9/params/config.go#L226",
+      "createdAt": "2021-02-26T22:22:02.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Isn't the networkId and chainId being unique enough though?",
+      "createdAt": "2021-02-26T22:24:02.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sadly I don't know enough about this specific EIP, only that it uses these hashes to filter out the wrong peers, which would be my initial thought where a problem could be if I have a bootnode but cannot sync",
+      "createdAt": "2021-02-26T22:25:57.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!543900561460822016> ran into something like this, I think.",
+      "createdAt": "2021-02-26T23:11:21.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh which sync protocol are you trying?  IIRC fast sync was broken on the bootnode at some point and I'm not sure if it was re-deployed after being fixed, I've been using full sync",
+      "createdAt": "2021-02-26T23:12:29.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess you could also trying setting the fork hash to `0xf1f2876e8500c77afcc03228757b39477eceffccf645b734967fe3c7e16967b7` (the hash of block 0)",
+      "createdAt": "2021-02-26T23:16:08.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I just did that in geth and it seems to be working (I'm resyncing ok from an empty chain)",
+      "createdAt": "2021-02-26T23:19:14.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(oh but setting it to an invalid hash _also_ works so I must be missing something else to fully turn on the feature)",
+      "createdAt": "2021-02-26T23:23:25.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Actually n/m EIP-150 is a totally different \"verify fork hash\" step 😊",
+      "createdAt": "2021-02-26T23:26:39.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ok, found it: https://github.com/ethereum/go-ethereum/blob/e01096f531862b982833732514376cead8d58e82/eth/handler.go#L257\n\nI don't see it exposed anywhere so added a logger to dump it am getting `0xa308affe`",
+      "createdAt": "2021-02-26T23:44:18.508000+00:00",
+      "attachments": []
+    }
+  ]
+}

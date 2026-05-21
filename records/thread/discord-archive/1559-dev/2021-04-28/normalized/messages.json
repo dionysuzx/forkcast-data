@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-04-28",
+  "messageCount": 144,
+  "sourceHash": "f710d9c1eb64ff6754c17808b04214286d8ffdb461f430dc28e5f2bdd6bf3725",
+  "searchText": "I would rather see async discussion on that or a breakout room. Prefer to keep ACD for final consensus, not brainstorming and iterating. Got it. We were thinking of a breakout room, so I may just give it a quick shout out on ACD 👍 Hi guys, I just tried sending EIP1559 txs over TurboGeth/Besu/Nethermind but all of them failed. If I just try to serialize a tx such that it represents the bytes which we use for the transactions trie (so for EIP1559 these bytes start with `0x02`) then nodes do not accept it. However, if I re-RLP the byte sequence (so the one starting with `0x02`) then I get a valid RLP which can be directly decoded and nodes seem to accept this. This, however, breaks some stuff like in web3; ```javascript var Tx = require('ethereumjs-tx').Transaction; var privateKey = Buffer.from('e331b6d69882b4cb4ea581d88e0b604039a3de5967688d3dcffdd2270c0fd109', 'hex'); var rawTx = { nonce: '0x00', gasPrice: '0x09184e72a000', gasLimit: '0x2710', to: '0x0000000000000000000000000000000000000000', value: '0x00', data: '0x7f7465737432000000000000000000000000000000000000000000000000000000600057' } var tx = new Tx(rawTx, {'chain':'ropsten'}); tx.sign(privateKey); var serializedTx = tx.serialize(); // console.log(serializedTx.toString('hex')); // 0xf889808609184e72a00082271094000000000000000000000000000000000000000080a47f74657374320000000000000000000000000000000000000000000000000000006000571ca08a8bbf888cfa37bbf0bb965423625641fc956967b81d12e23709cead01446075a01ce999b56a8a88504be365442ea61239198e23d1fce7d00fcfc5cd3b44b7215f web3.eth.sendSignedTransaction('0x' + serializedTx.toString('hex')) .on('receipt', console.log); ``` If I try to `sendSignedTransaction` for a EIP1559Transaction, then I need to `rlp.encode(serializedTx)` and then send that byte sequence. This is not the case for LegacyTxs. If we want to do this (not really have any opinion yet) then this should be documented. I also find it somewhat weird that we don't \"doubly\" RLP these txs for the transactions trie, but we do \"doubly RLP\" then if we want to send them over RPC, I find this inconsistent. Is there a minimum tip for the miners to get my tx mined? I had a tx with tip of 255 never getting mined on the network I'm gonna push some txs to raise the base fee Okay, can someone help me test sending a Tx with a gas limit which is higher than the current block gas limit? <@&688101493978562687> is reporting \"tx: gas limit too high\" - it *should* be able to be mined, since we are allowed to actually raise the gas limit to 40M right? (FYI I am trying to deploy a contract with code 0xfe, so upon execution it will ASSERT and thus consume all gas) Besu is sending me \"Invalid JSON Response: \"\"\" Okay great, just filled a block with 40M gas anyways 🙂 http://eip1559-testnet.ops.pegasys.tech:3000/block/110135 <@!543900561460822016> seems like I broke Geth and TurboGeth http://eip1559-testnet.ops.pegasys.tech:3000/block/110135 Has to do with gas limit Block gas limit 20M, but due to EIP1559 elasticity it is OK to raise this to 40M Looks like we can indeed raise the base fee, it is now above 7, so that's good. What is going on? See above ^ The signer is Besu right? How come it is still producing blocks? JS is syncing again 😄 so it looks like there are two transactions in the block that have invalid opcode 0xfe to burn 10m and 10m gas respectively. And that's why the 3rd transaction throws \"gas limit is reached\". At which point can gas limit expand though? Very interesting question! I didn't not expect it to expand while we are executing the block, from 20m to 40m... From EIP1559. GasTarget is synonym for GasLimit; ELASTICITY is 2. checking the EIP-1559 Oh, I see that should be easy to fix them If the GasUsed is above GasTarget (GasLimit), increase base fee, if equal base fee is constant, otherwise decrease For JS it was a very easy fix, 5 lines or so Okay guys I also just sent the first EIP3198 TX to the net: http://eip1559-testnet.ops.pegasys.tech:3000/tx/0x15c1971d65bbdee1f3d2a9a6525a9f521a5d31cd2186fcf89600749b3ffb5558 This stored the BASEFEE at slot 0, and deployed a contract to 0xDbA3eD3Db9d2907daaF924FAD1c66d1ed92bF7f8, this will store the current BASEFEE at storage slot provided by CALLVALUE Fixed, will merge to master soon! Thank you Great 😄 Hm. Wait -- I understood it as geth also being wrong? Was that an incorrect understanding? Because it looks like lightclient's PR would be correct already https://github.com/ethereum/go-ethereum/pull/22617/files#diff-38308f251deaded6062800e267abdeabc09c4a587bc079cb2868717aea8fd059R31 On ethstats, quilt is lightclient's version right? That one is down http://eip1559-testnet.ops.pegasys.tech:3001/ Maybe it is not the latest version <@!211091239112671234> That's not enough. You also need something like this: https://github.com/ledgerwatch/turbo-geth/pull/1834/commits/4fa9dd56e529b5755a2960b13dd9b9e105038d8b Yeah found it cc <@!393119312350543872> good testcase ^ (ps is Ori on this discord channel?) FYI I'm beefing up the base fee on aleut <@508125616940515329> did the “double encoding” thing get resolved or not? I don’t understand why we need to do this for 1559 transactions but not legacy or 2930 ones <#804019759934078987> 😉 Which test case? Check if we can fill a EIP1559 block above `GasLimit` of block, up to at most `GasLimit * ELASTICITY_MULTIPLIER` (multiplier is 2) Just borked Aleut on blocks where total gas used > gas limit (but <= 2*gaslimit) You mean gasTarget? Yep I see Geth online again 🙂 nice catch, looks like I just made a silly error! why is besu stuck btw? I think Besu has the same bug (They are stuck at the same block as Geth when it was stuck) but aren't they the only signer? Yeah this is the part which I don't get 🤔 If they are the signer from genesis block; this is the signer for all the blocks Or well the last recent block I checked, I don't think we have any other signers hmm Fun fact if we keep stress-testing Aleut then at some point there's no Aleut ETH left 😛 I guess when we decide on what refund EIP goes into London, we'll need to sunset Aleut and create a new (last?) devnet with that EIP too, right? If so, <@!543900561460822016> I'm counting on you for a nice starting-with-B name 😄 Beiko? 😛 😄 i think next on the wikipedia page is Baikal 🙂 This please Definitely prefer Baikal 🙂 yeah that's fair, probably better to save `beiko` for a future hard fork 🙂 Hey <@&652918665943056397> and <@&836981603216654336>, noticed this when testing raising the base fee of blocks: I cannot seem to get a transaction mined which has a gas limit higher than the current block gas target. I could only get txs mined which has a gas limit <= gas target. So in order to get a block with more gas used than current gas target, I should send at least 2 txs in the block. (Also a good test case for ethereum/tests <@!393119312350543872> : check if a single txn can get mined in a block which has a higher gas limit than the current gas target, but within bound of ELASTICITY*GasTarget) Once again there is no gas limit in eip1559 blocks is it correct? Only gasTarget and gasUsed yes, but there is hard cap of gasTarget * blockElasticity Whats the status og t8ntool supporting eip1559? ```assert block.gas_used <= block.gas_target * ELASTICITY_MULTIPLIER, 'invalid block: too much gas used' ``` <@!393119312350543872> i can add support now, i think the only thing that needs to be added is the baseFee block parameter? i think json => tx decoding is already working https://github.com/ethereum/tests/pull/826 New block type and new transaction type We still coming up on names with besu okay sounds good - i think the block should have either GasTarget or GasLimit, but not both - right? 2 nee fields in tx maxFeePerGas: '1234' maxInclusionFeePerGas: Yes. So not to confuse the types yep, sounds good In block instead of gasLimit its gasTarget Rlp format according to eip And one more field in the block my preferred naming new elements in json objects: ``` currentGasTarget currentBaseFee tx.tip tx.FeeCap ``` baseFeePerGas Need to put the naming in eip so other teams would know. <@439556036647714817> put it to the docs <@!301186049323958275> won't let me put it in the EIP 😦 EIP should be extremely specific/explicit and not favor brevity at all. Separate from that is what people colloquially call things. I *still strongly prefer verbosity in communication*, but I am much less convicted in trying to control colloquial terminology compared to specification terminology. Did I just break Nethermind? <@!758579010027782144> <@&652918665943056397> Gah I might have triggered what I did not want to trigger 😦 I wanted to fund the Precompiles with 1 wei, but I forgot to send 1 wei with my txn 😦 (This is the RIPEMD SpuriousDragon bug) I did two things at the same time which I should not have done. I wanted to touch the same account in the same block, to see if it was actually removed from the warm addresses between txs and not at the level of the block. But at the same time I also wanted to fund precompiles 😦 the unfortunate byproduct of that is that tools are being built with the same language and IMO my eyes glaze over when i start trying to read very long variable names I also think `tip` is a terrible name (even ignore the lack of verbosity). It isn't a tip. A tip is voluntary, and provided after service. This is required and provided *before* service (or at least at time of service, depending on your viewpoint). been a while since you were in america 🙂 No one should *ever* follow America on naming. See: Imperial system of measurements. fair points - i prefer `tip` for brevity tbh, but `priorityFee` is also good America is no longer allowed to make up words. They have lost their priviledge. the issue is that regardless of the prefix, i am very against tooling also having `PerGas` postfixes Those postfixes remove confusion, especially from new users. Irregardless, I think .... wait.... Always include your units in variable names, it avoids bugs. 🙂 why no `weiPricePerGas` ? `attoethPerGas` !@#$ing Americans again! (`wei`) Ignoring the wei argument, \"price\" is ambiguous, \"per gas\" is not IMO. \"What is the price of ETH?\" is ambiguous while \"How much ETH per USD?\" is not (or USD per ETH I suppose). \"Price of ETH in USD\" would also be acceptable, but now you are just being unnecessarily wordy since you already have enough information in just \"USD per ETH\". 😢 <@!758579010027782144> it may be a check in the block producer Luckily for you, it is late and I need to sleep. I'm sure you'll have everyone rallied against me by morning. 😄 <@!508125616940515329> Yes. I'll look into it So, to be clear, do we _want_ to allow single transactions which can fill a block up to its full elasticity limit? I'm not sure the spec actually makes that clear? There's not a rule I can see in the spec which disallows it my interpretation of the spec is that a single tx should be able to use the entire elasticity limit But it would be great if this is clarified CC <@!273808422753796097> <@!574864862338088960> My personal preference is to set the max tx gas limit to the target, but I think it's more important to go with what the spec seems to say today To avoid risking delaying EIP 1559 by \"changing things\" So should we just make that explicit in the spec? I'm not sure where, though 😅 Maybe just a line about it in security considerations or something? I think limiting transactions to less than block gas limit just adds unnecessary complexity. Unless there is a compelling reason to add it, I generally prefer lower complexity solutions (less conditions that need to be checked). T8n doesn't do blocks. If you tell me what you'd need, (input/output), I can either add it or make a new blockt8n tool It's trivially simple to make a testcase and show that a \"very large tx\" makes it into a block, more problematic to demostrate, in a testcase, that such a block ia rejected. So based on that reasoning, I'd also prefer having same rules for 1tx as for N I th",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I would rather see async discussion on that or a breakout room.  Prefer to keep ACD for final consensus, not brainstorming and iterating.",
+      "createdAt": "2021-04-28T00:05:04.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Got it. We were thinking of a breakout room, so I may just give it a quick shout out on ACD 👍",
+      "createdAt": "2021-04-28T00:38:01.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hi guys, I just tried sending EIP1559 txs over TurboGeth/Besu/Nethermind but all of them failed. If I just try to serialize a tx such that it represents the bytes which we use for the transactions trie (so for EIP1559 these bytes start with `0x02`) then nodes do not accept it. However, if I re-RLP the byte sequence (so the one starting with `0x02`) then I get a valid RLP which can be directly decoded and nodes seem to accept this. This, however, breaks some stuff like in web3;\n\n```javascript\nvar Tx = require('ethereumjs-tx').Transaction;\nvar privateKey = Buffer.from('e331b6d69882b4cb4ea581d88e0b604039a3de5967688d3dcffdd2270c0fd109', 'hex');\n\nvar rawTx = {\n  nonce: '0x00',\n  gasPrice: '0x09184e72a000',\n  gasLimit: '0x2710',\n  to: '0x0000000000000000000000000000000000000000',\n  value: '0x00',\n  data: '0x7f7465737432000000000000000000000000000000000000000000000000000000600057'\n}\n\nvar tx = new Tx(rawTx, {'chain':'ropsten'});\ntx.sign(privateKey);\n\nvar serializedTx = tx.serialize();\n\n// console.log(serializedTx.toString('hex'));\n// 0xf889808609184e72a00082271094000000000000000000000000000000000000000080a47f74657374320000000000000000000000000000000000000000000000000000006000571ca08a8bbf888cfa37bbf0bb965423625641fc956967b81d12e23709cead01446075a01ce999b56a8a88504be365442ea61239198e23d1fce7d00fcfc5cd3b44b7215f\n\nweb3.eth.sendSignedTransaction('0x' + serializedTx.toString('hex'))\n.on('receipt', console.log);\n```\n\nIf I try to `sendSignedTransaction` for a EIP1559Transaction, then I need to `rlp.encode(serializedTx)` and then send that byte sequence. This is not the case for LegacyTxs. If we want to do this (not really have any opinion yet) then this should be documented. I also find it somewhat weird that we don't \"doubly\" RLP these txs for the transactions trie, but we do \"doubly RLP\" then if we want to send them over RPC, I find this inconsistent.",
+      "createdAt": "2021-04-28T11:10:08.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is there a minimum tip for the miners to get my tx mined? I had a tx with tip of 255 never getting mined on the network",
+      "createdAt": "2021-04-28T11:16:31.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm gonna push some txs to raise the base fee",
+      "createdAt": "2021-04-28T11:16:39.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Okay, can someone help me test sending a Tx with a gas limit which is higher than the current block gas limit?",
+      "createdAt": "2021-04-28T11:23:31.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@&688101493978562687> is reporting \"tx: gas limit too high\" - it *should* be able to be mined, since we are allowed to actually raise the gas limit to 40M right? (FYI I am trying to deploy a contract with code 0xfe, so upon execution it will ASSERT and thus consume all gas)",
+      "createdAt": "2021-04-28T11:24:26.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Besu is sending me \"Invalid JSON Response: \"\"\"",
+      "createdAt": "2021-04-28T11:24:50.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Okay great, just filled a block with 40M gas anyways 🙂 http://eip1559-testnet.ops.pegasys.tech:3000/block/110135",
+      "createdAt": "2021-04-28T11:26:37.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!543900561460822016> seems like I broke Geth and TurboGeth",
+      "createdAt": "2021-04-28T11:28:10.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "http://eip1559-testnet.ops.pegasys.tech:3000/block/110135",
+      "createdAt": "2021-04-28T11:28:28.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Has to do with gas limit",
+      "createdAt": "2021-04-28T11:28:37.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Block gas limit 20M, but due to EIP1559 elasticity it is OK to raise this to 40M",
+      "createdAt": "2021-04-28T11:30:49.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Looks like we can indeed raise the base fee, it is now above 7, so that's good.",
+      "createdAt": "2021-04-28T11:32:13.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What is going on?",
+      "createdAt": "2021-04-28T11:34:30.570000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "unknown.png",
+          "content": "fe947008b54e250610dc94cea881e917102ab81613668dd5fa27c29240a6cf25"
+        }
+      ]
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "See above ^",
+      "createdAt": "2021-04-28T11:34:42.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The signer is Besu right? How come it is still producing blocks?",
+      "createdAt": "2021-04-28T11:55:18.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "JS is syncing again 😄",
+      "createdAt": "2021-04-28T12:16:39.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so it looks like there are two transactions in the block that have invalid opcode 0xfe to burn 10m and 10m gas respectively. And that's why the 3rd transaction throws \"gas limit is reached\". At which point can gas limit expand though?",
+      "createdAt": "2021-04-28T13:30:35.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Very interesting question!",
+      "createdAt": "2021-04-28T13:31:10.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I didn't not expect it to expand while we are executing the block, from 20m to 40m...",
+      "createdAt": "2021-04-28T13:31:42.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "From EIP1559. GasTarget is synonym for GasLimit; ELASTICITY is 2.",
+      "createdAt": "2021-04-28T13:31:46.936000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "l6KQAAAABJRU5ErkJggg.png",
+          "content": "fdbeb7182e7ec6a22459b56f9d7554dca1ada8af85ec085c72b86ec9d15fdc40"
+        }
+      ]
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "checking the EIP-1559",
+      "createdAt": "2021-04-28T13:31:50.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, I see",
+      "createdAt": "2021-04-28T13:32:03.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "that should be easy to fix them",
+      "createdAt": "2021-04-28T13:32:08.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If the GasUsed is above GasTarget (GasLimit), increase base fee, if equal base fee is constant, otherwise decrease",
+      "createdAt": "2021-04-28T13:32:17.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For JS it was a very easy fix, 5 lines or so",
+      "createdAt": "2021-04-28T13:32:35.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Okay guys I also just sent the first EIP3198 TX to the net: http://eip1559-testnet.ops.pegasys.tech:3000/tx/0x15c1971d65bbdee1f3d2a9a6525a9f521a5d31cd2186fcf89600749b3ffb5558\n\nThis stored the BASEFEE at slot 0, and deployed a contract to 0xDbA3eD3Db9d2907daaF924FAD1c66d1ed92bF7f8, this will store the current BASEFEE at storage slot provided by CALLVALUE",
+      "createdAt": "2021-04-28T13:33:15.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Fixed, will merge to master soon! Thank you",
+      "createdAt": "2021-04-28T13:42:25.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Great 😄",
+      "createdAt": "2021-04-28T13:46:09.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hm. Wait -- I understood it as geth also being wrong? Was that an incorrect understanding?",
+      "createdAt": "2021-04-28T13:48:02.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because it looks like lightclient's PR would be correct already",
+      "createdAt": "2021-04-28T13:48:19.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ethereum/go-ethereum/pull/22617/files#diff-38308f251deaded6062800e267abdeabc09c4a587bc079cb2868717aea8fd059R31",
+      "createdAt": "2021-04-28T13:48:34.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "On ethstats, quilt is lightclient's version right? That one is down",
+      "createdAt": "2021-04-28T13:48:51.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "http://eip1559-testnet.ops.pegasys.tech:3001/",
+      "createdAt": "2021-04-28T13:49:03.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe it is not the latest version",
+      "createdAt": "2021-04-28T13:49:11.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!211091239112671234> That's not enough. You also need something like this: https://github.com/ledgerwatch/turbo-geth/pull/1834/commits/4fa9dd56e529b5755a2960b13dd9b9e105038d8b",
+      "createdAt": "2021-04-28T13:50:33.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah found it",
+      "createdAt": "2021-04-28T13:51:10.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "cc <@!393119312350543872> good testcase ^ (ps is Ori on this discord channel?)",
+      "createdAt": "2021-04-28T13:55:49.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "FYI I'm beefing up the base fee on aleut",
+      "createdAt": "2021-04-28T13:56:54.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@508125616940515329> did the “double encoding” thing get resolved or not? I don’t understand why we need to do this for 1559 transactions but not legacy or 2930 ones",
+      "createdAt": "2021-04-28T14:02:19.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<#804019759934078987> 😉",
+      "createdAt": "2021-04-28T14:02:42.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which test case?",
+      "createdAt": "2021-04-28T14:14:38.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Check if we can fill a EIP1559 block above `GasLimit` of block, up to at most `GasLimit * ELASTICITY_MULTIPLIER` (multiplier is 2)",
+      "createdAt": "2021-04-28T14:15:50.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Just borked Aleut on blocks where total gas used > gas limit (but <= 2*gaslimit)",
+      "createdAt": "2021-04-28T14:16:14.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You mean gasTarget?",
+      "createdAt": "2021-04-28T14:17:33.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep",
+      "createdAt": "2021-04-28T14:19:07.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see Geth online again 🙂",
+      "createdAt": "2021-04-28T14:21:36.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "nice catch, looks like I just made a silly error!",
+      "createdAt": "2021-04-28T14:22:04.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "why is besu stuck btw?",
+      "createdAt": "2021-04-28T14:22:19.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think Besu has the same bug",
+      "createdAt": "2021-04-28T14:22:30.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(They are stuck at the same block as Geth when it was stuck)",
+      "createdAt": "2021-04-28T14:22:51.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but aren't they the only signer?",
+      "createdAt": "2021-04-28T14:23:38.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah this is the part which I don't get",
+      "createdAt": "2021-04-28T14:23:55.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔",
+      "createdAt": "2021-04-28T14:24:01.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If they are the signer from genesis block; this is the signer for all the blocks",
+      "createdAt": "2021-04-28T14:24:09.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or well the last recent block I checked, I don't think we have any other signers",
+      "createdAt": "2021-04-28T14:24:43.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm",
+      "createdAt": "2021-04-28T14:24:57.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Fun fact if we keep stress-testing Aleut then at some point there's no Aleut ETH left 😛",
+      "createdAt": "2021-04-28T14:45:01.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I guess when we decide on what refund EIP goes into London, we'll need to sunset Aleut and create a new (last?) devnet with that EIP too, right?",
+      "createdAt": "2021-04-28T14:46:41.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If so, <@!543900561460822016> I'm counting on you for a nice starting-with-B name 😄",
+      "createdAt": "2021-04-28T14:46:56.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Beiko? 😛",
+      "createdAt": "2021-04-28T14:47:19.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "😄",
+      "createdAt": "2021-04-28T14:47:47.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think next on the wikipedia page is Baikal 🙂",
+      "createdAt": "2021-04-28T14:48:03.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This please",
+      "createdAt": "2021-04-28T15:11:14.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Definitely prefer Baikal 🙂",
+      "createdAt": "2021-04-28T15:52:13.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah that's fair, probably better to save `beiko` for a future hard fork 🙂",
+      "createdAt": "2021-04-28T16:19:21.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hey <@&652918665943056397> and <@&836981603216654336>, noticed this when testing raising the base fee of blocks: I cannot seem to get a transaction mined which has a gas limit higher than the current block gas target. I could only get txs mined which has a gas limit <= gas target. So in order to get a block with more gas used than current gas target, I should send at least 2 txs in the block. (Also a good test case for ethereum/tests <@!393119312350543872> : check if a single txn can get mined in a block which has a higher gas limit than the current gas target, but within bound of ELASTICITY*GasTarget)",
+      "createdAt": "2021-04-28T16:30:22.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Once again there is no gas limit in eip1559 blocks is it correct?",
+      "createdAt": "2021-04-28T16:35:20.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Only gasTarget and gasUsed",
+      "createdAt": "2021-04-28T16:35:33.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yes, but there is hard cap of gasTarget * blockElasticity",
+      "createdAt": "2021-04-28T16:35:58.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Whats the status og t8ntool supporting eip1559?",
+      "createdAt": "2021-04-28T16:36:05.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```assert block.gas_used <= block.gas_target * ELASTICITY_MULTIPLIER, 'invalid block: too much gas used'\n```",
+      "createdAt": "2021-04-28T16:37:09.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!393119312350543872> i can add support now, i think the only thing that needs to be added is the baseFee block parameter?",
+      "createdAt": "2021-04-28T16:41:50.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think json => tx decoding is already working",
+      "createdAt": "2021-04-28T16:42:17.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ethereum/tests/pull/826",
+      "createdAt": "2021-04-28T16:43:42.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "New block type and new transaction  type",
+      "createdAt": "2021-04-28T16:44:06.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We still coming up on names with besu",
+      "createdAt": "2021-04-28T16:44:27.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "okay sounds good - i think the block should have either GasTarget or GasLimit, but not both - right?",
+      "createdAt": "2021-04-28T16:45:01.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "2 nee fields in tx",
+      "createdAt": "2021-04-28T16:45:25.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "maxFeePerGas: '1234' maxInclusionFeePerGas:",
+      "createdAt": "2021-04-28T16:45:29.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes. So not to confuse the types",
+      "createdAt": "2021-04-28T16:45:52.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yep, sounds good",
+      "createdAt": "2021-04-28T16:46:09.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In block instead of gasLimit its gasTarget",
+      "createdAt": "2021-04-28T16:46:12.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Rlp format according to eip",
+      "createdAt": "2021-04-28T16:46:25.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And one more field in the block",
+      "createdAt": "2021-04-28T16:47:10.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my preferred naming new elements in json objects:\n```\ncurrentGasTarget\ncurrentBaseFee\ntx.tip\ntx.FeeCap\n```",
+      "createdAt": "2021-04-28T16:47:11.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "baseFeePerGas",
+      "createdAt": "2021-04-28T16:47:13.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dimitry8570",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Need to put the naming in eip so other teams would know. <@439556036647714817> put it to the docs",
+      "createdAt": "2021-04-28T16:48:09.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> won't let me put it in the EIP 😦",
+      "createdAt": "2021-04-28T16:48:59.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "EIP should be extremely specific/explicit and not favor brevity at all.",
+      "createdAt": "2021-04-28T16:50:02.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Separate from that is what people colloquially call things.  I *still strongly prefer verbosity in communication*, but I am much less convicted in trying to control colloquial terminology compared to specification terminology.",
+      "createdAt": "2021-04-28T16:50:49.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Did I just break Nethermind? <@!758579010027782144> <@&652918665943056397>\n\nGah I might have triggered what I did not want to trigger 😦 I wanted to fund the Precompiles with 1 wei, but I forgot to send 1 wei with my txn 😦 (This is the RIPEMD SpuriousDragon bug)\n\nI did two things at the same time which I should not have done. I wanted to touch the same account in the same block, to see if it was actually removed from the warm addresses between txs and not at the level of the block. But at the same time I also wanted to fund precompiles 😦",
+      "createdAt": "2021-04-28T16:50:49.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the unfortunate byproduct of that is that tools are being built with the same language and IMO my eyes glaze over when i start trying to read very long variable names",
+      "createdAt": "2021-04-28T16:51:03.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I also think `tip` is a terrible name (even ignore the lack of verbosity).",
+      "createdAt": "2021-04-28T16:51:05.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It isn't a tip.  A tip is voluntary, and provided after service.",
+      "createdAt": "2021-04-28T16:51:44.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is required and provided *before* service (or at least at time of service, depending on your viewpoint).",
+      "createdAt": "2021-04-28T16:51:53.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "been a while since you were in america 🙂",
+      "createdAt": "2021-04-28T16:52:05.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "No one should *ever* follow America on naming.",
+      "createdAt": "2021-04-28T16:52:21.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "See: Imperial system of measurements.",
+      "createdAt": "2021-04-28T16:52:32.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "fair points - i prefer `tip` for brevity tbh, but `priorityFee` is also good",
+      "createdAt": "2021-04-28T16:52:47.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "America is no longer allowed to make up words.  They have lost their priviledge.",
+      "createdAt": "2021-04-28T16:52:50.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the issue is that regardless of the prefix, i am very against tooling also having `PerGas` postfixes",
+      "createdAt": "2021-04-28T16:53:16.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Those postfixes remove confusion, especially from new users.",
+      "createdAt": "2021-04-28T16:53:47.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Irregardless, I think .... wait....",
+      "createdAt": "2021-04-28T16:53:52.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Always include your units in variable names, it avoids bugs.  🙂",
+      "createdAt": "2021-04-28T16:54:03.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "why no `weiPricePerGas` ?",
+      "createdAt": "2021-04-28T16:54:31.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`attoethPerGas`",
+      "createdAt": "2021-04-28T16:55:11.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "!@#$ing Americans again!  (`wei`)",
+      "createdAt": "2021-04-28T16:55:18.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ignoring the wei argument, \"price\" is ambiguous, \"per gas\" is not IMO.",
+      "createdAt": "2021-04-28T16:56:15.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"What is the price of ETH?\" is ambiguous while \"How much ETH per USD?\" is not (or USD per ETH I suppose).",
+      "createdAt": "2021-04-28T16:56:35.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"Price of ETH in USD\" would also be acceptable, but now you are just being unnecessarily wordy since you already have enough information in just \"USD per ETH\".",
+      "createdAt": "2021-04-28T16:57:34.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "😢",
+      "createdAt": "2021-04-28T16:58:30.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!758579010027782144> it may be a check in the block producer",
+      "createdAt": "2021-04-28T16:59:30.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Luckily for you, it is late and I need to sleep.  I'm sure you'll have everyone rallied against me by morning.  😄",
+      "createdAt": "2021-04-28T16:59:55.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!508125616940515329> Yes. I'll look into it",
+      "createdAt": "2021-04-28T17:00:33.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So, to be clear, do we _want_ to allow single transactions which can fill a block up to its full elasticity limit?",
+      "createdAt": "2021-04-28T17:06:19.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not sure the spec actually makes that clear?",
+      "createdAt": "2021-04-28T17:06:29.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There's not a rule I can see in the spec which disallows it",
+      "createdAt": "2021-04-28T17:07:36.776000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my interpretation of the spec is that a single tx should be able to use the entire elasticity limit",
+      "createdAt": "2021-04-28T17:07:49.269000+00:00",
+      "attachments": []
+    }
+  ]
+}

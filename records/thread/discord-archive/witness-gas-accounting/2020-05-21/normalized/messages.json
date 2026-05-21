@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "witness-gas-accounting",
+  "date": "2020-05-21",
+  "messageCount": 182,
+  "sourceHash": "93e68ac39cb37589df7d5348917605db5fabb01eafdff494b23db48b03cee485",
+  "searchText": "I'm increasingly of the opinion that we should not implement oil/karma, not implement any of my alternative proposals, and instead just openly state that we are going to keep modifying gas costs as needed for sustainability, and publicly express the social norm that applications that use call gas limits should never hardcode those gas limits; the gas limits should instead come as inputs from the transaction https://ethresear.ch/t/counter-proposal-to-oil-karma-per-account-gas-limits/7433/12 It's difficult to see how to preserve support for meta-transactions with the required guarantees any other way Well, we have proposed how to deal with meta-transactions in the oil proposal v1.1: https://ethresear.ch/t/oil-adding-a-second-fuel-source-to-the-evm-pre-eip-v1-1/7425 ok so this breaks meta-transactions Basically, here is the dilemma Suppose that we plan to later increase the oil cost of some operation by 5x if we want calls with a fixed amount of gas to still be viable post-fork (which is the entire point of these proposals in the first place) Btw, in Solidity we decided a a month ago to recommend against the current `.send`/`.transfer` which also caused calcifying of the dependance on the 2300-gas stipend. Then those calls would have to be able to process 5x more oil But if we want blocks to always contain <= 10 million oil to limit processing cost Then to avoid those two invariants colliding with each other, calls with > 2 million oil would have to be impossible But there's lots of use cases for meta transactions today that need >2 million gas I think the general case is that if *any* operation costs more in OIL than it goes in GAS than a child execution frame can cause a full revert. right, and if you make an untrusted call, then the untrusted call can cause a full revert Which means meta transactions do not work Because the relayer would have to trust the transactor to not have a buggy transaction that dosses them we mention in the post that taking that it might be possible to calculate a tighter upper bound than the naive one how tight it is going to be, I do not know yet, but this can be checked with relatively simple heuristic so I would not call it dead just yet Basically: 1. You can make calls with more than 2 million gas 2. Calls with a fixed amount of gas are guaratneed to keep working even if the OIL/GAS ratio increases 3. We can guarantee blocks will contain <= 10 million oil Is an impossible triangle Any thoughts on exposing the actual gas schedule to the EVM? Then rather than making gas unobservable, we provide a mechanism for people to write code that observes gas in a manner that can continue to work across changes to the schedule? It's sort of the inverse of UNGAS Yeah I was actually about to suggest a version of this 😆 My proposal would have been more limited, basically adding a permanent norm that witnesses+calldata are charged per byte and the per-byte cost is visible But could do it with more operations; at least data and precompiles > Any thoughts on exposing the actual gas schedule to the EVM? Then rather than making gas unobservable, we provide a mechanism for people to write code that observes gas in a manner that can continue to work across changes to the schedule? <@!364458974906548225> But this *does* include biting the bullet and saying that it's possible a few existing applications may break Which I think we should be openly okay with Correct, but we've done this before and we can *probably* find them in advance and work with the creators to find a path forward that does the least harm. right, exactly Just to drop an unformed idea on the table as an alternative that doesn't fix the problem but might lead to something that does. Something like a `TAILCALL` opcode that does a `CALL` but, it occurs *after* the current call frame is done, and the gas for it is reserved up front. 😆 We considered this in 2014 It was called POST then The only reason we dropped it is because there was not enough time to implement it I see the connection to metatransactions Though it does not resolve the second-to-last poster's concern on that thread, which is that without in-EVM gas checking, there is no way to verify that the meta tx sender's contract is being called with the amount of gas that the meta tx sender expects It doesn't fix the observability/backwards-incompatible problem exactly, but combined with OIL + TAILCALL + GET_GAS_SCHEDULE_FOR .... might make for a sustainable ecosystem where we can change costs, measure different types of limits with different schedules, and preserve metatransactions... <@!273808422753796097> I'm not finding whatever post your mentioning > Though it does not resolve the second-to-last poster's concern on that thread > In the metatx case, the gas limit specified as part of the inner call has actually a more important role : protecting the meta tx signer that its meta-tx is executed with the exact amount specified by its signed message. In other word, the gas limit act here as a lower bound. Else the relayer could maliciously make the inner call fails while getting paid as a result (due to 63/64 rule). > > As EIP-1930 1 points out, such “strict gas semantic for call” is not possible to do it today without relying on tricks (relying on the 63/64 rules) or specific opcode pricing (by computing the amount of gas required to perform the call). See details in EIP-1930. > > None of the proposals here would help. ^ this part Here was my rephrasing: > Basically, the problem is that we are trying to protect against misreporting on both sides. The meta tx signer specifies an amount of gas G that they claim is sufficient to execute their tx. The signer needs an assurance that the tx actually will be executed with G gas, and not less. Meanwhile the relayer needs an assurance that they will actually be spending G gas on the meta tx and not more. > > So the two sides need to negotiate and agree on G, and for that agreement to be enforceable. The current way to enforce G is to have the meta tx signer only approve payment to a specific contract that puts G gas on the sub-call. But all of these proposals make G flexible at origin level and unreadable at contract level, and so they break this approach. Basically, the meta transaction use case seems to inherently require some kind of in-EVM-code gas awareness Anything unobservable like OIL will muck that up on both sides. Assuming any opcode is priced higher in OIL than GAS, then both caller and callee could cause a revert by intentionally burning OIL, so it seems that if preserving metatransactions is a requirement, we have to maintain observability. And breaking metatransactions would probably be really unpopular. Unless we gave users a better way of achieving the same goals. Has anyone thought about account abstraction as a replacement for metatransactions Account abstraction as is proposed right now only solves one problem Which is smart contract wallets / mixers / similar constructions I like Nick's solution to that problem, personally. It does NOT solve the (1) \"I want to pay txfees in DAI\" and (2) \"I want to pay someone else's txfees\" usecase Much simpler. And both (1) and (2) seem sufficiently popular to be worth continuing to support A new transaction type where the signer != Gas payer would do that I believe. <@!301186049323958275> we have used his idea for eth1x64, but I'd extend it. yeah, I suppose we could protocol-level-enshrine meta-transactions somehow I'll have to look into the current AA proposal I have weakly advocated in the past for new transaction type that separates gas payer and signer. I think they shouldn't *have* to be the same person. The new tx type was also proposed a bunch of times and we always failed to anything due to lack of motivation :) It would be nice to add add a \"version\" to transaction types so that they can be incrementally extended (and there were proposals for this too). I believe <@456226577798135808> had a stance on that one a while back. I am not sure what Nick's proposal is. And for account abstraction, I am still not convinced it is theoretically solved problem. So for now I would not like to include AA as a dependency <@!301186049323958275> the way we extended Nick's is making it into a separate transaction type so it is not messing with precompiles. <@456226577798135808> Nick's proposal is to make it so EOAs can send code to execute as a transaction, with `this` being the EOA account. ok, thank you, I thought so Or to put it another way, allow EOAs to delegate call. ^ I really like that > Nick's proposal is to make it so EOAs can send code to execute as a transaction, with this being the EOA account. This might break network-level DoS safety How so? It breaks the invariant that transaction from account A can only be invalidated by another transaction from account A being included onchain I believe that would still be true? I'm missing something, link to \"Nick's proposal?\" hmm maybe it's not that bad, need to think about it https://ethereum-magicians.org/t/rich-transactions-via-evm-bytecode-execution-from-externally-owned-accounts/4025/ It never got merged, sadly. Nick has been mostly away lately, so it has no champion at the moment. He never pushed a PR to merge in the first place 🙂 Hmm ok so if there was a 21000 gas overhead to doing the \"tx inside a tx\" it could be fine If there isn't that overhead, then you could imagine a tx that generates thousands of inner txs And that single tx could invalidate a whole bunch of txs from other accounts I think I would be fine if it just allowed an eoa to delegate call and nothing else. So this delegate call *would* have to contain a fixed gaslimit You can think of normal contract calls as `CALL` from the EOA, and these would be DELEGATE CALL from the EOA. Yeah, it would be just like any other contract call. It's not exactly parallel, because there would have to be two signatures *somewhere* Only real difference is what `this` is for the top of the stack. And a tx has space for one sig right now I'm also trying to think through what it would look like in an account abstraction context I think we may be talking about two different things. We are talking about A pays for gas for B's transaction, right? 1. Delegate call from eoa would be cool. 2. Transactions that have different signer and gas payer would be cool. Nick's proposal is (1), it is unrelated to (2). Aaah yeah (1) is cool independent of (2), though I think account abstraction is already a superset of that Because abstracted accounts could just have delegate calls as a feature Yeah, account abstraction is \"better\" but a much bigger change. Nick's thing is a much simpler change that gets 90% of what people want from account abstraction. 90% of the bang for 10% of the buck. Isn't (2) what people actually want? (2) is a competing solution with metatransactions. correct They both provide a way for people to \"pay for gas\" in not-eth. > Nick's thing is a much simpler change that gets 90% of what people want from account abstraction. Does it? Competing? Making this metatransaction mess obsolete 🙂 How does nick's thing handle smart contract wallets, tornado cash, etc etc? Nick's thing still requires people to have ETH in their own accounts and use that ETH to pay for a top-level fee before doing other things I'm not a core dev, so I can't assert with great confidence that his solution doesn't have some sharp edges that make it more expensive to implement than it seems, but from the dapp/user side it gives me basically everything I have wanted from account abstraction. For me what I want is primarily (1) first-class smart contract wallets and (2) mixers without relayers > Nick's thing still requires people to have ETH in their own accounts and use that ETH to pay for a top-level fee before doing other things Yeah Nick's thing doesn't solve meta transactions. Separate problem, probably my fault for bringing it up when someone mentioned AA. Would transactions ",
+  "excerpts": [
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm increasingly of the opinion that we should not implement oil/karma, not implement any of my alternative proposals, and instead just openly state that we are going to keep modifying gas costs as needed for sustainability, and publicly express the social norm that applications that use call gas limits should never hardcode those gas limits; the gas limits should instead come as inputs from the transaction",
+      "createdAt": "2020-05-21T13:31:18.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://ethresear.ch/t/counter-proposal-to-oil-karma-per-account-gas-limits/7433/12",
+      "createdAt": "2020-05-21T13:31:19.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's difficult to see how to preserve support for meta-transactions with the required guarantees any other way",
+      "createdAt": "2020-05-21T13:32:01.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well, we have proposed how to deal with meta-transactions in the oil proposal v1.1: https://ethresear.ch/t/oil-adding-a-second-fuel-source-to-the-evm-pre-eip-v1-1/7425",
+      "createdAt": "2020-05-21T13:33:07.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok so this breaks meta-transactions",
+      "createdAt": "2020-05-21T13:34:12.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Basically, here is the dilemma",
+      "createdAt": "2020-05-21T13:34:32.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Suppose that we plan to later increase the oil cost of some operation by 5x",
+      "createdAt": "2020-05-21T13:34:50.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "if we want calls with a fixed amount of gas to still be viable post-fork (which is the entire point of these proposals in the first place)",
+      "createdAt": "2020-05-21T13:35:17.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Btw, in Solidity we decided a a month ago to recommend against the current `.send`/`.transfer` which also caused calcifying of the dependance on the 2300-gas stipend.",
+      "createdAt": "2020-05-21T13:35:40.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then those calls would have to be able to process 5x more oil",
+      "createdAt": "2020-05-21T13:35:54.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But if we want blocks to always contain <= 10 million oil to limit processing cost",
+      "createdAt": "2020-05-21T13:36:28.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then to avoid those two invariants colliding with each other, calls with > 2 million oil would have to be impossible",
+      "createdAt": "2020-05-21T13:36:44.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But there's lots of use cases for meta transactions today that need >2 million gas",
+      "createdAt": "2020-05-21T13:36:58.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the general case is that if *any* operation costs more in OIL than it goes in GAS than a child execution frame can cause a full revert.",
+      "createdAt": "2020-05-21T13:36:58.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right, and if you make an untrusted call, then the untrusted call can cause a full revert",
+      "createdAt": "2020-05-21T13:37:15.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which means meta transactions do not work",
+      "createdAt": "2020-05-21T13:37:20.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because the relayer would have to trust the transactor to not have a buggy transaction that dosses them",
+      "createdAt": "2020-05-21T13:37:33.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we mention in the post that taking that it might be possible to calculate a tighter upper bound than the naive one",
+      "createdAt": "2020-05-21T13:44:46.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "how tight it is going to be, I do not know yet, but this can be checked",
+      "createdAt": "2020-05-21T13:44:58.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "with relatively simple heuristic",
+      "createdAt": "2020-05-21T13:45:16.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so I would not call it dead just yet",
+      "createdAt": "2020-05-21T13:45:27.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Basically:\n\n1. You can make calls with more than 2 million gas\n2. Calls with a fixed amount of gas are guaratneed to keep working even if the OIL/GAS ratio increases\n3. We can guarantee blocks will contain <= 10 million oil\n\nIs an impossible triangle",
+      "createdAt": "2020-05-21T13:45:59.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Any thoughts on exposing the actual gas schedule to the EVM?  Then rather than making gas unobservable, we provide a mechanism for people to write code that observes gas in a manner that can continue to work across changes to the schedule?",
+      "createdAt": "2020-05-21T13:46:47.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's sort of the inverse of UNGAS",
+      "createdAt": "2020-05-21T13:46:57.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah I was actually about to suggest a version of this 😆",
+      "createdAt": "2020-05-21T13:47:12.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My proposal would have been more limited, basically adding a permanent norm that witnesses+calldata are charged per byte and the per-byte cost is visible",
+      "createdAt": "2020-05-21T13:47:46.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But could do it with more operations; at least data and precompiles",
+      "createdAt": "2020-05-21T13:48:25.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Any thoughts on exposing the actual gas schedule to the EVM?  Then rather than making gas unobservable, we provide a mechanism for people to write code that observes gas in a manner that can continue to work across changes to the schedule?\n<@!364458974906548225> But this *does* include biting the bullet and saying that it's possible a few existing applications may break",
+      "createdAt": "2020-05-21T13:48:48.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which I think we should be openly okay with",
+      "createdAt": "2020-05-21T13:48:53.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Correct, but we've done this before and we can *probably* find them in advance and work with the creators to find a path forward that does the least harm.",
+      "createdAt": "2020-05-21T13:51:01.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right, exactly",
+      "createdAt": "2020-05-21T13:51:07.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Just to drop an unformed idea on the table as an alternative that doesn't fix the problem but might lead to something that does.\n\nSomething like a `TAILCALL` opcode that does a `CALL` but, it occurs *after* the current call frame is done, and the gas for it is reserved up front.",
+      "createdAt": "2020-05-21T13:52:32.575000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "😆",
+      "createdAt": "2020-05-21T13:52:54.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We considered this in 2014",
+      "createdAt": "2020-05-21T13:52:58.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It was called POST then",
+      "createdAt": "2020-05-21T13:53:01.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The only reason we dropped it is because there was not enough time to implement it",
+      "createdAt": "2020-05-21T13:53:14.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see the connection to metatransactions",
+      "createdAt": "2020-05-21T13:53:42.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Though it does not resolve the second-to-last poster's concern on that thread, which is that without in-EVM gas checking, there is no way to verify that the meta tx sender's contract is being called with the amount of gas that the meta tx sender expects",
+      "createdAt": "2020-05-21T13:54:31.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It doesn't fix the observability/backwards-incompatible problem exactly, but combined with OIL + TAILCALL + GET_GAS_SCHEDULE_FOR .... might make for a sustainable ecosystem where we can change costs, measure different types of limits with different schedules, and preserve metatransactions...",
+      "createdAt": "2020-05-21T13:54:56.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!273808422753796097> I'm not finding whatever post your mentioning\n\n> Though it does not resolve the second-to-last poster's concern on that thread",
+      "createdAt": "2020-05-21T13:59:20.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> In the metatx case, the gas limit specified as part of the inner call has actually a more important role : protecting the meta tx signer that its meta-tx is executed with the exact amount specified by its signed message. In other word, the gas limit act here as a lower bound. Else the relayer could maliciously make the inner call fails while getting paid as a result (due to 63/64 rule).\n> \n> As EIP-1930 1 points out, such “strict gas semantic for call” is not possible to do it today without relying on tricks (relying on the 63/64 rules) or specific opcode pricing (by computing the amount of gas required to perform the call). See details in EIP-1930.\n> \n> None of the proposals here would help.",
+      "createdAt": "2020-05-21T14:00:02.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "^ this part",
+      "createdAt": "2020-05-21T14:00:05.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Here was my rephrasing:",
+      "createdAt": "2020-05-21T14:00:35.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Basically, the problem is that we are trying to protect against misreporting on both sides. The meta tx signer specifies an amount of gas G that they claim is sufficient to execute their tx. The signer needs an assurance that the tx actually will be executed with G gas, and not less. Meanwhile the relayer needs an assurance that they will actually be spending G gas on the meta tx and not more.\n> \n> So the two sides need to negotiate and agree on G, and for that agreement to be enforceable. The current way to enforce G is to have the meta tx signer only approve payment to a specific contract that puts G gas on the sub-call. But all of these proposals make G flexible at origin level and unreadable at contract level, and so they break this approach.",
+      "createdAt": "2020-05-21T14:00:36.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Basically, the meta transaction use case seems to inherently require some kind of in-EVM-code gas awareness",
+      "createdAt": "2020-05-21T14:01:46.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Anything unobservable like OIL will muck that up on both sides.  Assuming any opcode is priced higher in OIL than GAS, then both caller and callee could cause a revert by intentionally burning OIL, so it seems that if preserving metatransactions is a requirement, we have to maintain observability.",
+      "createdAt": "2020-05-21T14:08:24.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And breaking metatransactions would probably be really unpopular.",
+      "createdAt": "2020-05-21T14:09:24.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unless we gave users a better way of achieving the same goals.",
+      "createdAt": "2020-05-21T14:10:31.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Has anyone thought about account abstraction as a replacement for metatransactions",
+      "createdAt": "2020-05-21T14:10:43.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Account abstraction as is proposed right now only solves one problem",
+      "createdAt": "2020-05-21T14:10:58.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which is smart contract wallets / mixers / similar constructions",
+      "createdAt": "2020-05-21T14:11:09.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I like Nick's solution to that problem, personally.",
+      "createdAt": "2020-05-21T14:11:26.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It does NOT solve the (1) \"I want to pay txfees in DAI\" and (2) \"I want to pay someone else's txfees\" usecase",
+      "createdAt": "2020-05-21T14:11:31.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Much simpler.",
+      "createdAt": "2020-05-21T14:11:32.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And both (1) and (2) seem sufficiently popular to be worth continuing to support",
+      "createdAt": "2020-05-21T14:11:52.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A new transaction type where the signer != Gas payer would do that I believe.",
+      "createdAt": "2020-05-21T14:11:54.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> we have used his idea for eth1x64, but I'd extend it.",
+      "createdAt": "2020-05-21T14:12:00.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, I suppose we could protocol-level-enshrine meta-transactions somehow",
+      "createdAt": "2020-05-21T14:12:14.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll have to look into the current AA proposal",
+      "createdAt": "2020-05-21T14:12:17.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have weakly advocated in the past for new transaction type that separates gas payer and signer.  I think they shouldn't *have* to be the same person.",
+      "createdAt": "2020-05-21T14:12:47.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The new tx type was also proposed a bunch of times and we always failed to anything due to lack of motivation :)\n\nIt would be nice to add add a \"version\" to transaction types so that they can be incrementally extended (and there were proposals for this too).",
+      "createdAt": "2020-05-21T14:13:10.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe <@456226577798135808> had a stance on that one a while back.",
+      "createdAt": "2020-05-21T14:13:47.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am not sure what Nick's proposal is. And for account abstraction, I am still not convinced it is theoretically solved problem. So for now I would not like to include AA as a dependency",
+      "createdAt": "2020-05-21T14:14:08.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> the way we extended Nick's is making it into a separate transaction type so it is not messing with precompiles.",
+      "createdAt": "2020-05-21T14:14:19.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@456226577798135808> Nick's proposal is to make it so EOAs can send code to execute as a transaction, with `this` being the EOA account.",
+      "createdAt": "2020-05-21T14:14:49.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok, thank you, I thought so",
+      "createdAt": "2020-05-21T14:15:13.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or to put it another way, allow EOAs to delegate call.",
+      "createdAt": "2020-05-21T14:15:27.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "^ I really like that",
+      "createdAt": "2020-05-21T14:15:39.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Nick's proposal is to make it so EOAs can send code to execute as a transaction, with this being the EOA account.\n\nThis might break network-level DoS safety",
+      "createdAt": "2020-05-21T14:16:08.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How so?",
+      "createdAt": "2020-05-21T14:16:25.922000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It breaks the invariant that transaction from account A can only be invalidated by another transaction from account A being included onchain",
+      "createdAt": "2020-05-21T14:16:56+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I believe that would still be true?",
+      "createdAt": "2020-05-21T14:17:34.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm missing something, link to \"Nick's proposal?\"",
+      "createdAt": "2020-05-21T14:17:36.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm maybe it's not that bad, need to think about it",
+      "createdAt": "2020-05-21T14:17:38.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://ethereum-magicians.org/t/rich-transactions-via-evm-bytecode-execution-from-externally-owned-accounts/4025/",
+      "createdAt": "2020-05-21T14:18:17.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It never got merged, sadly.  Nick has been mostly away lately, so it has no champion at the moment.",
+      "createdAt": "2020-05-21T14:19:11.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "He never pushed a PR to merge in the first place 🙂",
+      "createdAt": "2020-05-21T14:19:23.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm ok so if there was a 21000 gas overhead to doing the \"tx inside a tx\" it could be fine",
+      "createdAt": "2020-05-21T14:19:26.769000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If there isn't that overhead, then you could imagine a tx that generates thousands of inner txs",
+      "createdAt": "2020-05-21T14:19:49.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And that single tx could invalidate a whole bunch of txs from other accounts",
+      "createdAt": "2020-05-21T14:19:59.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think I would be fine if it just allowed an eoa to delegate call and nothing else.",
+      "createdAt": "2020-05-21T14:20:16.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So this delegate call *would* have to contain a fixed gaslimit",
+      "createdAt": "2020-05-21T14:20:50.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You can think of normal contract calls as `CALL` from the EOA, and these would be DELEGATE CALL from the EOA.",
+      "createdAt": "2020-05-21T14:20:54.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, it would be just like any other contract call.",
+      "createdAt": "2020-05-21T14:21:11.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's not exactly parallel, because there would have to be two signatures *somewhere*",
+      "createdAt": "2020-05-21T14:21:31.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Only real difference is what `this` is for the top of the stack.",
+      "createdAt": "2020-05-21T14:21:33.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And a tx has space for one sig",
+      "createdAt": "2020-05-21T14:21:35.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right now",
+      "createdAt": "2020-05-21T14:21:37.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm also trying to think through what it would look like in an account abstraction context",
+      "createdAt": "2020-05-21T14:21:49.694000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think we may be talking about two different things.",
+      "createdAt": "2020-05-21T14:21:50.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We are talking about A pays for gas for B's transaction, right?",
+      "createdAt": "2020-05-21T14:22:11.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "1. Delegate call from eoa would be cool.\n2. Transactions that have different signer and gas payer would be cool.",
+      "createdAt": "2020-05-21T14:22:16.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Nick's proposal is (1), it is unrelated to (2).",
+      "createdAt": "2020-05-21T14:22:39.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Aaah yeah (1) is cool independent of (2), though I think account abstraction is already a superset of that",
+      "createdAt": "2020-05-21T14:22:46.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because abstracted accounts could just have delegate calls as a feature",
+      "createdAt": "2020-05-21T14:23:01.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, account abstraction is \"better\" but a much bigger change.",
+      "createdAt": "2020-05-21T14:23:09.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Nick's thing is a much simpler change that gets 90% of what people want from account abstraction.",
+      "createdAt": "2020-05-21T14:23:35.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "90% of the bang for 10% of the buck.",
+      "createdAt": "2020-05-21T14:23:58.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Isn't (2) what people actually want?",
+      "createdAt": "2020-05-21T14:23:58.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(2) is a competing solution with metatransactions.",
+      "createdAt": "2020-05-21T14:24:31.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "correct",
+      "createdAt": "2020-05-21T14:24:45.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "They both provide a way for people to \"pay for gas\" in not-eth.",
+      "createdAt": "2020-05-21T14:24:48.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Nick's thing is a much simpler change that gets 90% of what people want from account abstraction.",
+      "createdAt": "2020-05-21T14:24:50.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Does it?",
+      "createdAt": "2020-05-21T14:24:51.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Competing? Making this metatransaction mess obsolete 🙂",
+      "createdAt": "2020-05-21T14:24:53.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How does nick's thing handle smart contract wallets, tornado cash, etc etc?",
+      "createdAt": "2020-05-21T14:25:07.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Nick's thing still requires people to have ETH in their own accounts and use that ETH to pay for a top-level fee before doing other things",
+      "createdAt": "2020-05-21T14:25:38.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not a core dev, so I can't assert with great confidence that his solution doesn't have some sharp edges that make it more expensive to implement than it seems, but from the dapp/user side it gives me basically everything I have wanted from account abstraction.",
+      "createdAt": "2020-05-21T14:26:07.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For me what I want is primarily (1) first-class smart contract wallets and (2) mixers without relayers",
+      "createdAt": "2020-05-21T14:26:45.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Nick's thing still requires people to have ETH in their own accounts and use that ETH to pay for a top-level fee before doing other things\nYeah Nick's thing doesn't solve meta transactions.  Separate problem, probably my fault for bringing it up when someone mentioned AA.",
+      "createdAt": "2020-05-21T14:26:49.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Would transactions with separate gas payer and signer solve the tornado relayer problem?",
+      "createdAt": "2020-05-21T14:27:30.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "nope!",
+      "createdAt": "2020-05-21T14:27:34.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "they would still require relayers",
+      "createdAt": "2020-05-21T14:27:43.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "whereas AA gets rid of relayers",
+      "createdAt": "2020-05-21T14:27:51.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because you are paying to a clean account...",
+      "createdAt": "2020-05-21T14:27:55.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right, you're withdrawing to an account that has no ETH because it can't have any on-chain connection to your existing assets",
+      "createdAt": "2020-05-21T14:28:32.188000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How does AA solve that problem?",
+      "createdAt": "2020-05-21T14:28:46.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It basically allows you to put the withdrawal verification (a ZK-SNARK check) inside the verification code",
+      "createdAt": "2020-05-21T14:29:08.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, you are talking about making it so miners have more complex logic for figuring out \"will I get paid if I execute this transaction?\"",
+      "createdAt": "2020-05-21T14:29:51.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think I remember some discussion on that a long time back.",
+      "createdAt": "2020-05-21T14:29:59.849000+00:00",
+      "attachments": []
+    }
+  ]
+}

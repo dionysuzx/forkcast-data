@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "account-abstraction",
+  "date": "2020-09-23",
+  "messageCount": 223,
+  "sourceHash": "9d2b6e5e9336f2d13180eba4c29812e8491c8bf8fd20c7440ddbc0355f57d0f7",
+  "searchText": "> so in the first version, mempools would simply not keep pending transactions to a contract like this, precisely because that would necessitate this constant re-validation. <@!415548822983278593> What about this contract makes in ineligible for the mempool? <@!415548822983278593> Hmm, thinking on this more I think that maybe all of the stuff not about consensus should be moved to ## Security Considerations. This would make the spec much simpler I believe, and there doesn't need to be any consensus on the pending pool stuff really it is just a \"hey, when implementing this be careful of these things\". > I have a smart wallet that I personally think everyone with large amounts of money should use (or use something with a similar feature set). It currently won't work with AA due to the lack of access to timestamp, and the inability to call it from another contract castrates some of its usefulness, and it won't be able to do things like Uniswap flash loans, nor receive ERC-223 tokens. Moving conversation from https://discordapp.com/channels/595666850260713488/746566142700814426/758194014079549461 How does your wallet use timestamp now? Wallet has time-delayed recovery from owner to backup address. The idea is if you lose the primary signer, you can initiate a recovery that uses block.timestamp to enforce a time-delay on recovery. Hm... Can you sign a message from the backup address? If so, you could check the signature before paygas and check the timestamp after. Start Recovery: <https://github.com/Zoltu/recoverable-wallet/blob/master/contracts/source/recoverable-wallet.sol#L204> End Recovery: <https://github.com/Zoltu/recoverable-wallet/blob/master/contracts/source/recoverable-wallet.sol#L225> The wallet would have to pay gas though, so maybe destroy the backup if the expiry hasn't been tripped though 🤔 I have to assume that anything done prior to checking that timestamp is an *attack*. That may not be a problem... Well, it would mean that an attacker could burn all of my ETH via gas spends though. 😢 Since the contract pays gas, if an attacker acquires one of my backup keys they could then just spam the network with insane gas price transactions (perhaps they run a miner and benefit from that). Yeah, that's why I said `maybe destroy the backup if the expiry hasn't been tripped though` I don't think I understand the recovery flow though ^^;; I don't think I want that because one can imagine a legitimate mistake where you called finish recovery too early. And burning the recovery key could render the account unrecoverable. Readme here has a high level description of the wallet, a bit verbose but not too bad if you want to understand it better: <https://github.com/Zoltu/recoverable-wallet> Yeah, okay, I get it now. I could put the backup key on cooldown, but again I would need a way of releasing that cooldown (which again would require access to timestamp). So if attacker starts the recovery process using a backup key, and the original key cancels the recovery and provides a new backup key, removing the compromised one? Yeah. But the primary may not notice the recovery was started for hours/days/weeks/months (plenty of time to drain ETH to gas fees). You can mark the recovery as in-progress before paygas And check it too That one transaction to initiate recovery could set gas price to a billion. 🤔 Actually, I guess this is a general problem with this mechanism. I think I *need* someone else to pay for gas for recovery initiation. Currently, that falls out naturally due to how contract wallets work. With a switch to AA, I would need to ensure that recovery gas is paid for by *someone else*. Which means I need recovery to be an internal transaction, not a root AA transaction. Which brings us back to the block on all internal transactions being problematic for me. 🙂 The more I think on this, I think I actually don't need `TIMESTAMP` but I do need internal transactions allowed. We _do_ have a plan for internal transactions, but it's more complicated. I think something that would help sell me personally on AA v1 is providing a list of real world use cases that we think are enabled. A multisig is one example, but I'm not convinced that it alone is worth the effort of AA. I'll think about that a bit. The time based recovery is a problem for sure. I understand that my personal preferred strategy may not be supported in v1 of AA. I'm just concerned that with callbacks and such (e.g., ERC-223) we aren't really gaining much. That is, someone can have a multisig, but they'll need to still have a *separate* contract that stores at least some of their assets. At which point I feel like we aren't making much ground with AA in that case. And you wouldn't be able to do stuff like flash loans directly with your contract, you would again need a *separate* contract for that. Another factor in my bearish stance on AA is that it is semi-competing with Rich Transactions. Rich transactions solves most of the same problems that full AA solves, *except* for contract pays gas and alternative signature types. I am concerned that AA may never get past phase 1 (single tenant, heavily restricted) and if that is the case then I think Rich Transactions are generally a better solution to most of those problems at which point I'm not convinced AA is worth it for contract-pays-gas and alternative signature types on a very small subset of use cases. Perhaps someone could convince me that there is a clear path to relieving the restrictions on AA? At the moment I feel like AA only works *because of* those restrictions, and removing them is an as-of-yet unsolved problem which means in my mind AA is still an unsolved problem and this initial release doesn't really get us meaningfully closer to having that problem solved. > Wallet has time-delayed recovery from owner to backup address. You can still use TIMESTAMP in contract wallets! You just need to have it be after PAYGAS If we want to make it be before PAYGAS, there *are* ways of doing it, eg. a `EXPECT_TIMESTAMP_AT_LEAST` opcode that throws if the timestamp is below some value would be secure (so basically the same as CLTV in bitcoin 😛 ) BTW another option we could take is to try to stick AA into RT. Basically, allow two transactions where the second depends on the first, the first does the signature verification, and the second does the operations (perhaps the output of the first could feed into the second, so the signature would only authorize a specific operation) though even with that approach, you'd need the same guards to prevent dos issues, ok so nvm I doubt that would be a net simplification > If we want to make it be before PAYGAS, there *are* ways of doing it, eg. a `EXPECT_TIMESTAMP_AT_LEAST` opcode that throws if the timestamp is below some value would be secure <@!273808422753796097> Expanding further on this, any opcode of the form \"unless some environmental condition that once satisfied never becomes un-satisfied is true, throw\" is safe Because once a transaction has been verified, it stays valid This is basically the bitcoin philosophy btw I do think that we are going to end up grafting some aspects of bitcoin-ism onto ethereum over time; there really are efficiencies that you can get from a dependency-satisfaction coding model https://ethresear.ch/t/adding-cross-transaction-bls-signature-aggregation-to-ethereum/7844 ^ is the other big example of this The \"once valid, cannot become invalid\" is the bit that I think is problematically restricting. I am eager to be proven wrong and that there are useful contract wallets one could build that can work with that restriction. Though I really do think there needs to be a way to accept callbacks. Maybe a flag on storage slots that are \"only mutable when tx.origin == this\" or something? What do you mean by callbacks? e.g. the ERC1155TokenReceiver (https://eips.ethereum.org/EIPS/eip-1155) the same exists for ERC721 (but there you have the alternative to go around it by using an \"unsafe\" method) the safe for example had issues with this in the beginning when using the ENS manager, as the interface uses the `safeTransfer` method of ERC721 and that requires the callback implementation on the receiver. The safe contracts did not implement this in the beginning and therefore could not receive the ens token. Anything that does `msg.sender.call(...)` essentially (which is a surprisingly common pattern). Or anything that does `destination.call(...)`. Ah, so self-calling In the latter case, it happens when you are the recipient of some token. hmm, that's easy to make an exception for The *token contract* tries to call into the receiver before executing the transfer. > The *token contract* tries to call into the receiver before executing the transfer. <@!301186049323958275> Oh I definitely think that's a bad pattern Feels like a re-entrancy minefield at the least I think the `msg.sender.call(...)` pattern can be worked around. I'm less confident there is a clean workaround for the receiver callback. > Feels like a re-entrancy minefield at the least <@!273808422753796097> It was designed so token semantics matched ETH semantics. 🙂 So if you believe ETH transfers are a minefield for re-entrancy, then yes. 😁 Oh I certainly wish the whole \"2300 gas upon receiving ETH\" thing could crash and burn 😆 We should have just made an automated log for receiving ETH... We *could* add an opcode for that. \"Send ETH to account X without calling account X\". `SELFDESTRUCT` 😛 But yeah, a real one would be nice Ugh... you mean that thing everyone wants to delete? 😛 Or just a rule that a zero-gas call does that I don't think we can do that without breaking a bunch of stuff (0-gas means X). Lots of stuff uses 0 gas I believe because that is what triggers the EVM stipend IIRC? Back to AA, so I was troubleshooting a user transaction just now and realized that you can already have a transaction that was valid and no longer is valid (ETH balance change). Is the idea that this is fine right now because it is so cheap to deal with, but with AA it will no longer be cheap to deal with? the idea is that a transaction from an account can only be invalidated by other transactions from that account Aaah, you mean like if you send some account 1 gwei and could that interfere with future transactions if they have weird code? That's why the AA EIP bans the BALANCE opcode pre-PAYGAS 😆 Ah, so we want clear conditions on when a transaction needs to be rerun. Can't we trigger on \"any changes to this account's storage\"? That would allow us to open up everything except timestamp and external calls I think? Er, timestamp, external calls, blockhash? the problem is that changes to an account's storage are too cheap only 5k gas But it would allow internal calls to the contract. Hence why the proposal for how to extend AA this way requires accounts to have a \"burn-and-refund 25k gas\" pre-clause in them Hmm, and you are concerned that you can cheaply trigger reruns as a DoS vector? right My goal is to maintain a 6:1 ratio, where forcing nodes to re-run 6 gas requires <= 1 gas to be spent on chain Thereby bounding per-block recomputation to 6x the gas limit (the recomputation is not mandatory; if you can't do it in time you're just a potentially suboptimal proposer, but we still want it bounded) And what is the tentative pre-paygas limit? The \"phase 1\" proposal is 90000, but the long term idea is \"whatever X you want, as long as the contract precommits to spending at least X/6 gas in any incoming non-static call\" Which is really cool because it simultaneously (i) allows flexibility in the gas limit and gets rid of an ugly fixed number, and (ii) it solves the problem of how to safely allow state-changing calls coming in from the outside If a client receives a new transaction, how long does it execute it before giving up (in the \"ideal future\" model)? 6x whatever the min gas consumption is that the target commits to How is the target commit conveyed? Oh, futur",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> so in the first version, mempools would simply not keep pending transactions to a contract like this, precisely because that would necessitate this constant re-validation.\n<@!415548822983278593> What about this contract makes in ineligible for the mempool?",
+      "createdAt": "2020-09-23T02:26:52.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!415548822983278593> Hmm, thinking on this more I think that maybe all of the stuff not about consensus should be moved to ## Security Considerations.",
+      "createdAt": "2020-09-23T03:56:56.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This would make the spec much simpler I believe, and there doesn't need to be any consensus on the pending pool stuff really it is just a \"hey, when implementing this be careful of these things\".",
+      "createdAt": "2020-09-23T03:57:28.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> I have a smart wallet that I personally think everyone with large amounts of money should use (or use something with a similar feature set).  It currently won't work with AA due to the lack of access to timestamp, and the inability to call it from another contract castrates some of its usefulness, and it won't be able to do things like Uniswap flash loans, nor receive ERC-223 tokens.\nMoving conversation from https://discordapp.com/channels/595666850260713488/746566142700814426/758194014079549461",
+      "createdAt": "2020-09-23T05:13:40.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How does your wallet use timestamp now?",
+      "createdAt": "2020-09-23T05:13:54.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Wallet has time-delayed recovery from owner to backup address.",
+      "createdAt": "2020-09-23T05:14:36.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The idea is if you lose the primary signer, you can initiate a recovery that uses block.timestamp to enforce a time-delay on recovery.",
+      "createdAt": "2020-09-23T05:16:13.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hm... Can you sign a message from the backup address? If so, you could check the signature before paygas and check the timestamp after.",
+      "createdAt": "2020-09-23T05:16:48.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Start Recovery: <https://github.com/Zoltu/recoverable-wallet/blob/master/contracts/source/recoverable-wallet.sol#L204>\nEnd Recovery: <https://github.com/Zoltu/recoverable-wallet/blob/master/contracts/source/recoverable-wallet.sol#L225>",
+      "createdAt": "2020-09-23T05:17:21.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The wallet would have to pay gas though, so maybe destroy the backup if the expiry hasn't been tripped though",
+      "createdAt": "2020-09-23T05:17:23.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔",
+      "createdAt": "2020-09-23T05:17:43.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have to assume that anything done prior to checking that timestamp is an *attack*.",
+      "createdAt": "2020-09-23T05:18:05.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That may not be a problem...",
+      "createdAt": "2020-09-23T05:18:31.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well, it would mean that an attacker could burn all of my ETH via gas spends though.  😢",
+      "createdAt": "2020-09-23T05:18:46.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Since the contract pays gas, if an attacker acquires one of my backup keys they could then just spam the network with insane gas price transactions (perhaps they run a miner and benefit from that).",
+      "createdAt": "2020-09-23T05:19:23.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, that's why I said `maybe destroy the backup if the expiry hasn't been tripped though`",
+      "createdAt": "2020-09-23T05:19:39.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't think I understand the recovery flow though ^^;;",
+      "createdAt": "2020-09-23T05:20:00.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't think I want that because one can imagine a legitimate mistake where you called finish recovery too early.",
+      "createdAt": "2020-09-23T05:20:24.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And burning the recovery key could render the account unrecoverable.",
+      "createdAt": "2020-09-23T05:20:31.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Readme here has a high level description of the wallet, a bit verbose but not too bad if you want to understand it better: <https://github.com/Zoltu/recoverable-wallet>",
+      "createdAt": "2020-09-23T05:21:01.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, okay, I get it now.",
+      "createdAt": "2020-09-23T05:21:30.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I could put the backup key on cooldown, but again I would need a way of releasing that cooldown (which again would require access to timestamp).",
+      "createdAt": "2020-09-23T05:21:40.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So if attacker starts the recovery process using a backup key, and the original key cancels the recovery and provides a new backup key, removing the compromised one?",
+      "createdAt": "2020-09-23T05:22:24.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah.",
+      "createdAt": "2020-09-23T05:22:32.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But the primary may not notice the recovery was started for hours/days/weeks/months (plenty of time to drain ETH to gas fees).",
+      "createdAt": "2020-09-23T05:23:12.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You can mark the recovery as in-progress before paygas",
+      "createdAt": "2020-09-23T05:23:36.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And check it too",
+      "createdAt": "2020-09-23T05:23:55.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That one transaction to initiate recovery could set gas price to a billion.",
+      "createdAt": "2020-09-23T05:23:57.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔 Actually, I guess this is a general problem with this mechanism.",
+      "createdAt": "2020-09-23T05:24:24.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think I *need* someone else to pay for gas for recovery initiation.",
+      "createdAt": "2020-09-23T05:24:33.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Currently, that falls out naturally due to how contract wallets work.  With a switch to AA, I would need to ensure that recovery gas is paid for by *someone else*.",
+      "createdAt": "2020-09-23T05:25:07.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which means I need recovery to be an internal transaction, not a root AA transaction.",
+      "createdAt": "2020-09-23T05:25:21.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which brings us back to the block on all internal transactions being problematic for me.  🙂",
+      "createdAt": "2020-09-23T05:25:50.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The more I think on this, I think I actually don't need `TIMESTAMP` but I do need internal transactions allowed.",
+      "createdAt": "2020-09-23T05:26:25.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We _do_ have a plan for internal transactions, but it's more complicated.",
+      "createdAt": "2020-09-23T05:26:59.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think something that would help sell me personally on AA v1 is providing a list of real world use cases that we think are enabled.  A multisig is one example, but I'm not convinced that it alone is worth the effort of AA.",
+      "createdAt": "2020-09-23T05:27:52.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll think about that a bit. The time based recovery is a problem for sure.",
+      "createdAt": "2020-09-23T05:28:40.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I understand that my personal preferred strategy may not be supported in v1 of AA.  I'm just concerned that with callbacks and such (e.g., ERC-223) we aren't really gaining much.",
+      "createdAt": "2020-09-23T05:31:16.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is, someone can have a multisig, but they'll need to still have a *separate* contract that stores at least some of their assets.",
+      "createdAt": "2020-09-23T05:31:28.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "At which point I feel like we aren't making much ground with AA in that case.",
+      "createdAt": "2020-09-23T05:31:48.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And you wouldn't be able to do stuff like flash loans directly with your contract, you would again need a *separate* contract for that.",
+      "createdAt": "2020-09-23T05:32:13.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Another factor in my bearish stance on AA is that it is semi-competing with Rich Transactions.  Rich transactions solves most of the same problems that full AA solves, *except* for contract pays gas and alternative signature types.  I am concerned that AA may never get past phase 1 (single tenant, heavily restricted) and if that is the case then I think Rich Transactions are generally a better solution to most of those problems at which point I'm not convinced AA is worth it for contract-pays-gas and alternative signature types on a very small subset of use cases.",
+      "createdAt": "2020-09-23T05:45:03.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Perhaps someone could convince me that there is a clear path to relieving the restrictions on AA?  At the moment I feel like AA only works *because of* those restrictions, and removing them is an as-of-yet unsolved problem which means in my mind AA is still an unsolved problem and this initial release doesn't really get us meaningfully closer to having that problem solved.",
+      "createdAt": "2020-09-23T05:48:29.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Wallet has time-delayed recovery from owner to backup address.",
+      "createdAt": "2020-09-23T05:57:03.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You can still use TIMESTAMP in contract wallets!",
+      "createdAt": "2020-09-23T05:57:11.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You just need to have it be after PAYGAS",
+      "createdAt": "2020-09-23T05:57:44.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If we want to make it be before PAYGAS, there *are* ways of doing it, eg. a `EXPECT_TIMESTAMP_AT_LEAST` opcode that throws if the timestamp is below some value would be secure",
+      "createdAt": "2020-09-23T05:58:30.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(so basically the same as CLTV in bitcoin 😛 )",
+      "createdAt": "2020-09-23T06:00:26.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "BTW another option we could take is to try to stick AA into RT. Basically, allow two transactions where the second depends on the first, the first does the signature verification, and the second does the operations (perhaps the output of the first could feed into the second, so the signature would only authorize a specific operation)",
+      "createdAt": "2020-09-23T06:04:51.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "though even with that approach, you'd need the same guards to prevent dos issues, ok so nvm I doubt that would be a net simplification",
+      "createdAt": "2020-09-23T06:05:22.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> If we want to make it be before PAYGAS, there *are* ways of doing it, eg. a `EXPECT_TIMESTAMP_AT_LEAST` opcode that throws if the timestamp is below some value would be secure\n<@!273808422753796097> Expanding further on this, any opcode of the form \"unless some environmental condition that once satisfied never becomes un-satisfied is true, throw\" is safe",
+      "createdAt": "2020-09-23T06:06:33.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because once a transaction has been verified, it stays valid",
+      "createdAt": "2020-09-23T06:06:41.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is basically the bitcoin philosophy",
+      "createdAt": "2020-09-23T06:06:46.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "btw I do think that we are going to end up grafting some aspects of bitcoin-ism onto ethereum over time; there really are efficiencies that you can get from a dependency-satisfaction coding model",
+      "createdAt": "2020-09-23T06:12:38.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://ethresear.ch/t/adding-cross-transaction-bls-signature-aggregation-to-ethereum/7844",
+      "createdAt": "2020-09-23T06:12:48.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "^ is the other big example of this",
+      "createdAt": "2020-09-23T06:12:52.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The \"once valid, cannot become invalid\" is the bit that I think is problematically restricting.",
+      "createdAt": "2020-09-23T07:50:40.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am eager to be proven wrong and that there are useful contract wallets one could build that can work with that restriction.",
+      "createdAt": "2020-09-23T07:51:52.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Though I really do think there needs to be a way to accept callbacks.  Maybe a flag on storage slots that are \"only mutable when tx.origin == this\" or something?",
+      "createdAt": "2020-09-23T07:52:37.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "What do you mean by callbacks?",
+      "createdAt": "2020-09-23T08:58:44.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "rimeissner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "e.g. the ERC1155TokenReceiver (https://eips.ethereum.org/EIPS/eip-1155)",
+      "createdAt": "2020-09-23T09:00:01.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "rimeissner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the same exists for ERC721 (but there you have the alternative to go around it by using an \"unsafe\" method)",
+      "createdAt": "2020-09-23T09:00:28.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "rimeissner",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the safe for example had issues with this in the beginning when using the ENS manager, as the interface uses the `safeTransfer`  method of ERC721 and that requires the callback implementation on the receiver. The safe contracts did not implement this in the beginning and therefore could not receive the ens token.",
+      "createdAt": "2020-09-23T09:02:56.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Anything that does `msg.sender.call(...)` essentially (which is a surprisingly common pattern).",
+      "createdAt": "2020-09-23T09:05:53.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or anything that does `destination.call(...)`.",
+      "createdAt": "2020-09-23T09:06:08.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, so self-calling",
+      "createdAt": "2020-09-23T09:06:14.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In the latter case, it happens when you are the recipient of some token.",
+      "createdAt": "2020-09-23T09:06:23.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm, that's easy to make an exception for",
+      "createdAt": "2020-09-23T09:06:24.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The *token contract* tries to call into the receiver before executing the transfer.",
+      "createdAt": "2020-09-23T09:06:42.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> The *token contract* tries to call into the receiver before executing the transfer.\n<@!301186049323958275> Oh I definitely think that's a bad pattern",
+      "createdAt": "2020-09-23T09:06:54.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Feels like a re-entrancy minefield at the least",
+      "createdAt": "2020-09-23T09:07:00.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the `msg.sender.call(...)` pattern can be worked around.  I'm less confident there is a clean workaround for the receiver callback.",
+      "createdAt": "2020-09-23T09:07:06.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Feels like a re-entrancy minefield at the least\n<@!273808422753796097> It was designed so token semantics matched ETH semantics.  🙂",
+      "createdAt": "2020-09-23T09:07:18.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So if you believe ETH transfers are a minefield for re-entrancy, then yes.  😁",
+      "createdAt": "2020-09-23T09:07:35.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh I certainly wish the whole \"2300 gas upon receiving ETH\" thing could crash and burn 😆",
+      "createdAt": "2020-09-23T09:07:50.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We should have just made an automated log for receiving ETH...",
+      "createdAt": "2020-09-23T09:08:08.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We *could* add an opcode for that.",
+      "createdAt": "2020-09-23T09:08:20.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"Send ETH to account X without calling account X\".",
+      "createdAt": "2020-09-23T09:08:28.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`SELFDESTRUCT` 😛",
+      "createdAt": "2020-09-23T09:08:37.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But yeah, a real one would be nice",
+      "createdAt": "2020-09-23T09:08:46.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ugh... you mean that thing everyone wants to delete?  😛",
+      "createdAt": "2020-09-23T09:08:48.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or just a rule that a zero-gas call does that",
+      "createdAt": "2020-09-23T09:08:56.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't think we can do that without breaking a bunch of stuff (0-gas means X).  Lots of stuff uses 0 gas I believe because that is what triggers the EVM stipend IIRC?",
+      "createdAt": "2020-09-23T09:09:33.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Back to AA, so I was troubleshooting a user transaction just now and realized that you can already have a transaction that was valid and no longer is valid (ETH balance change).  Is the idea that this is fine right now because it is so cheap to deal with, but with AA it will no longer be cheap to deal with?",
+      "createdAt": "2020-09-23T09:11:07.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the idea is that a transaction from an account can only be invalidated by other transactions from that account",
+      "createdAt": "2020-09-23T09:11:32.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Aaah, you mean like if you send some account 1 gwei and could that interfere with future transactions if they have weird code?",
+      "createdAt": "2020-09-23T09:11:53.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That's why the AA EIP bans the BALANCE opcode pre-PAYGAS 😆",
+      "createdAt": "2020-09-23T09:12:06.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, so we want clear conditions on when a transaction needs to be rerun.  Can't we trigger on \"any changes to this account's storage\"?",
+      "createdAt": "2020-09-23T09:21:07.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That would allow us to open up everything except timestamp and external calls I think?",
+      "createdAt": "2020-09-23T09:22:18.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Er, timestamp, external calls, blockhash?",
+      "createdAt": "2020-09-23T09:23:00.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the problem is that changes to an account's storage are too cheap",
+      "createdAt": "2020-09-23T09:23:07.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "only 5k gas",
+      "createdAt": "2020-09-23T09:23:09.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But it would allow internal calls to the contract.",
+      "createdAt": "2020-09-23T09:23:10.399000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hence why the proposal for how to extend AA this way requires accounts to have a \"burn-and-refund 25k gas\" pre-clause in them",
+      "createdAt": "2020-09-23T09:23:33.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, and you are concerned that you can cheaply trigger reruns as a DoS vector?",
+      "createdAt": "2020-09-23T09:24:09.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-09-23T09:24:20.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My goal is to maintain a 6:1 ratio, where forcing nodes to re-run 6 gas requires <= 1 gas to be spent on chain",
+      "createdAt": "2020-09-23T09:24:41.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Thereby bounding per-block recomputation to 6x the gas limit (the recomputation is not mandatory; if you can't do it in time you're just a potentially suboptimal proposer, but we still want it bounded)",
+      "createdAt": "2020-09-23T09:25:25.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And what is the tentative pre-paygas limit?",
+      "createdAt": "2020-09-23T09:26:58.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The \"phase 1\" proposal is 90000, but the long term idea is \"whatever X you want, as long as the contract precommits to spending at least X/6 gas in any incoming non-static call\"",
+      "createdAt": "2020-09-23T09:31:33.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which is really cool because it simultaneously (i) allows flexibility in the gas limit and gets rid of an ugly fixed number, and (ii) it solves the problem of how to safely allow state-changing calls coming in from the outside",
+      "createdAt": "2020-09-23T09:32:54.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If a client receives a new transaction, how long does it execute it before giving up (in the \"ideal future\" model)?",
+      "createdAt": "2020-09-23T09:42:07.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "6x whatever the min gas consumption is that the target commits to",
+      "createdAt": "2020-09-23T09:51:32.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How is the target commit conveyed?",
+      "createdAt": "2020-09-23T09:53:04.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, future transaction types would include that in the transaction?",
+      "createdAt": "2020-09-23T09:53:23.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It would be in the target's prefix",
+      "createdAt": "2020-09-23T09:54:26.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The prefix would have code that says, like in my proposal, \"burn X gas and add X gas to the refund counter\" (which would be a new opcode), which implicitly commits to spending at least X/2 gas",
+      "createdAt": "2020-09-23T09:54:54.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And if the transaction *doesn't* spend at least X/2 gas then the transaction is invalid and the peer that sent it gets blacklisted?",
+      "createdAt": "2020-09-23T09:57:49.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah no",
+      "createdAt": "2020-09-23T09:57:56.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, you can't blacklist directly from that, but maybe gets a negative mark?",
+      "createdAt": "2020-09-23T09:58:03.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so basically the first opcode in the contract says \"burn X gas and add X gas to the refund counter\"",
+      "createdAt": "2020-09-23T09:58:12.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If the contract doesn't do that, then it's not an accepted AA target",
+      "createdAt": "2020-09-23T09:58:23.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, but the transaction may end up never making it to PAYGAS (signature isn't valid).",
+      "createdAt": "2020-09-23T09:58:38.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So any incoming call is guaranteed to correspond to at least X/2 gas being spent",
+      "createdAt": "2020-09-23T09:58:38.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Right, but the transaction may end up never making it to PAYGAS (signature isn't valid).",
+      "createdAt": "2020-09-23T09:58:44.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But if that happens then it's not valid to be included in the block",
+      "createdAt": "2020-09-23T09:58:59.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(according to latest rules, I think)",
+      "createdAt": "2020-09-23T09:59:04.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm struggling to understand how in AA Phase N we can open up `TIMESTAMP`, external calls, etc.",
+      "createdAt": "2020-09-23T09:59:41.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or even just allow internal transactions to the contract (with the caveat of constrained gas spending during validity re-checks).",
+      "createdAt": "2020-09-23T10:00:24.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ansgar.eth",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so I think it is really important to clearly distinguish the two mechanisms our AA proposal uses to restrict what AA txs to allow into the mempool",
+      "createdAt": "2020-09-23T10:02:27.840000+00:00",
+      "attachments": []
+    }
+  ]
+}

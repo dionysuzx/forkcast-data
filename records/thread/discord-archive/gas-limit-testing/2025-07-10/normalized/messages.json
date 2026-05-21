@@ -1,0 +1,342 @@
+{
+  "schemaVersion": 1,
+  "channel": "gas-limit-testing",
+  "date": "2025-07-10",
+  "messageCount": 40,
+  "sourceHash": "640888e576afd011c56b4a311498ec20d3a371c56b61643e965513efbd242e3e",
+  "searchText": "<CPerezz> re: **@kevaundray** > I was playing around with this yesterday in geth, this might be a good starting point: https://github.com/ethereum/go-ethereum/pull/32174 Essentially tried out a few different methods: - ModExp using GMP where object allocations are done on the C side and a go struct stores pointers - Same as above, but using a sync.Pool to re-use GMP allocations - A modexp method written in C that uses GMP, so there is only one cgo call TLDR; There was at most a 2x speedup on the benchmarks with GMP vs big.Int and GMP was expectedly slower on small bit sizes I helped the Geth team 2 weeks ago with Gotti on this. Without GMP you can get 2x speedup for the worst cases already. This shows how: https://github.com/CPerezz/go/commit/afa45bdab2ca13897a628d1500f69e3080ebaa2d <CPerezz> More than 2x for only certain particular cases. <KamilChNethermind> If you want to test out Geth perf using gas-benchmarks through CI let me know - can give you necessary access and instructions on how to run that quickly and verify modexp withotu waiting for each cycle <CPerezz> From our side (gotti and I) we tested with worst cases from EELS. I think either <@425274498732916736> or @ignaciohagopian implemented this one. We ran it like: ``` ❯ ./../go/bin/go build ./cmd/evm time ./evm statetest --bench --run \"tests/zkevm/test_worst_compute.py::test_worst_modexp\\\\[fork_Prague-state_test-mod_even_32b_exp_40\\\\]\" worst_modexp.json {\"stateRoot\": \"0xabc2930065fbcb1073de83f0e41807aa84f474ece57c6e63a91bc6315932dc5f\"} [ { \"name\": \"tests/zkevm/test_worst_compute.py::test_worst_modexp[fork_Prague-state_test-mod_even_32b_exp_40]\", \"pass\": true, \"stateRoot\": \"0xabc2930065fbcb1073de83f0e41807aa84f474ece57c6e63a91bc6315932dc5f\", \"fork\": \"Prague\", \"benchStats\": { \"time\": 1870418042, \"allocs\": 8358996, \"bytesAllocated\": 473115920, \"gasUsed\": 100000000 } } ] ./evm statetest --bench --run worst_modexp.json 5.79s user 0.14s system 86% cpu 6.832 total``` <KamilChNethermind> If you can give me any docker image I can make another round of testing for you if you want <CPerezz> re: **@KamilChNethermind** > If you can give me any docker image I can make another round of testing for you if you want I don't have any docker image. Just this go fork which I use to build Geth and run this. The command is on the top (integration will be more complex ofc). Unsure if worth the effort. As I am waiting to hear from Felix on whether they want to move with pure Go or GMP. If GMP, then @kevaundray 's work is def the way to go. Will be much faster for a lot more cases I would expect <KamilChNethermind> As you wish! Just we can drive it based on data from same machine on multiple modexp test cases :) So just waiting for your call and I can help - just need to know the docker image or how to build it as I see this is not geth direct change but go implementation improvement so I need to have a hand here with preparing the env. <KamilChNethermind> And - would be amazing to see Geth and Erigon improvement as it unstucks 60MGas ;) <CPerezz> re: **@KamilChNethermind** > And - would be amazing to see Geth and Erigon improvement as it unstucks 60MGas ;) I'm happy to help! We can jump into it as soon as Geth team decides their prefered path. <CPerezz> Both implementations will fix the worst case AFAIS. It's just about the team's preferred solution 🙂 <CPerezz> SO that we don't duplicate work <KamilChNethermind> Yeah - what I mena here is we can check both performance wise to give extra input :) <CPerezz> re: **@KamilChNethermind** > Yeah - what I mena here is we can check both performance wise to give extra input :) Will DM to help you set it up if you want. As you need a custom version of go to compile Geth for now <kevaundray> re: **@marcin_d_s** > And potential for future optimizations is huge @KamilChNethermind In the screenshot it says \"ModModExp32Exp44UNCACHABLE\" -- Is this implying that the modulus is 32 bytes and the exponent is 44 bytes? <KamilChNethermind> re: **@kevaundray** > @KamilChNethermind In the screenshot it says \"ModModExp32Exp44UNCACHABLE\" -- Is this implying that the modulus is 32 bytes and the exponent is 44 bytes? Very likely yes - these are sceanrios recently created by marcin but he made this convention to keep it in name <KamilChNethermind> So 99% sure you are correct here <KamilChNethermind> But need Marcin to confirm 100% - he is off today/tomorrow <kevaundray> Do you also know if the benchmarks including the time it takes to compute the gas required or just calling the precompile? <kevaundray> geth uses big.Int to do this for example, while revm uses U256 <kevaundray> re: **@KamilChNethermind** > Very likely yes - these are sceanrios recently created by marcin but he made this convention to keep it in name @CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits <KamilChNethermind> re: **@kevaundray** > Do you also know if the benchmarks including the time it takes to compute the gas required or just calling the precompile? Benchmarks basically include the time from receiving engine_newPayload full of specific OpCodes/Precompiles to the response from it <KamilChNethermind> We pregenerate newPayloads and send them to clients - what happens in client is a blackbox - we record the timing for specific scenarios <CPerezz> re: **@kevaundray** > @CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits With exponent 44 bytes we definitely are over u64 which is what I optimized in the go fork. This is using the \"optimized\" montgomery implementation within Go which I did not touch at all <KamilChNethermind> re: **@kevaundray** > @CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits This matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster <CPerezz> To be clear, there could be more ModExp cases that are bad. We focused on: - `test-mod_even_32b_exp_40` <CPerezz> re: **@KamilChNethermind** > This matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster This is consistent with the findings from Gotti and Felix <KamilChNethermind> We have such scenarios so as I mentioned before - we can quickly check that on VM <kevaundray> re: **@KamilChNethermind** > This matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster exponent of size 65 bytes is 50% faster than exponent of size 64 bytes for the same base and modulus? <KamilChNethermind> <KamilChNethermind> Quite clearly viisble here <KamilChNethermind> From Marcin: \"exp 64 is the slowest, with additional bit (65) it is getting 50% faster\" <KamilChNethermind> So the difference between cases is just one bit added to exponent <kevaundray> re: **@KamilChNethermind** > So the difference between cases is just one bit added to exponent one byte? <KamilChNethermind> Sory - bits. Modulus is in bytes and Exponent in bits if i get it right in this convention <KamilChNethermind> So simply modulus to the full (32 bytes), exponent 64/65 bits in these cases <CPerezz> re: **@kevaundray** > one byte? https://github.com/golang/go/blob/8131635e5a9c7ae2fd2c083bed9e841d27226500/src/math/big/nat.go#L678 This is exactly where if the exponent is > 64bits, we don't go to the optimized paths and use fallback. <CPerezz> This is exactly what I tried to optimize in my fork <KamilChNethermind> re: **@CPerezz** > https://github.com/golang/go/blob/8131635e5a9c7ae2fd2c083bed9e841d27226500/src/math/big/nat.go#L678 This is exactly where if the exponent is > 64bits, we don't go to the optimized paths and use fallback. Soooo... Fallback is faster than optimized? :D <CPerezz> No, fallback is the slowest. That's why when we go over 64bits, it's faster. Because anything <64bits flows through the fallback as the lenght of the exponent in words is 1. <KamilChNethermind> Ahh sory ok, misread it",
+  "excerpts": [
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@kevaundray**\n> I was playing around with this yesterday in geth, this might be a good starting point: https://github.com/ethereum/go-ethereum/pull/32174\n\nEssentially tried out a few different methods:\n\n- ModExp using GMP where object allocations are done on the C side and a go struct stores pointers\n- Same as above, but using a sync.Pool to re-use GMP allocations\n- A modexp method written in C that uses GMP, so there is only one cgo call\n\nTLDR; There was at most a 2x speedup on the benchmarks with GMP vs big.Int and GMP was expectedly slower on small bit sizes\nI helped the Geth team 2 weeks ago with Gotti on this. Without GMP you can get 2x speedup for the worst cases already. This shows how: https://github.com/CPerezz/go/commit/afa45bdab2ca13897a628d1500f69e3080ebaa2d",
+      "createdAt": "2025-07-10T07:41:10.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> More than 2x for only certain particular cases.",
+      "createdAt": "2025-07-10T07:41:34.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> If you want to test out Geth perf using gas-benchmarks through CI let me know - can give you necessary access and instructions on how to run that quickly and verify modexp withotu waiting for each cycle",
+      "createdAt": "2025-07-10T07:57:03.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> From our side (gotti and I) we tested with worst cases from EELS. I think either <@425274498732916736> or @ignaciohagopian implemented this one.\nWe ran it like: \n```\n\n❯ ./../go/bin/go  build ./cmd/evm\ntime ./evm statetest --bench --run \"tests/zkevm/test_worst_compute.py::test_worst_modexp\\\\[fork_Prague-state_test-mod_even_32b_exp_40\\\\]\" worst_modexp.json\n{\"stateRoot\": \"0xabc2930065fbcb1073de83f0e41807aa84f474ece57c6e63a91bc6315932dc5f\"}\n[\n  {\n    \"name\": \"tests/zkevm/test_worst_compute.py::test_worst_modexp[fork_Prague-state_test-mod_even_32b_exp_40]\",\n    \"pass\": true,\n    \"stateRoot\": \"0xabc2930065fbcb1073de83f0e41807aa84f474ece57c6e63a91bc6315932dc5f\",\n    \"fork\": \"Prague\",\n    \"benchStats\": {\n      \"time\": 1870418042,\n      \"allocs\": 8358996,\n      \"bytesAllocated\": 473115920,\n      \"gasUsed\": 100000000\n    }\n  }\n]\n./evm statetest --bench --run  worst_modexp.json  5.79s user 0.14s system 86% cpu 6.832 total```",
+      "createdAt": "2025-07-10T08:01:17.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> If you can give me any docker image I can make another round of testing for you if you want",
+      "createdAt": "2025-07-10T08:01:52.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@KamilChNethermind**\n> If you can give me any docker image I can make another round of testing for you if you want\nI don't have any docker image. Just this go fork which I use to build Geth and run this. The command is on the top (integration will be more complex ofc).\n\nUnsure if worth the effort. As I am waiting to hear from Felix on whether they want to move with pure Go or GMP.\n\nIf GMP, then @kevaundray 's work is def the way to go. Will be much faster for a lot more cases I would expect",
+      "createdAt": "2025-07-10T08:04:00.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> As you wish! Just we can drive it based on data from same machine on multiple modexp test cases :) So just waiting for your call and I can help - just need to know the docker image or how to build it as I see this is not geth direct change but go implementation improvement so I need to have a hand here with preparing the env.",
+      "createdAt": "2025-07-10T08:06:05.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> And - would be amazing to see Geth and Erigon improvement as it unstucks 60MGas ;)",
+      "createdAt": "2025-07-10T08:06:33.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@KamilChNethermind**\n> And - would be amazing to see Geth and Erigon improvement as it unstucks 60MGas ;)\nI'm happy to help! We can jump into it as soon as Geth team decides their prefered path.",
+      "createdAt": "2025-07-10T08:17:44.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> Both implementations will fix the worst case AFAIS. It's just about the team's preferred solution 🙂",
+      "createdAt": "2025-07-10T08:18:13.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> SO that we don't duplicate work",
+      "createdAt": "2025-07-10T08:18:18.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> Yeah - what I mena here is we can check both performance wise to give extra input :)",
+      "createdAt": "2025-07-10T08:19:21.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@KamilChNethermind**\n> Yeah - what I mena here is we can check both performance wise to give extra input :)\nWill DM to help you set it up if you want. As you need a custom version of go to compile Geth for now",
+      "createdAt": "2025-07-10T08:20:36.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> re: **@marcin_d_s**\n> And potential for future optimizations is huge\n@KamilChNethermind In the screenshot it says \"ModModExp32Exp44UNCACHABLE\" -- Is this implying that the modulus is 32 bytes and the exponent is 44 bytes?",
+      "createdAt": "2025-07-10T12:16:30.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> re: **@kevaundray**\n> @KamilChNethermind In the screenshot it says \"ModModExp32Exp44UNCACHABLE\" -- Is this implying that the modulus is 32 bytes and the exponent is 44 bytes?\nVery likely yes - these are sceanrios recently created by marcin but he made this convention to keep it in name",
+      "createdAt": "2025-07-10T12:19:33.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> So 99% sure you are correct here",
+      "createdAt": "2025-07-10T12:19:38.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> But need Marcin to confirm 100% - he is off today/tomorrow",
+      "createdAt": "2025-07-10T12:20:00.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> Do you also know if the benchmarks including the time it takes to compute the gas required or just calling the precompile?",
+      "createdAt": "2025-07-10T12:20:17.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> geth uses big.Int to do this for example, while revm uses U256",
+      "createdAt": "2025-07-10T12:21:16.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> re: **@KamilChNethermind**\n> Very likely yes - these are sceanrios recently created by marcin but he made this convention to keep it in name\n@CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits",
+      "createdAt": "2025-07-10T12:22:26.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> re: **@kevaundray**\n> Do you also know if the benchmarks including the time it takes to compute the gas required or just calling the precompile?\nBenchmarks basically include the time from receiving engine_newPayload full of specific OpCodes/Precompiles to the response from it",
+      "createdAt": "2025-07-10T12:23:21.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> We pregenerate newPayloads and send them to clients - what happens in client is a  blackbox - we record the timing for specific scenarios",
+      "createdAt": "2025-07-10T12:23:47.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@kevaundray**\n> @CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits\nWith exponent 44 bytes we definitely are over u64 which is what I optimized in the go fork. \n\nThis is using the \"optimized\" montgomery implementation within Go which I did not touch at all",
+      "createdAt": "2025-07-10T12:23:48.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> re: **@kevaundray**\n> @CPerezz If this is the case, then the hypothesis that geth is slow because of short exponents wouldn't be correct right? where short is < 64 bits\nThis matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster",
+      "createdAt": "2025-07-10T12:24:11.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> To be clear, there could be more ModExp cases that are bad. We focused on:\n- `test-mod_even_32b_exp_40`",
+      "createdAt": "2025-07-10T12:24:56.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@KamilChNethermind**\n> This matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster\nThis is consistent with the findings from Gotti and Felix",
+      "createdAt": "2025-07-10T12:25:24+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> We have such scenarios so as I mentioned before - we can quickly check that on VM",
+      "createdAt": "2025-07-10T12:26:11.720000+00:00",
+      "attachments": [
+        {
+          "type": "image/jpeg",
+          "origin_name": "file_70.jpg",
+          "content": "f8a20aa79f15c816b1c754f13f164e01585beae421aff2c18f5c2467f267cf8d"
+        }
+      ]
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> re: **@KamilChNethermind**\n> This matches with recent finding from Marcin - Worst case for Geth is at exponent of size 64 - 65 is already 50% faster\nexponent of size 65 bytes is 50% faster than exponent of size 64 bytes for the same base and modulus?",
+      "createdAt": "2025-07-10T12:28:12.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind>",
+      "createdAt": "2025-07-10T12:28:53.289000+00:00",
+      "attachments": [
+        {
+          "type": "image/jpeg",
+          "origin_name": "file_71.jpg",
+          "content": "6c5e4d07fa922dfd7c23ad3b26d67df78728db2a5e29d453c03866b41553de5e"
+        }
+      ]
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> Quite clearly viisble here",
+      "createdAt": "2025-07-10T12:29:07.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> From Marcin: \"exp 64 is the slowest, with additional bit (65) it is getting 50% faster\"",
+      "createdAt": "2025-07-10T12:29:28.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> So the difference between cases is just one bit added to exponent",
+      "createdAt": "2025-07-10T12:29:38.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<kevaundray> re: **@KamilChNethermind**\n> So the difference between cases is just one bit added to exponent\none byte?",
+      "createdAt": "2025-07-10T12:30:47.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> Sory - bits.\n\nModulus is in bytes and Exponent in bits if i get it right in this convention",
+      "createdAt": "2025-07-10T12:33:02.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> So simply modulus to the full (32 bytes), exponent 64/65 bits in these cases",
+      "createdAt": "2025-07-10T12:33:47.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> re: **@kevaundray**\n> one byte?\nhttps://github.com/golang/go/blob/8131635e5a9c7ae2fd2c083bed9e841d27226500/src/math/big/nat.go#L678\n\nThis is exactly where if the exponent is > 64bits, we don't go to the optimized paths and use fallback.",
+      "createdAt": "2025-07-10T12:34:53.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> This is exactly what I tried to optimize in my fork",
+      "createdAt": "2025-07-10T12:35:03.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> re: **@CPerezz**\n> https://github.com/golang/go/blob/8131635e5a9c7ae2fd2c083bed9e841d27226500/src/math/big/nat.go#L678\n\nThis is exactly where if the exponent is > 64bits, we don't go to the optimized paths and use fallback.\nSoooo... Fallback is faster than optimized? :D",
+      "createdAt": "2025-07-10T12:59:19.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<CPerezz> No, fallback is the slowest. That's why when we go over 64bits, it's faster. Because anything <64bits flows through the fallback as the lenght of the exponent in words is 1.",
+      "createdAt": "2025-07-10T13:00:24.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<KamilChNethermind> Ahh sory ok, misread it",
+      "createdAt": "2025-07-10T13:16:06.206000+00:00",
+      "attachments": []
+    }
+  ]
+}

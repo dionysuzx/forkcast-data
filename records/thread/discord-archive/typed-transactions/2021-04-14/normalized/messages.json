@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "typed-transactions",
+  "date": "2021-04-14",
+  "messageCount": 220,
+  "sourceHash": "5e5daa3836ef65b6b20886b3a244fa09d48551cbe0f7457d9c68b60832d6b898",
+  "searchText": "<@!301186049323958275> thanks for the review It's updated again (not done yet, had to eat dinner) About the rlp, I've also written my opinion on github, want to leave as-is for now Honestly, at this point, I just want to get the change in and focus on documenting eth/66 next Some docs is better than no docs at all I appreciate you reviewing it in detail though, it does help to make it more correct Just let me know if you think it's OK to merge, or whether you feel very strongly about changing something still Just read your comment, your response makes me think that this may not be a disagreement on terminology, but actually a disagreement on the specification itself. > we have to formally describe that the typed transaction is a RLP byte array The transaction is **not** an RLP byte array. It is a **non**-RLP byte array. Just regular sequence of bytes, with the first byte being the transaction type. There is **no** length prefix. Also, so far this is the only point of contention I have so far that I think is worth holding up a merge for because I believe it it to be *incorrect*, and incorrect is worse than nothing when it comes to documentation IMO. Everything else is feedback on how I think the spec could be improved, but that can happen iteratively over time. OK So for the purpose of the networking protocol, the typed transaction is a RLP byte array If you get a RLP list of transactions, the elements of the list are RLP objects We have two types If the object is RLP list, it's a legacy transaction If the object is RLP byte array, it's a typed transaction I know that for hashing and `eth_sendRawTransaction` RPC, typed transactions are not RLP But it's different in the networking In the spec, I'm not trying to say anything about typed transactions in general I'm just trying to define clearly how they are encoded on the wire When you say \"RLP Byte Array\" do you mean \"byte array with a length prefix as the leading bytes in the array\" or do you mean \"A byte array that *can* be RLP encoded at a future step in the process\"? In the networking, it is *also* not an RLP encoded byte array. It is a byte array that is put into a list and then that *list* is RLP encoded. This gives a different result from RLP encoding the byte array and then putting it into a list that is then RLP encoded. Damn it, why does it feel like we are talking about two different things Possibly because we are? 😄 So in RLP, there are two types of objects that can be encoded: Lists and byte arrays This is a byte array. When I say RLP byte array, I mean an RLP object of byte array type Legacy transactions are a list. i.e. it's a couple of bytes with a length prefix specifying the bytes type I see. So you are referring to a \"byte array that *can* be RLP encoded\", not a byte array that *has* been RLP encoded? No, it has no length prefix (yet). This is where our misunderstanding is If you prematurely length prefix it then you'll end up double length prefixing it when you encode the list that contains it later. I never think about it this way `rlp_encode([rlp_encode(bytes)]) != rlp_encode([bytes])` When I think about RLP structures, it would never occur to me that one has to be careful not to doubly add the length prefix I *think* maybe in your head the actual functions are more like: `lp_encode([lp_encode(bytes)]) == rlp_encode([bytes])` If you *non-recursively* encode the outer list, then I think your thinking makes sense. But then it isn't **R**LP anymore, it is just LP. 🙂 I'm still not sure how to resolve this discussion Let me give an example Let's say we have some bytes 0x010203 They are just bytes Do a poll of 1000 random developers and see which mental model aligns closer to their natural one. 😉 let's define the object `x` to be the bytes `0x010203` I wouldn't call it an object, but that may not matter so we can move on without resolving that for now. if i say \"the RLP byte array of x\", I mean `0x83010203` That is also what I mean when I say that same phrase. i.e. an RLP byte array is the bytes of x with the length prefix For the purpose of the spec, when I say \"the object foo is `foo = [x, y, z]`\" then I assume that it is implied that x, y and z are RLP In your mind, what happens when you do `rlp_encode([bytes1, bytes2])`? Where `bytes1` and `bytes2` are byte arrays. What's the `[` in there btw? you mean it's an array? An array. In this case an array of two items (or a list of two items or a tuple of two items depending on language/terminology). OK so it depends if `bytes1` is RLP, then it just gets included in the RLP list without encoding it another time if `bytes1` is not RLP encoded, then it does get encoded I see. So in your mind an RLP encoded byte array can be differentiated from a non-RLP encoded byte array? yes it's not just in my mind actually, we also have the exact same distinction in go-ethereum Meaning `rlp_encode(...)` does *not* return a byte array, it returns an object that contains a byte array and some metadata about the fact that it is RLP encoded? the notation in the spec is not a computer program, it's more like math notation Unfortunately, everyone who reads the spec will be a computer programmer, not a mathematician. 😄 My fear is that we'll see what we have already seen, which is that people interpret `rlp(...)` to mean \"rlp encode and return a byte array\", which they then include in a list and then RLP encode that list later. And I *suspect* that the common implementation (the naive one that most people do) will not carry around metadata indicating whether or not something is *already* RLP encoded or not. This becomes even *more* confusing I think when you have items that actually *are* supposed to be double encoded, like the EIP-2930 payload. in the implementations, RLP encoding is generally handled by a library that takes an object and encodes it all recursively That is what I have seen. And which is why `rlp_encode([rlp_encode(bytes)])` will result in the *wrong* output. But it sounds like Geth will encode ☝️ correctly (not double encoded)? What I'm trying to tell you is that this `rlp_encode([rlp_encode(bytes)])` will never occur in the implementation code In geth, when we deal with transactions, we always deal with them as an object of type `*types.Transaction` You can RLP encode it, and that gives `[]byte` (you can also encode it in other ways) It is exactly how someone implemented 2930 because someone read a specification the way I'm suggesting people will read the specification. 🙂 Resulted in a consensus failure and a bunch of discussion (very similar to this conversation) trying to figure out who was right. \"The spec says we should RLP encode typed transactions, so I did that and then put them into the list which I gave to my wire protocol handler.\" (paraphrased) Keep in mind, that a list of a single EIP-2930 transaction is: ``` rlp([concat(1, rlp([chainId, nonce, gasPrice, ...]))]) ``` So nested RLP encoding *is* a thing that happens in the protocol now. Yeah, I hate it This is what you get for trying to make consensus objects not RLP in the first place 😛 Which is part of why I think it is very clear at what stage something should be RLP encoded. You should mentally prepare, it is *going* to happen. 🙂 I know, and of course I'm joking The consensus client (ETH2) doesn't have a dependency on RLP (only SSZ), and probably never will. But you should know that we didn't have any issues with RLP up until the point where the second generation of ethereum enthusiasts starting digging in and didn't get it The idea behind RLP is that all complex values are lists, and simple leaf data is byte array If you start messing with it too much, odd things will happen I also think RLP has its downsides, but the original idea behind it was kind of solid Anyway, what should I write in the spec now? Things would have been less murky if I got my way and 2930 was SSZ. 😉 Yeah, I'm not sure why we didn't go with SSZ Ultimately, I'm a huge fan of ownership and you are the owner of that particular specification. If you decide to ignore this particular feedback I won't hold it against you in any way and will support you continuing to own the networking spec. I *do* disagree with the current wording because I fear it will lead to more confusion in the future similar to the confusion we have seen in the past, but I may be wrong and as not-the-owner and also not-volunteering-to-become-owner, my position is merely advisory and should not be given undue weight. If it were me, I would just say that it is a byte array, not an RLP byte array. What should be in the formula? I promise that I will write a meta-spec about the RLP notation later We're really missing that now I *think* I would just put: ``` typed-receipt = tx-type || receipt-data ``` It's good you reminded me that this model of thinking where it's implicit whether something is 'already RLP' is not universally understood Since you have already defined `||` to mean \"byte concatenation\" in the RLPx spec. Yeah, we use it in all specs In all of the code I have written, `rlp_encode` just returns a byte array that is indistinguishable from any other byte array. When `rlp_encode(...)` encounters any byte array during its recursive encoding, it length prefixes it as part of the encoding process. Which is why `rlp_encode([rlp_encode(bytes)])` does something different than it sounds like it would in Geth. yes, this is true for all implementations, I think (though I still may be misundestanding exactly how Geth is identifying \"already length prefixed\" byte arrays) we don't I meant something else let's say that, in some part of geth we have a list of transactions `txs` if you `rlp.EncodeToBytes(txs)` it gives `[]byte` during this encoding process, for each transaction in `txs`, the method `tx.EncodeRLP` will be invoked this is done by the RLP encoder, and it obviously does know what's encoded and what's not encoded sure, if you would then encode the `[]byte` output again, it would be doubly length-prefixed but this doesn't happen because it is not encoded another time Yeah, same (pre 2930) for my code. I only RLP encode *right* before I put something on the wire or *right* before I sign. (just to make it clear, the Go type of the input `txs` here is `[]*types.Transaction`) It is the last step, and everything is more useable objects right up until that single `rlpEncode` call. You need to understand the spec notation in the same way Ah, interesting. So your RLP encoder isn't agnostic? My RLP encoder literally only knows how to encode bytes and lists (recursively). I have to *first* run my object through an XXEncoder to turn a transaction into a lists of lists of byte arrays (it angers me greatly that there is no name for this protocol and my functions have weird ambiguous names). The go-ethereum one is based on reflection, so it is essentially a two-way mapping between the Go type system and the RLP type system ```ts const toEncode = [ stripLeadingZeros(bigintToUint8Array(transaction.nonce, 32)), stripLeadingZeros(bigintToUint8Array(transaction.gasPrice, 32)), stripLeadingZeros(bigintToUint8Array(transaction.gasLimit, 32)), stripLeadingZeros(transaction.to !== null ? bigintToUint8Array(transaction.to, 32) : new Uint8Array(0)), stripLeadingZeros(bigintToUint8Array(transaction.value, 32)), new Uint8Array(transaction.data), ] if (!isSignedTransaction(transaction)) { toEncode.push(stripLeadingZeros(bigintToUint8Array(transaction.chainId, 32))) toEncode.push(stripLeadingZeros(new Uint8Array(0))) toEncode.push(stripLeadingZeros(new Uint8Array(0))) } else { toEncode.push(stripLeadingZeros(bigintToUint8Array(transaction.v, 32))) toEncode.push(stripLeadingZeros(bigintToUint8Array(transaction.r, 32))) toEncode.push(stripLeadingZeros(bigintToUint8Array(transaction.s, 32))) } ``` aaaaaaaaaaaaaa That looks so horribly wrong RLP, as a specification/standard, does not know how to encode transactions. The reflection-based approach is nice because the Go type system is l",
+  "excerpts": [
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!301186049323958275> thanks for the review",
+      "createdAt": "2021-04-14T11:29:24.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's updated again",
+      "createdAt": "2021-04-14T11:29:33.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(not done yet, had to eat dinner)",
+      "createdAt": "2021-04-14T11:29:37.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "About the rlp, I've also written my opinion on github, want to leave as-is for now",
+      "createdAt": "2021-04-14T11:30:01.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Honestly, at this point, I just want to get the change in and focus on documenting eth/66 next",
+      "createdAt": "2021-04-14T11:30:21.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Some docs is better than no docs at all",
+      "createdAt": "2021-04-14T11:30:37.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I appreciate you reviewing it in detail though, it does help to make it more correct",
+      "createdAt": "2021-04-14T11:31:00.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Just let me know if you think it's OK to merge, or whether you feel very strongly about changing something still",
+      "createdAt": "2021-04-14T12:05:07.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Just read your comment, your response makes me think that this may not be a disagreement on terminology, but actually a disagreement on the specification itself.",
+      "createdAt": "2021-04-14T12:12:33.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> we have to formally describe that the typed transaction is a RLP byte array\nThe transaction is **not** an RLP byte array.",
+      "createdAt": "2021-04-14T12:12:52.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is a **non**-RLP byte array.",
+      "createdAt": "2021-04-14T12:12:59.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Just regular sequence of bytes, with the first byte being the transaction type.  There is **no** length prefix.",
+      "createdAt": "2021-04-14T12:13:13.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, so far this is the only point of contention I have so far that I think is worth holding up a merge for because I believe it it to be *incorrect*, and incorrect is worse than nothing when it comes to documentation IMO.",
+      "createdAt": "2021-04-14T12:14:35.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Everything else is feedback on how I think the spec could be improved, but that can happen iteratively over time.",
+      "createdAt": "2021-04-14T12:14:56.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "OK",
+      "createdAt": "2021-04-14T12:27:35.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So for the purpose of the networking protocol, the typed transaction is a RLP byte array",
+      "createdAt": "2021-04-14T12:27:58.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you get a RLP list of transactions, the elements of the list are RLP objects",
+      "createdAt": "2021-04-14T12:28:25.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We have two types",
+      "createdAt": "2021-04-14T12:28:29.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If the object is RLP list, it's a legacy transaction",
+      "createdAt": "2021-04-14T12:28:42.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If the object is RLP byte array, it's a typed transaction",
+      "createdAt": "2021-04-14T12:28:55.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I know that for hashing and `eth_sendRawTransaction` RPC, typed transactions are not RLP",
+      "createdAt": "2021-04-14T12:29:47.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But it's different in the networking",
+      "createdAt": "2021-04-14T12:30:03.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In the spec, I'm not trying to say anything about typed transactions in general",
+      "createdAt": "2021-04-14T12:31:05.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm just trying to define clearly how they are encoded on the wire",
+      "createdAt": "2021-04-14T12:31:22.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "When you say \"RLP Byte Array\" do you mean \"byte array with a length prefix as the leading bytes in the array\" or do you mean \"A byte array that *can* be RLP encoded at a future step in the process\"?",
+      "createdAt": "2021-04-14T12:36:14.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In the networking, it is *also* not an RLP encoded byte array.",
+      "createdAt": "2021-04-14T12:36:41.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is a byte array that is put into a list and then that *list* is RLP encoded.",
+      "createdAt": "2021-04-14T12:36:52.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This gives a different result from RLP encoding the byte array and then putting it into a list that is then RLP encoded.",
+      "createdAt": "2021-04-14T12:37:06.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Damn it, why does it feel like we are talking about two different things",
+      "createdAt": "2021-04-14T12:37:08.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Possibly because we are?  😄",
+      "createdAt": "2021-04-14T12:37:19.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So in RLP, there are two types of objects that can be encoded:",
+      "createdAt": "2021-04-14T12:37:28.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Lists and byte arrays",
+      "createdAt": "2021-04-14T12:37:32.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is a byte array.",
+      "createdAt": "2021-04-14T12:37:43.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "When I say RLP byte array, I mean an RLP object of byte array type",
+      "createdAt": "2021-04-14T12:37:45.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Legacy transactions are a list.",
+      "createdAt": "2021-04-14T12:37:48.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i.e. it's a couple of bytes with a length prefix specifying the bytes type",
+      "createdAt": "2021-04-14T12:38:10.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I see.  So you are referring to a \"byte array that *can* be RLP encoded\", not a byte array that *has* been RLP encoded?",
+      "createdAt": "2021-04-14T12:38:12.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "No, it has no length prefix (yet).",
+      "createdAt": "2021-04-14T12:38:24.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is where our misunderstanding is",
+      "createdAt": "2021-04-14T12:38:42.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you prematurely length prefix it then you'll end up double length prefixing it when you encode the list that contains it later.",
+      "createdAt": "2021-04-14T12:38:53.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I never think about it this way",
+      "createdAt": "2021-04-14T12:39:09.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`rlp_encode([rlp_encode(bytes)]) != rlp_encode([bytes])`",
+      "createdAt": "2021-04-14T12:39:30.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "When I think about RLP structures, it would never occur to me that one has to be careful not to doubly add the length prefix",
+      "createdAt": "2021-04-14T12:39:52.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I *think* maybe in your head the actual functions are more like:\n`lp_encode([lp_encode(bytes)]) == rlp_encode([bytes])`",
+      "createdAt": "2021-04-14T12:40:16.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you *non-recursively* encode the outer list, then I think your thinking makes sense.",
+      "createdAt": "2021-04-14T12:40:33.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But then it isn't **R**LP anymore, it is just LP.  🙂",
+      "createdAt": "2021-04-14T12:40:42.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm still not sure how to resolve this discussion",
+      "createdAt": "2021-04-14T12:41:33.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Let me give an example",
+      "createdAt": "2021-04-14T12:41:38.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Let's say we have some bytes 0x010203",
+      "createdAt": "2021-04-14T12:41:53.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "They are just bytes",
+      "createdAt": "2021-04-14T12:42:00.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Do a poll of 1000 random developers and see which mental model aligns closer to their natural one.  😉",
+      "createdAt": "2021-04-14T12:42:07.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let's define the object `x` to be the bytes `0x010203`",
+      "createdAt": "2021-04-14T12:42:31.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I wouldn't call it an object, but that may not matter so we can move on without resolving that for now.",
+      "createdAt": "2021-04-14T12:42:57.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if i say \"the RLP byte array of x\", I mean `0x83010203`",
+      "createdAt": "2021-04-14T12:43:49.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is also what I mean when I say that same phrase.",
+      "createdAt": "2021-04-14T12:44:06.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i.e. an RLP byte array is the bytes of x with the length prefix",
+      "createdAt": "2021-04-14T12:44:18.685000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For the purpose of the spec, when I say \"the object foo is `foo = [x, y, z]`\"",
+      "createdAt": "2021-04-14T12:44:47.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "then I assume that it is implied that x, y and z are RLP",
+      "createdAt": "2021-04-14T12:45:13.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In your mind, what happens when you do `rlp_encode([bytes1, bytes2])`?",
+      "createdAt": "2021-04-14T12:45:47.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Where `bytes1` and `bytes2` are byte arrays.",
+      "createdAt": "2021-04-14T12:46:00.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What's the `[` in there btw?",
+      "createdAt": "2021-04-14T12:46:19.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you mean it's an array?",
+      "createdAt": "2021-04-14T12:46:31.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "An array.  In this case an array of two items (or a list of two items or a tuple of two items depending on language/terminology).",
+      "createdAt": "2021-04-14T12:46:54.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "OK",
+      "createdAt": "2021-04-14T12:46:59.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so it depends",
+      "createdAt": "2021-04-14T12:47:03.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if `bytes1` is RLP, then it just gets included in the RLP list without encoding it another time",
+      "createdAt": "2021-04-14T12:47:29.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if `bytes1` is not RLP encoded, then it does get encoded",
+      "createdAt": "2021-04-14T12:47:44.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I see.  So in your mind an RLP encoded byte array can be differentiated from a non-RLP encoded byte array?",
+      "createdAt": "2021-04-14T12:47:55.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2021-04-14T12:47:59.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it's not just in my mind actually, we also have the exact same distinction in go-ethereum",
+      "createdAt": "2021-04-14T12:48:20.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Meaning `rlp_encode(...)` does *not* return a byte array, it returns an object that contains a byte array and some metadata about the fact that it is RLP encoded?",
+      "createdAt": "2021-04-14T12:48:29.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the notation in the spec is not a computer program, it's more like math notation",
+      "createdAt": "2021-04-14T12:49:56.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Unfortunately, everyone who reads the spec will be a computer programmer, not a mathematician.  😄",
+      "createdAt": "2021-04-14T12:50:20.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "My fear is that we'll see what we have already seen, which is that people interpret `rlp(...)` to mean \"rlp encode and return a byte array\", which they then include in a list and then RLP encode that list later.",
+      "createdAt": "2021-04-14T12:51:03.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And I *suspect* that the common implementation (the naive one that most people do) will not carry around metadata indicating whether or not something is *already* RLP encoded or not.",
+      "createdAt": "2021-04-14T12:51:29.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This becomes even *more* confusing I think when you have items that actually *are* supposed to be double encoded, like the EIP-2930 payload.",
+      "createdAt": "2021-04-14T12:52:28.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "in the implementations, RLP encoding is generally handled by a library that takes an object and encodes it all recursively",
+      "createdAt": "2021-04-14T12:52:31.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is what I have seen.",
+      "createdAt": "2021-04-14T12:52:43.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And which is why `rlp_encode([rlp_encode(bytes)])` will result in the *wrong* output.",
+      "createdAt": "2021-04-14T12:52:58.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But it sounds like Geth will encode ☝️ correctly (not double encoded)?",
+      "createdAt": "2021-04-14T12:53:14.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What I'm trying to tell you is that this `rlp_encode([rlp_encode(bytes)])` will never occur in the implementation code",
+      "createdAt": "2021-04-14T12:53:54.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In geth, when we deal with transactions, we always deal with them as an object of type `*types.Transaction`",
+      "createdAt": "2021-04-14T12:54:13.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You can RLP encode it, and that gives `[]byte`",
+      "createdAt": "2021-04-14T12:54:24.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(you can also encode it in other ways)",
+      "createdAt": "2021-04-14T12:54:38.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is exactly how someone implemented 2930 because someone read a specification the way I'm suggesting people will read the specification.  🙂",
+      "createdAt": "2021-04-14T12:54:52.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Resulted in a consensus failure and a bunch of discussion (very similar to this conversation) trying to figure out who was right.",
+      "createdAt": "2021-04-14T12:55:21.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"The spec says we should RLP encode typed transactions, so I did that and then put them into the list which I gave to my wire protocol handler.\" (paraphrased)",
+      "createdAt": "2021-04-14T12:56:02.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Keep in mind, that a list of a single EIP-2930 transaction is:\n```\nrlp([concat(1, rlp([chainId, nonce, gasPrice, ...]))])\n```",
+      "createdAt": "2021-04-14T12:57:33.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So nested RLP encoding *is* a thing that happens in the protocol now.",
+      "createdAt": "2021-04-14T12:57:41.244000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, I hate it",
+      "createdAt": "2021-04-14T12:57:47.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is what you get for trying to make consensus objects not RLP in the first place 😛",
+      "createdAt": "2021-04-14T12:58:27.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Which is part of why I think it is very clear at what stage something should be RLP encoded.",
+      "createdAt": "2021-04-14T12:58:28.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You should mentally prepare, it is *going* to happen.  🙂",
+      "createdAt": "2021-04-14T12:58:42.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I know, and of course I'm joking",
+      "createdAt": "2021-04-14T12:58:56.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The consensus client (ETH2) doesn't have a dependency on RLP (only SSZ), and probably never will.",
+      "createdAt": "2021-04-14T12:59:01.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But you should know that we didn't have any issues with RLP up until the point where the second generation of ethereum enthusiasts starting digging in and didn't get it",
+      "createdAt": "2021-04-14T13:00:06.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The idea behind RLP is that all complex values are lists, and simple leaf data is byte array",
+      "createdAt": "2021-04-14T13:00:43.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If you start messing with it too much, odd things will happen",
+      "createdAt": "2021-04-14T13:00:55.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I also think RLP has its downsides, but the original idea behind it was kind of solid",
+      "createdAt": "2021-04-14T13:01:18.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Anyway, what should I write in the spec now?",
+      "createdAt": "2021-04-14T13:01:47.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Things would have been less murky if I got my way and 2930 was SSZ.  😉",
+      "createdAt": "2021-04-14T13:01:51.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, I'm not sure why we didn't go with SSZ",
+      "createdAt": "2021-04-14T13:02:09.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ultimately, I'm a huge fan of ownership and you are the owner of that particular specification.  If you decide to ignore this particular feedback I won't hold it against you in any way and will support you continuing to own the networking spec.  I *do* disagree with the current wording because I fear it will lead to more confusion in the future similar to the confusion we have seen in the past, but I may be wrong and as not-the-owner and also not-volunteering-to-become-owner, my position is merely advisory and should not be given undue weight.",
+      "createdAt": "2021-04-14T13:03:18.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If it were me, I would just say that it is a byte array, not an RLP byte array.",
+      "createdAt": "2021-04-14T13:03:45.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What should be in the formula?",
+      "createdAt": "2021-04-14T13:04:01.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I promise that I will write a meta-spec about the RLP notation later",
+      "createdAt": "2021-04-14T13:04:15.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We're really missing that now",
+      "createdAt": "2021-04-14T13:04:35.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I *think* I would just put:\n```\ntyped-receipt = tx-type || receipt-data\n```",
+      "createdAt": "2021-04-14T13:05:20.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It's good you reminded me that this model of thinking where it's implicit whether something is 'already RLP' is not universally understood",
+      "createdAt": "2021-04-14T13:05:25.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Since you have already defined `||` to mean \"byte concatenation\" in the RLPx spec.",
+      "createdAt": "2021-04-14T13:05:33.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Yeah, we use it in all specs",
+      "createdAt": "2021-04-14T13:05:46.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "In all of the code I have written, `rlp_encode` just returns a byte array that is indistinguishable from any other byte array.  When `rlp_encode(...)` encounters any byte array during its recursive encoding, it length prefixes it as part of the encoding process.  Which is why `rlp_encode([rlp_encode(bytes)])` does something different than it sounds like it would in Geth.",
+      "createdAt": "2021-04-14T13:06:24.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, this is true for all implementations, I think",
+      "createdAt": "2021-04-14T13:06:54.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(though I still may be misundestanding exactly how Geth is identifying \"already length prefixed\" byte arrays)",
+      "createdAt": "2021-04-14T13:07:28.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we don't",
+      "createdAt": "2021-04-14T13:07:40.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I meant something else",
+      "createdAt": "2021-04-14T13:07:44.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let's say that, in some part of geth we have a list of transactions `txs`",
+      "createdAt": "2021-04-14T13:08:11.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if you `rlp.EncodeToBytes(txs)` it gives `[]byte`",
+      "createdAt": "2021-04-14T13:08:32.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "during this encoding process, for each transaction in `txs`, the method `tx.EncodeRLP` will be invoked",
+      "createdAt": "2021-04-14T13:08:56.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this is done by the RLP encoder, and it obviously does know what's encoded and what's not encoded",
+      "createdAt": "2021-04-14T13:10:00.367000+00:00",
+      "attachments": []
+    }
+  ]
+}

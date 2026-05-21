@@ -1,0 +1,742 @@
+{
+  "schemaVersion": 1,
+  "channel": "testnets",
+  "date": "2020-05-01",
+  "messageCount": 90,
+  "sourceHash": "6074d37875a8c0ff9e889c2aa7aba2a9a178aad39c4861f9ac43c9724ca6fcac",
+  "searchText": "Teku's networking has mostly been updated to v0.11.1 standard (few loose ends to deal with but enough to pull blocks). It worked with both the Topaz and Schlesi testnet. 🎉 Sadly on both testnets it considered block 64 invalid. 😦 I smell an epoch processing bug (apparently not exactly the same as the one Prysm had). Oh no 😦 , do you have an idea of what the bug is ? Interestingly though, when trying to run the transition with zcli for Schlesi it fails with \"panic: empty committee\" reading in even the original genesis state. lcli and teku both are fine with the genesis and lcli proceses the block that teku rejects fine. Beyond that, I'm just starting to dig into what the difference might be. I think zcli does some pre-state verification, which is why it fails. As far as i know the other clients don't do that do you have the block + pre-state for where it fails ? i could help debug on prysm's side I do, let me find somewhere to make it available. https://github.com/ajsutton/eth2-states/tree/master/schlesi-64-invalid has Teku's pre state and the block we were trying to update (pre state should have matched what everyone else had) great, thanks if you could put teku's post-state it would be helpful. I could diff it too We don't yet capture the state when we reject the block, but I'm about to change that. no prob, sounds good <@!476250636548308992> Just to confirm, was the epoch processing different between Prysm and Lighthouse at the first or second epoch? ie did lighthouse reject block 32 or 64? It rejected it in the second epoch 64 🙂 Good old 64 Psa! If you have a consensus bug, this almost certainly means a hole in our testing!! Plz report to spec repo when you find it :) Good, I had the first epoch in mind and was worried we had two bugs. 🙂 Slot 64 is brutal. 64 is where all the good stuff happens lol Can help by getting a post state too, but sounds like <@476250636548308992> has you covered Thanks. I suspect lcli's output is the state I should have. So once I finish brutally hacking in some post state capture I should be able to see the diff and go from there. https://github.com/ajsutton/eth2-states/tree/master/schlesi-64-invalid now has the resulting state from both teku and lcli. Looks like four validators have differing balances, which isn't overly surprising. Ah yes, slot 64 balances Thats prysm's post state if its helpful ^ interesting, looks like another rewards bug then That matches lcli so that helps confirm Teku is to blame. 🙂 schlesi had only 4 validators at chainstart > That matches lcli so that helps confirm Teku is to blame. 🙂 <@340345049063882753> you never know! Total in registry? Thats actually pretty cool Yeap I think we all knew from the very start of this adventure... 🙂 > I think we all knew from the very start of this adventure... 🙂 <@340345049063882753> I believe in you Teku! 🦾 It just feels wrong tracking down interop bugs like this without a view out over a beautiful Canadian lake... Can lcli process slots without a block? No, it doesn't support that at the moment I could add it in pretty quick if it would be helpful You can also pull SSZ states from the HTTP API via curl It reduces the search space a bit but I'm reasonably confident it will be our epoch processing not the block processing so probably not all that useful. cool, let me check it out now! testing it now: https://github.com/sigp/lighthouse/pull/1095 I've passed the states on to the fuzzing team too 🙂 Here's that state skipped to slot 64 `lcli skip-slots ~/Downloads/pre.ssz 1` (skipped one slot, i assume that's what you're after) Awesome, thanks. Excellent, that confirms the block made no difference. Looks like we're awarding exactly half the reward we should have. Bingo found it. We're doing an `=` instead of a `+=` as part of `get_attestation_deltas`. Hard to spot in the java translation's verbosity. And we're off: ```2020-05-01 15:03:54.405+10:00 | TimeTickChannel-0 | INFO | teku-event-log | Slot Event *** Current slot: 27319, Head block: 65, Justified epoch: 0, Finalized epoch: 0, Finalized root: 0xc9cb..db82 2020-05-01 15:04:00.372+10:00 | TimeTickChannel-0 | INFO | teku-event-log | Sync Event *** Current slot: 27320, Head block: 109, Connected peers: 2 2020-05-01 15:04:13.355+10:00 | TimeTickChannel-0 | INFO | teku-event-log | Sync Event *** Current slot: 27321, Head block: 160, Connected peers: 2``` Awesome 🎉 I'm quite surprised the reference tests didn't catch that. > Bingo found it. We're doing an `=` instead of a `+=` as part of `get_attestation_deltas`. Hard to spot in the java translation's verbosity. <@!340345049063882753> The spec had a very similar problem too. `=` instead of `+=`. oh, so maybe we implemented it very precisely and didn't spot the fix then. https://github.com/ethereum/eth2.0-specs/pull/1680 Looks like it Yep, exactly that line. Agreed. Not happy with rewards ref tests. We have a refactor in the queue with much more granular testing along with modifed granular vectors Ill actually post tomorrow the expected new format for test vectors to make sure its not imposing any unexpected negative requirements on how clients implement the rewards functions Good work everyone! Glad we are onto some of the fun stuff :) And agreed <@340345049063882753>, we'll need to find a good lake eventually to do some real debugging I *think* we're there: `2020-05-01 16:19:28.373+10:00 | TimeTickChannel-0 | INFO | teku-event-log | Slot Event *** Current slot: 27697, Head block: 27318, Justified epoch: 851, Finalized epoch: 850, Finalized root: 0x7175..b66b` Though it's been sitting without blocks for suspiciously long. I can't remember where the chain explorer was, but suspect we might not have made the leap from syncing finalized stuff to hot blocks. I know we have some tickets around that. Yep, looks like we failed to make that leap. Not overly surprising given the networking is still in the process of being updated. <@!340345049063882753> is that schlesi? here's the explorer: https://schlesi.beaconcha.in/ <@!340345049063882753> For zcli, please run `zcli version` to see exactly what version and config you are on My teku node still won't peer 😦 Its 1pm utc. Was that beer time? <@557201004060213248> i didn't think you were allowed to work on labor day > So what about 1:00 pm UTC tomorrow? No Agenda, just chat about whatever is interesting. Is this still on? <@!557201004060213248> nobody responded and I was distracted by the Teku progress lol 🙂 there were so many beer emojis last night! ha teku peering? We can do it iright now 🙂 Let me prepare a host https://us04web.zoom.us/j/79207719964?pwd=UUZFV25aZkR4SkZHeUh2OUJtR3VYdz09 I'll be hanging out here for ~40 min 🙂 > I *think* we're there: <@!340345049063882753> is this code in any branch yet? I tried master but it didn't seem to connect to neither local nor bootstrap nodes... <@!557201004060213248> - you may need to pull in this changeset: https://github.com/PegaSysEng/teku/pull/1701 . Without it, we can't connect to prysm nodes Otherwise, I think we should be able to sync from master with `--network=schlesi` We don't yet have snappy compression over gossip, so we won't get propagated blocks, but I think we should be able to sync historical blocks Yeah, when I test from ajsutton/skip-checking-genesis I'm pulling down blocks Yep Meredith is right. All my other changes I think had been merged but that one was waiting review. And I’m reasonably confident the reason we didn’t quite make it to head is the lack of gossip (because we aren’t doing snappy there yet). We basically didn’t know about hot blocks (also no ping rpc support yet). There is a —network schlesi Option now to make connecting easier. I’ve been using —eth1-enabled=false as well to save needing an eth1 node since I’m not yet running validators.",
+  "excerpts": [
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Teku's networking has mostly been updated to v0.11.1 standard (few loose ends to deal with but enough to pull blocks). It worked with both the Topaz and Schlesi testnet.  🎉",
+      "createdAt": "2020-05-01T03:23:24.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sadly on both testnets it considered block 64 invalid. 😦 I smell an epoch processing bug (apparently not exactly the same as the one Prysm had).",
+      "createdAt": "2020-05-01T03:24:17.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh no 😦 , do you have an idea of what the bug is ?",
+      "createdAt": "2020-05-01T03:25:00.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Interestingly though, when trying to run the transition with zcli for Schlesi it fails with \"panic: empty committee\" reading in even the original genesis state.",
+      "createdAt": "2020-05-01T03:25:09.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "lcli and teku both are fine with the genesis and lcli proceses the block that teku rejects fine.",
+      "createdAt": "2020-05-01T03:25:28.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Beyond that, I'm just starting to dig into what the difference might be.",
+      "createdAt": "2020-05-01T03:25:49.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think zcli does some pre-state verification, which is why it fails. As far as i know the other clients don't do that",
+      "createdAt": "2020-05-01T03:26:22.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "do you have the block + pre-state for where it fails ? i could help debug on prysm's side",
+      "createdAt": "2020-05-01T03:26:54.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I do, let me find somewhere to make it available.",
+      "createdAt": "2020-05-01T03:27:08.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ajsutton/eth2-states/tree/master/schlesi-64-invalid has Teku's pre state and the block we were trying to update (pre state should have matched what everyone else had)",
+      "createdAt": "2020-05-01T03:30:16.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "great, thanks",
+      "createdAt": "2020-05-01T03:30:33.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "if you could put teku's post-state it would be helpful. I could diff it too",
+      "createdAt": "2020-05-01T03:30:52.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "We don't yet capture the state when we reject the block, but I'm about to change that.",
+      "createdAt": "2020-05-01T03:31:31.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "no prob, sounds good",
+      "createdAt": "2020-05-01T03:33:57.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!476250636548308992> Just to confirm, was the epoch processing different between Prysm and Lighthouse at the first or second epoch? ie did lighthouse reject block 32 or 64?",
+      "createdAt": "2020-05-01T03:37:02.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "It rejected it in the second epoch",
+      "createdAt": "2020-05-01T03:37:18.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "64 🙂",
+      "createdAt": "2020-05-01T03:37:19.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Good old 64",
+      "createdAt": "2020-05-01T03:37:25.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Psa! If you have a consensus bug, this almost certainly means a hole in our testing!! Plz report to spec repo when you find it :)",
+      "createdAt": "2020-05-01T03:37:44.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Good, I had the first epoch in mind and was worried we had two bugs. 🙂",
+      "createdAt": "2020-05-01T03:37:46.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Slot 64 is brutal.",
+      "createdAt": "2020-05-01T03:38:05.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "64 is where all the good stuff happens lol",
+      "createdAt": "2020-05-01T03:38:14.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can help by getting a post state too, but sounds like <@476250636548308992> has you covered",
+      "createdAt": "2020-05-01T03:38:27.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks.  I suspect lcli's output is the state I should have.  So once I finish brutally hacking in some post state capture I should be able to see the diff and go from there.",
+      "createdAt": "2020-05-01T03:39:23.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ajsutton/eth2-states/tree/master/schlesi-64-invalid now has the resulting state from both teku and lcli.  Looks like four validators have differing balances, which isn't overly surprising.",
+      "createdAt": "2020-05-01T03:45:35.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah yes, slot 64 balances",
+      "createdAt": "2020-05-01T03:45:54.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-05-01T03:46:21.328000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "post-state.tar.gz",
+          "content": "91bd8282588c2b477b9aa0f8d7dafbdea0f5a2da7af93f6b2c8a19329071f995"
+        }
+      ]
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thats prysm's post state if its helpful ^",
+      "createdAt": "2020-05-01T03:46:38.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "interesting, looks like another rewards bug then",
+      "createdAt": "2020-05-01T03:47:13.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "That matches lcli so that helps confirm Teku is to blame. 🙂",
+      "createdAt": "2020-05-01T03:47:20.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "schlesi had only 4 validators at chainstart",
+      "createdAt": "2020-05-01T03:47:25.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "> That matches lcli so that helps confirm Teku is to blame. 🙂\n<@340345049063882753>  you never know!",
+      "createdAt": "2020-05-01T03:47:36.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Total in registry? Thats actually pretty cool",
+      "createdAt": "2020-05-01T03:47:45.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeap",
+      "createdAt": "2020-05-01T03:47:51.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think we all knew from the very start of this adventure... 🙂",
+      "createdAt": "2020-05-01T03:47:52.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "> I think we all knew from the very start of this adventure... 🙂\n<@340345049063882753>  I believe in you Teku! 🦾",
+      "createdAt": "2020-05-01T03:49:15.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "It just feels wrong tracking down interop bugs like this without a view out over a beautiful Canadian lake...",
+      "createdAt": "2020-05-01T03:50:56.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can lcli process slots without a block?",
+      "createdAt": "2020-05-01T03:52:12.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "No, it doesn't support that at the moment",
+      "createdAt": "2020-05-01T03:52:39.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "I could add it in pretty quick if it would be helpful",
+      "createdAt": "2020-05-01T03:52:47.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "You can also pull SSZ states from the HTTP API via curl",
+      "createdAt": "2020-05-01T03:53:10.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "It reduces the search space a bit but I'm reasonably confident it will be our epoch processing not the block processing so probably not all that useful.",
+      "createdAt": "2020-05-01T03:53:20.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "cool, let me check it out now!",
+      "createdAt": "2020-05-01T03:53:32.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "testing it now:\n\nhttps://github.com/sigp/lighthouse/pull/1095",
+      "createdAt": "2020-05-01T04:02:50.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "I've passed the states on to the fuzzing team too 🙂",
+      "createdAt": "2020-05-01T04:03:56.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Here's that state skipped to slot 64",
+      "createdAt": "2020-05-01T04:08:04.292000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "output.ssz",
+          "content": "d48a6f24657081a4f7b8fa350d583fcd872196fe38b222376b5ece01e2f2000b"
+        }
+      ]
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "`lcli skip-slots ~/Downloads/pre.ssz 1` (skipped one slot, i assume that's what you're after)",
+      "createdAt": "2020-05-01T04:08:33.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Awesome, thanks.",
+      "createdAt": "2020-05-01T04:08:45.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Excellent, that confirms the block made no difference.",
+      "createdAt": "2020-05-01T04:10:26.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Looks like we're awarding exactly half the reward we should have.",
+      "createdAt": "2020-05-01T04:42:47.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Bingo found it.  We're doing an `=` instead of a `+=` as part of `get_attestation_deltas`.  Hard to spot in the java translation's verbosity.",
+      "createdAt": "2020-05-01T04:50:19.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "And we're off:",
+      "createdAt": "2020-05-01T05:04:30.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "```2020-05-01 15:03:54.405+10:00 | TimeTickChannel-0 | INFO  | teku-event-log | Slot Event *** Current slot: 27319, Head block: 65, Justified epoch: 0, Finalized epoch: 0, Finalized root: 0xc9cb..db82\n2020-05-01 15:04:00.372+10:00 | TimeTickChannel-0 | INFO  | teku-event-log | Sync Event *** Current slot: 27320, Head block: 109, Connected peers: 2\n2020-05-01 15:04:13.355+10:00 | TimeTickChannel-0 | INFO  | teku-event-log | Sync Event *** Current slot: 27321, Head block: 160, Connected peers: 2```",
+      "createdAt": "2020-05-01T05:04:40.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "Awesome 🎉",
+      "createdAt": "2020-05-01T05:05:28.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm quite surprised the reference tests didn't catch that.",
+      "createdAt": "2020-05-01T05:05:58.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "> Bingo found it.  We're doing an `=` instead of a `+=` as part of `get_attestation_deltas`.  Hard to spot in the java translation's verbosity.\n<@!340345049063882753> The spec had a very similar problem too. `=` instead of `+=`.",
+      "createdAt": "2020-05-01T05:06:05.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh, so maybe we implemented it very precisely and didn't spot the fix then.",
+      "createdAt": "2020-05-01T05:06:22.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ethereum/eth2.0-specs/pull/1680",
+      "createdAt": "2020-05-01T05:06:57.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Looks like it",
+      "createdAt": "2020-05-01T05:06:59.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep, exactly that line.",
+      "createdAt": "2020-05-01T05:08:56.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Agreed. Not happy with rewards ref tests. We have a refactor in the queue with much more granular testing along with modifed granular vectors\n\nIll actually post tomorrow the expected new format for test vectors to make sure its not imposing any unexpected negative requirements on how clients implement the rewards functions",
+      "createdAt": "2020-05-01T05:46:01.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Good work everyone! Glad we are onto some of the fun stuff :)",
+      "createdAt": "2020-05-01T05:46:23.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "And agreed <@340345049063882753>, we'll need to find a good lake eventually  to do some real debugging",
+      "createdAt": "2020-05-01T05:49:10.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I *think* we're there:",
+      "createdAt": "2020-05-01T06:20:40.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "`2020-05-01 16:19:28.373+10:00 | TimeTickChannel-0 | INFO  | teku-event-log | Slot Event *** Current slot: 27697, Head block: 27318, Justified epoch: 851, Finalized epoch: 850, Finalized root: 0x7175..b66b`",
+      "createdAt": "2020-05-01T06:20:47.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Though it's been sitting without blocks for suspiciously long.  I can't remember where the chain explorer was, but suspect we might not have made the leap from syncing finalized stuff to hot blocks.",
+      "createdAt": "2020-05-01T06:21:43.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I know we have some tickets around that.",
+      "createdAt": "2020-05-01T06:21:53.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep, looks like we failed to make that leap.  Not overly surprising given the networking is still in the process of being updated.",
+      "createdAt": "2020-05-01T06:25:13.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!340345049063882753> is that schlesi? here's the explorer: https://schlesi.beaconcha.in/",
+      "createdAt": "2020-05-01T10:29:40.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!340345049063882753> For zcli, please run `zcli version` to see exactly what version and config you are on",
+      "createdAt": "2020-05-01T10:53:26.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "My teku node still won't peer 😦",
+      "createdAt": "2020-05-01T12:32:19.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Its 1pm utc. Was that beer time?",
+      "createdAt": "2020-05-01T13:08:36.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@557201004060213248> i didn't think you were allowed to work on labor day",
+      "createdAt": "2020-05-01T14:22:04.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Testing",
+      "parent": "",
+      "content": "> So what about 1:00 pm UTC tomorrow? No Agenda, just chat about whatever is interesting.\nIs this still on?",
+      "createdAt": "2020-05-01T14:33:56.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!557201004060213248>",
+      "createdAt": "2020-05-01T14:34:11.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "nobody responded and I was distracted by the Teku progress lol 🙂",
+      "createdAt": "2020-05-01T14:47:35.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "there were so many beer emojis last night!",
+      "createdAt": "2020-05-01T14:47:55.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "ha",
+      "createdAt": "2020-05-01T14:47:58.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "teku peering?",
+      "createdAt": "2020-05-01T14:48:02.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "We can do it iright now 🙂",
+      "createdAt": "2020-05-01T14:48:03.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let me prepare a host",
+      "createdAt": "2020-05-01T14:48:11.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://us04web.zoom.us/j/79207719964?pwd=UUZFV25aZkR4SkZHeUh2OUJtR3VYdz09",
+      "createdAt": "2020-05-01T14:50:18.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll be hanging out here for ~40 min 🙂",
+      "createdAt": "2020-05-01T14:50:36.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "donschoe",
+      "category": "Testing",
+      "parent": "",
+      "content": "> I *think* we're there:\n<@!340345049063882753> is this code in any branch yet? I tried master but it didn't seem to connect to neither local nor bootstrap nodes...",
+      "createdAt": "2020-05-01T15:17:53.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mbaxter5749",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!557201004060213248> - you may need to pull in this changeset: https://github.com/PegaSysEng/teku/pull/1701 .  Without it, we can't connect to prysm nodes",
+      "createdAt": "2020-05-01T15:53:49.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mbaxter5749",
+      "category": "Testing",
+      "parent": "",
+      "content": "Otherwise, I think we should be able to sync from master with `--network=schlesi`",
+      "createdAt": "2020-05-01T15:55:05.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mbaxter5749",
+      "category": "Testing",
+      "parent": "",
+      "content": "We don't yet have snappy compression over gossip, so we won't get propagated blocks, but I think we should be able to sync historical blocks",
+      "createdAt": "2020-05-01T15:56:48.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mbaxter5749",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah, when I test from ajsutton/skip-checking-genesis I'm pulling down blocks",
+      "createdAt": "2020-05-01T15:59:02.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep Meredith is right. All my other changes I think had been merged but that one was waiting review. And I’m reasonably confident the reason we didn’t quite make it to head is the lack of gossip (because we aren’t doing snappy there yet). We basically didn’t know about hot blocks (also no ping rpc support yet).",
+      "createdAt": "2020-05-01T21:10:54.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "There is a —network schlesi Option now to make connecting easier. I’ve been using —eth1-enabled=false as well to save needing an eth1 node since I’m not yet running validators.",
+      "createdAt": "2020-05-01T21:12:04.295000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2021-10-03",
+  "messageCount": 146,
+  "sourceHash": "b78943b8e91726059d7d29ec819ceb54de270f728cc97f08079a6b56f088f549",
+  "searchText": "<dannyryan> The CL specs should take a full exectuion payload header as an input and get all the fields from that for the initialize state function. The initial gas limit shouldnt be defined as a param on our end I'll make a PR but we can work with what we have this week <vdWijden> All right I've worked out the issues with the clique implementation in geth. So we can start testing the transition now. I wrote a quick document how to do that here: https://notes.ethereum.org/_UH57VUPRrC-re3ubtmo2w You just start up geth and let it mine for a while (10 blocks) and then start the transition. <vdWijden> Oh and you need to update geth for that <vdWijden> And the genesis (I had the dao fork enabled which overwrote extradata for 10 blocks thus is not compatible with clique) For the signing key, I used the one we use for testing <dannyryan> Clique requires >32byte extradata which is going to give the CL client issues. I'll put a small mod to the cl spec together to account for it <n0ble> what is it used for? <dannyryan> Signatures <vdWijden> Do the cl clients need to verify/consume headers before the transition? Otherwise that should not be a problem right? <dannyryan> Its configurable at eth1 genesis <dannyryan> No. Will be fine if the EL client uses blank extradata after (re @vdWijden: Do the cl clients need to verify/consume headers before the transition? Otherwise that should not be a problem right?) <dannyryan> Or <=32 <dannyryan> But its an insufficiency in the CL spec as of now <dannyryan> Should be configurable for the net at C layer to accommodate EL without altering logic <n0ble> yeah, just wanted to say that (re @dannyryan: Should be configurable for the net at C layet) <n0ble> it should be an easy workaround <dannyryan> @protolambda is against because of the dynamic types it brings into state <dannyryan> Yeah, workaround is no extradata after transition <dannyryan> As in compile-time dynamic (re @dannyryan: @protolambda is against because of the dynamic types it brings into state) <n0ble> i would say that configurable extra data len is a workaround too 😀 Philosophically speaking extradata in the exec block seems redundant; there's already beacon block graffiti <dannyryan> Hmmm im not sure. Many eth1 nets use it <dannyryan> It is redundant but nice to not touch <dannyryan> EL can signal EL things --client type, etx <n0ble> right, but it's useful in incident investigations to get the version of the EL client (re @amphora_interop_bot: <vbuterin>Philosophically speaking extradata in the exec block seems redundant; there's already beacon block graffiti) <dannyryan> CL can signal CL things hmm, that still \"feels wrong\", though I guess you could argue that the right time to fix things that feel wrong is the cleanup fork and not the merge itself <dannyryan> I think this being configurable for the network is the most natural way. Truncating at merge is the workaround imo😅 (re @n0ble: i would say that configurable extra data len is a workaround too 😀) <dannyryan> Eh, a network could have a valid reason to have big extradata and its weird to kill that just because of merge (re @amphora_interop_bot: <vbuterin>hmm, that still \"feels wrong\", though I guess you could argue that the right time to fix things that feel wrong is the cleanup fork and not the merge itself) So, make the post-merge exec ED be `List[byte, n]` where `n` is configurable? <dannyryan> Thats my thought, yes Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place <dannyryan> And it maps to same value as pre-merge EL chain <n0ble> the intention is to keep this field mid term at least. otherwise we could deprecate it at the merge (re @amphora_interop_bot: <vbuterin>Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place) Does proto have any objections to this? <dannyryan> Yes Ah, the dynamic nature of it <dannyryan> Makes compile time a bit more difficult between nets <dannyryan> Yes <dannyryan> For some clients aha So `Vector[byte, n]` would not fix it The other option is to hardcode `Vector[byte, 1024]` <dannyryan> Still, would need to make graffiti bigger to accomodate backwards compatible large ED fields (re @amphora_interop_bot: <vbuterin>Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place) <dannyryan> Right, we chatted about that... <dannyryan> Would require change to EL logic or some additional consensus validation that its not actually larger than EL can handle why would it require change to EL logic? Just set the cap to be the same as the highest cap used by any major eth alt-chain <dannyryan> Because cap is 32 on mainnet. So you need to prevent more than 32 being passed to EL. Or define a truncation scheme <dannyryan> Or change EL to allow new cap aha I see <n0ble> we could have a naive scheme with static extra data on cl appended by zeroes and truncated by the engine api. not perfect esp if there is extra data of arbitrary large length required by some network configs <n0ble> though these nets are not mainnet <n0ble> this is to have it static on cl side and avoid any changes on el (re @n0ble: we could have a naive scheme with static extra data on cl appended by zeroes and truncated by the engine api. not perfect esp if there is extra data of arbitrary large length required by some network configs) <dannyryan> Least invasive is probably Two values * max-ed-size for compile time * el-max-ed-size instantoated per net El-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el <dannyryan> I don't like it... but it satisfies our requirements <sigpaul> Seems pretty reasonable to me. I assume that the max will be pretty small since other networks are sending it over the wire. Dynamic size types would probably require a re-compile for Lighthouse. We can include multiple values but it comes at costs. We kind of went all-in on fixed-length lists. It’s makes for much cleaner code but now the downside is evident. (re @dannyryan: Least invasive is probably Two values * max-ed-size for compile time * el-max-ed-size instantoated per net El-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el) <sigpaul> Does the CL need to check it before sending it to the EL? It seems like the EL already does the verification of the payload, so it might as well check that too. Then CL only cares about max value and it means less EL concerns bubble up to CL. <n0ble> > max-ed-size for compile time what is the compile time? <sigpaul> In Lighthouse we define the maximum sizes for SSZ lists at compile time. So the max-ed-size would be a SSZ list size. The el-max size would be <= to that and can just be a runtime-configurable variable that’s checked during state transition or something (if we decide the CL cares about that value) (re @n0ble: > max-ed-size for compile time what is the compile time?) <n0ble> I see, thanks for clarification. as for me, It seems too complicated for this little field 😆 But I should wrap my head around the use case where extraData >= 32 bytes <mhswende> Sorry, I might be missing some context (joining you guys around dinnertime): why not nuke extradata for clique? I mean, if clique transitions to eth2, then what's the point of keeping clique sealing logic around? What am I missing? <ajsutton> Yeah that was my thought as well. The graffiti in clique is fixed 32 bytes (followed by the clique signers data to make the full extra data) so you’d just truncate it or depending on the implementation stop appending the clique data. (re @mhswende: Sorry, I might be missing some context (joining you guys around dinnertime): why not nuke extradata for clique? I mean, if clique transitions to eth2, then what's the point of keeping clique sealing logic around? What am I missing?) <dannyryan> The idea is that there are a number of chains that instantiate a >32 byte extradata max for various reasons, potentially unknown reasons. Such chains might want to use beacon chain consensus and still use whatever they wanted on extradata So just trying to make a backwards compatible method <ajsutton> The only cases for extending extra data that I know of (and that besu supports) is clique and IBFT variants. All of which are using the same “trick” of stuffing extra signer information into the extra data field. Do we know of any other cases for long extra data? <dannyryan> I know polygon uses it too — not that they will shift to our PoS algorithm <dannyryan> @vdWijden @ralxz https://notes.ethereum.org/7KDlyRcDQ1KoXfUZpuWVow please error codes and notes hre for things you have found useful. We’ll then ahve a convo in a few days to try to tighten things up <ajsutton> From a el client users point of view I think they’d expect them to stop adding clique signers to the extra data anyway. It would be weird to keep appending what is effectively meaningless garbage post merge. But in terms of interop whatever is easiest to implement probably makes sense. <dannyryan> I *do* think this is pretty reasonable MAX value to give the shape of the SSZ tree (compile time, almost never changed) Network config value that can be up to the MAX value above (re @dannyryan: Least invasive is probably Two values * max-ed-size for compile time * el-max-ed-size instantoated per net El-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el) <dannyryan> in terms of interop, we’ll just force <32 after clique merge (re @ajsutton: From a el client users point of view I think they’d expect them to stop adding clique signers to the extra data anyway. It would be weird to keep appending what is effectively meaningless garbage post merge. But in terms of interop whatever is easiest to implement probably makes sense.) <dannyryan> just thinking about how to specify in a reasonably generic way <n0ble> what would this max be in terms of bytes? (re @dannyryan: I *do* think this is pretty reasonable MAX value to give the shape of the SSZ tree (compile time, almost never changed) Network config value that can be up to the MAX value above) <dannyryan> 1024 Or whatever is the max useful we see on any eth1 net <dannyryan> Its like validator max. Thats huge, like 1Billion. But just gives shape to the tree <timbeiko> For transactions, can we create have a set of pre-signed ones to send that aren’t just ether transfers? <vdWijden> this^ <vdWijden> Forwarded from vdWijden: Btw geth supports sending transactions, might be good for all clients that reached M2 with geth to test creating some transactions. Documentation for that (and how to reach M3 with geth) is here: https://notes.ethereum.org/_UH57VUPRrC-re3ubtmo2w It's a different genesis, so you need to update that <dannyryan> @sigpaul I think I figured out what you meant with some of the beacon-state merge genesis problems and why you went from Phase0-Altair-Merge before transition https://github.com/ethereum/consensus-specs/pull/2640 Something like this should patch it <n0ble> I think we should have deposit contract and deposit transactions to test two things at the same time: tx processing + eth1 data voting after the merge <kristofgazso> guys so what gaslimit are you using? originally it was written 0x989680 but we some teams have been using 0x1C9C380 <protolambda> Testnet creation talk links: https://github.com/protolambda/eth2-testnet-genesis https://github.com/protolambda/eth2-val-tools https://github.com/eth2-clients/eth2-networks/ https://github.com/ethereum/consensus-specs/blob/dev/specs/merge/beacon-chain.md#beaconstate https://github.com/sigp/lighthouse-merge-f2f https://hackmd.io/@n0ble/merge-interop-spec https://ethereum.github.io/beacon-APIs/#/Node/getNetworkIde",
+  "excerpts": [
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> The CL specs should take a full exectuion payload header as an input and get all the fields  from that for the initialize state function. The initial gas limit shouldnt be defined as a param on our end\nI'll make a PR but we can work with what we have this week",
+      "createdAt": "2021-10-03T03:20:24.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> All right I've worked out the issues with the clique implementation in geth. So we can start testing the transition now. I wrote a quick document how to do that here: https://notes.ethereum.org/_UH57VUPRrC-re3ubtmo2w\nYou just start up geth and let it mine for a while (10 blocks) and then start the transition.",
+      "createdAt": "2021-10-03T05:08:22.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> Oh and you need to update geth for that",
+      "createdAt": "2021-10-03T05:10:55.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> And the genesis (I had the dao fork enabled which overwrote extradata for 10 blocks thus is not compatible with clique) For the signing key, I used the one we use for testing",
+      "createdAt": "2021-10-03T05:12:15.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Clique requires >32byte extradata which is going to give the CL client issues. I'll put a small mod to the cl spec together to account for it",
+      "createdAt": "2021-10-03T05:13:23.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> what is it used for?",
+      "createdAt": "2021-10-03T05:14:33.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Signatures",
+      "createdAt": "2021-10-03T05:14:40.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> Do the cl clients need to verify/consume headers before the transition? Otherwise that should not be a problem right?",
+      "createdAt": "2021-10-03T05:14:56.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Its configurable at eth1 genesis",
+      "createdAt": "2021-10-03T05:15:06.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> No. Will be fine if the EL client uses blank extradata after (re @vdWijden: Do the cl clients need to verify/consume headers before the transition? Otherwise that should not be a problem right?)",
+      "createdAt": "2021-10-03T05:15:25.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Or <=32",
+      "createdAt": "2021-10-03T05:15:29.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> But its an insufficiency in the CL spec as of now",
+      "createdAt": "2021-10-03T05:15:46.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Should be configurable for the net at C layer to accommodate EL without altering logic",
+      "createdAt": "2021-10-03T05:16:02.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> yeah, just wanted to say that (re @dannyryan: Should be configurable for the net at C layet)",
+      "createdAt": "2021-10-03T05:16:17.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> it should be an easy workaround",
+      "createdAt": "2021-10-03T05:16:30.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> @protolambda is against because of the dynamic types it brings into state",
+      "createdAt": "2021-10-03T05:16:37.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Yeah, workaround is no extradata after transition",
+      "createdAt": "2021-10-03T05:16:56.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> As in compile-time dynamic (re @dannyryan: @protolambda is against because of the dynamic types it brings into state)",
+      "createdAt": "2021-10-03T05:17:14.112000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> i would say that configurable extra data len is a workaround too 😀",
+      "createdAt": "2021-10-03T05:17:43.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "Philosophically speaking extradata in the exec block seems redundant; there's already beacon block graffiti",
+      "createdAt": "2021-10-03T05:18:01.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Hmmm im not sure. Many eth1 nets use it",
+      "createdAt": "2021-10-03T05:18:11.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> It is redundant but nice to not touch",
+      "createdAt": "2021-10-03T05:18:29.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> EL can signal EL things --client type, etx",
+      "createdAt": "2021-10-03T05:18:41.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> right, but it's useful in incident investigations to get the version of the EL client (re @amphora_interop_bot: <vbuterin>Philosophically speaking extradata in the exec block seems redundant; there's already beacon block graffiti)",
+      "createdAt": "2021-10-03T05:18:44.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> CL can signal CL things",
+      "createdAt": "2021-10-03T05:18:50.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm, that still \"feels wrong\", though I guess you could argue that the right time to fix things that feel wrong is the cleanup fork and not the merge itself",
+      "createdAt": "2021-10-03T05:19:15.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I think this being configurable for the network is the most natural way. Truncating at merge is the workaround imo😅 (re @n0ble: i would say that configurable extra data len is a workaround too 😀)",
+      "createdAt": "2021-10-03T05:19:34.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Eh, a network could have a valid reason to have big extradata and its weird to kill that just because of merge (re @amphora_interop_bot: <vbuterin>hmm, that still \"feels wrong\", though I guess you could argue that the right time to fix things that feel wrong is the cleanup fork and not the merge itself)",
+      "createdAt": "2021-10-03T05:20:10.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "So, make the post-merge exec ED be `List[byte, n]` where `n` is configurable?",
+      "createdAt": "2021-10-03T05:20:20.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Thats my thought, yes",
+      "createdAt": "2021-10-03T05:20:46.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place",
+      "createdAt": "2021-10-03T05:20:57.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> And it maps to same value as pre-merge EL chain",
+      "createdAt": "2021-10-03T05:21:01.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> the intention is to keep this field mid term at least. otherwise we could deprecate it at the merge (re @amphora_interop_bot: <vbuterin>Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place)",
+      "createdAt": "2021-10-03T05:21:06.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "Does proto have any objections to this?",
+      "createdAt": "2021-10-03T05:21:12.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Yes",
+      "createdAt": "2021-10-03T05:21:19.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, the dynamic nature of it",
+      "createdAt": "2021-10-03T05:21:27.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Makes compile time a bit more difficult between nets",
+      "createdAt": "2021-10-03T05:21:31.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Yes",
+      "createdAt": "2021-10-03T05:21:32.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> For some clients",
+      "createdAt": "2021-10-03T05:21:35.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "aha",
+      "createdAt": "2021-10-03T05:21:39.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "So `Vector[byte, n]` would not fix it",
+      "createdAt": "2021-10-03T05:21:44.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "The other option is to hardcode `Vector[byte, 1024]`",
+      "createdAt": "2021-10-03T05:21:57.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Still, would need to make graffiti bigger to accomodate backwards compatible large ED fields (re @amphora_interop_bot: <vbuterin>Right, I just mean, the cleanup fork seems like the best place to kill exec extradata and combine it together with beacon block graffiti so the graffiti is in one place)",
+      "createdAt": "2021-10-03T05:22:04.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Right, we chatted about that...",
+      "createdAt": "2021-10-03T05:22:11.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Would require change to EL logic or some additional consensus validation that its not actually larger than EL can handle",
+      "createdAt": "2021-10-03T05:22:49.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "why would it require change to EL logic? Just set the cap to be the same as the highest cap used by any major eth alt-chain",
+      "createdAt": "2021-10-03T05:28:24.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Because cap is 32 on mainnet. So you need to prevent more than 32 being passed to EL. Or define a truncation scheme",
+      "createdAt": "2021-10-03T05:29:10.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Or change EL to allow new cap",
+      "createdAt": "2021-10-03T05:29:17.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Testing",
+      "parent": "",
+      "content": "aha I see",
+      "createdAt": "2021-10-03T05:30:17.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> we could have a naive scheme with static extra data on cl appended by zeroes and truncated by the engine api. not perfect esp if there is extra data of arbitrary large length required by some network configs",
+      "createdAt": "2021-10-03T05:36:39.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> though these nets are not mainnet",
+      "createdAt": "2021-10-03T05:37:35.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> this is to have it static on cl side and avoid any changes on el (re @n0ble: we could have a naive scheme with static extra data on cl appended by zeroes and truncated by the engine api. not perfect esp if there is extra data of arbitrary large length required by some network configs)",
+      "createdAt": "2021-10-03T05:39:09.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Least invasive is probably \nTwo values \n* max-ed-size for compile time\n* el-max-ed-size instantoated per net\nEl-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el",
+      "createdAt": "2021-10-03T05:40:19.487000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I don't like it... but it satisfies our requirements",
+      "createdAt": "2021-10-03T05:40:37.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> Seems pretty reasonable to me. I assume that the max will be pretty small since other networks are sending it over the wire.\nDynamic size types would probably require a re-compile for Lighthouse. We can include multiple values but it comes at costs. We kind of went all-in on fixed-length lists. It’s makes for much cleaner code but now the downside is evident. (re @dannyryan: Least invasive is probably \nTwo values \n* max-ed-size for compile time\n* el-max-ed-size instantoated per net\nEl-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el)",
+      "createdAt": "2021-10-03T06:49:42.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> Does the CL need to check it before sending it to the EL? It seems like the EL already does the verification of the payload, so it might as well check that too. Then CL only cares about max value and it means less EL concerns bubble up to CL.",
+      "createdAt": "2021-10-03T06:51:30.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> > max-ed-size for compile time\nwhat is the compile time?",
+      "createdAt": "2021-10-03T06:52:05.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> In Lighthouse we define the maximum sizes for SSZ lists at compile time.\nSo the max-ed-size would be a SSZ list size. The el-max size would be <= to that and can just be a runtime-configurable variable that’s checked during state transition or something (if we decide the CL cares about that value) (re @n0ble: > max-ed-size for compile time\nwhat is the compile time?)",
+      "createdAt": "2021-10-03T06:54:41.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> I see, thanks for clarification. as for me, It seems too complicated for this little field 😆 But I should wrap my head around the use case where extraData >= 32 bytes",
+      "createdAt": "2021-10-03T06:56:46.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<mhswende> Sorry, I might be missing some context (joining you guys around dinnertime): why not nuke extradata for clique? I mean, if clique transitions to eth2, then what's the point of keeping clique sealing logic around? What am I missing?",
+      "createdAt": "2021-10-03T07:20:08.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ajsutton> Yeah that was my thought as well. The graffiti in clique is fixed 32 bytes (followed by the clique signers data to make the full extra data) so you’d just truncate it or depending on the implementation stop appending the clique data. (re @mhswende: Sorry, I might be missing some context (joining you guys around dinnertime): why not nuke extradata for clique? I mean, if clique transitions to eth2, then what's the point of keeping clique sealing logic around? What am I missing?)",
+      "createdAt": "2021-10-03T07:29:42.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> The idea is that there are a number of chains that instantiate a >32 byte extradata max for various reasons, potentially unknown reasons. Such chains might want to use beacon chain consensus and still use whatever they wanted on extradata\nSo just trying to make a backwards compatible method",
+      "createdAt": "2021-10-03T07:53:09.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ajsutton> The only cases for extending extra data that I know of (and that besu supports) is clique and IBFT variants. All of which are using the same “trick” of stuffing extra signer information into the extra data field. Do we know of any other cases for long extra data?",
+      "createdAt": "2021-10-03T07:55:08.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I know polygon uses it too — not that they will shift to our PoS algorithm",
+      "createdAt": "2021-10-03T07:57:39.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> @vdWijden @ralxz \nhttps://notes.ethereum.org/7KDlyRcDQ1KoXfUZpuWVow\nplease error codes and notes hre for things you have found useful. We’ll then ahve a convo in a few days to try to tighten things up",
+      "createdAt": "2021-10-03T07:59:58.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ajsutton> From a el client users point of view I think they’d expect them to stop adding clique signers to the extra data anyway. It would be weird to keep appending what is effectively meaningless garbage post merge. \nBut in terms of interop whatever is easiest to implement probably makes sense.",
+      "createdAt": "2021-10-03T08:00:42.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I *do* think this is pretty reasonable \nMAX value to give the shape of the SSZ tree (compile time, almost never changed)\nNetwork config value that can be up to the MAX value above (re @dannyryan: Least invasive is probably \nTwo values \n* max-ed-size for compile time\n* el-max-ed-size instantoated per net\nEl-max-ed-size has a validation on consensus to make sure the ed isnt overflown before passing to el)",
+      "createdAt": "2021-10-03T08:00:56.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> in terms of interop, we’ll just force <32 after clique merge (re @ajsutton: From a el client users point of view I think they’d expect them to stop adding clique signers to the extra data anyway. It would be weird to keep appending what is effectively meaningless garbage post merge. \nBut in terms of interop whatever is easiest to implement probably makes sense.)",
+      "createdAt": "2021-10-03T08:01:14.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> just thinking about how to specify in a reasonably generic way",
+      "createdAt": "2021-10-03T08:01:32.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> what would this max be in terms of bytes? (re @dannyryan: I *do* think this is pretty reasonable \nMAX value to give the shape of the SSZ tree (compile time, almost never changed)\nNetwork config value that can be up to the MAX value above)",
+      "createdAt": "2021-10-03T09:04:56.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> 1024 \nOr whatever is the max useful we see on any eth1 net",
+      "createdAt": "2021-10-03T09:19:10.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Its like validator max. Thats huge, like 1Billion. But just gives shape to the tree",
+      "createdAt": "2021-10-03T09:19:34.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> For transactions, can we create have a set of pre-signed ones to send that aren’t just ether transfers?",
+      "createdAt": "2021-10-03T12:17:12.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> this^",
+      "createdAt": "2021-10-03T12:17:25.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> Forwarded from vdWijden: Btw geth supports sending transactions, might be good for all clients that reached M2 with geth to test creating some transactions. Documentation for that (and how to reach M3 with geth) is here: https://notes.ethereum.org/_UH57VUPRrC-re3ubtmo2w\nIt's a different genesis, so you need to update that",
+      "createdAt": "2021-10-03T12:17:25.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> @sigpaul I think I figured out what you meant with some of the beacon-state merge genesis problems and why you went from Phase0-Altair-Merge before transition\nhttps://github.com/ethereum/consensus-specs/pull/2640\nSomething like this should patch it",
+      "createdAt": "2021-10-03T12:19:20.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> I think we should have deposit contract and deposit transactions to test two things at the same time: tx processing + eth1 data voting after the merge",
+      "createdAt": "2021-10-03T12:19:44.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kristofgazso> guys so what gaslimit are you using?\noriginally it was written 0x989680 but we some teams have been using 0x1C9C380",
+      "createdAt": "2021-10-03T12:28:40.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<protolambda> Testnet creation talk links:\nhttps://github.com/protolambda/eth2-testnet-genesis\nhttps://github.com/protolambda/eth2-val-tools\nhttps://github.com/eth2-clients/eth2-networks/\nhttps://github.com/ethereum/consensus-specs/blob/dev/specs/merge/beacon-chain.md#beaconstate\nhttps://github.com/sigp/lighthouse-merge-f2f\nhttps://hackmd.io/@n0ble/merge-interop-spec\nhttps://ethereum.github.io/beacon-APIs/#/Node/getNetworkIdentity\nfrom rayonism, needs an update sweep (working on it):\nhttps://github.com/protolambda/mergenet-tutorial",
+      "createdAt": "2021-10-03T12:29:47.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> Getting back to the extraData discussion. I really don’t see the value in consensus layer supporting anything that is bigger than 32 bytes. In case of transition on the clique network starting with the transition block there will be no need to use extraData to keep anything more than 32 bytes as it is stated above.",
+      "createdAt": "2021-10-03T12:29:54.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> Wondering if it is hard to make extraData of a fixed length on the EL clients side",
+      "createdAt": "2021-10-03T12:30:15.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> then we have to add new consensus rules to the EL",
+      "createdAt": "2021-10-03T12:30:21.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> or essentially change the configuration value at the merge",
+      "createdAt": "2021-10-03T12:30:37.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> they would need to stop embedding their signature into the payload when producing it (re @dannyryan: then we have to add new consensus rules to the EL)",
+      "createdAt": "2021-10-03T12:31:25.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I understand that. but the user/software can put anything they want into extradata and the max is >32",
+      "createdAt": "2021-10-03T12:31:49.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> so you would have to conditionally reduce the max at the transition",
+      "createdAt": "2021-10-03T12:32:03.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kristofgazso> pinging about this, anyone have an idea which one we should use? (re @kristofgazso: guys so what gaslimit are you using?\noriginally it was written 0x989680 but we some teams have been using 0x1C9C380)",
+      "createdAt": "2021-10-03T12:50:55.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> @vdWijden the preparePayload with unknown parent case is specified in the Interop spec here: https://hackmd.io/@n0ble/merge-interop-spec#Engine-API1\nI think that in production it should have a block tree inconsistency kind of error that could initiate a recovery assuming that a failure has happened that lead CL and EL to an inconsistent state. This is to be discussed (message ordering and constistency + recovery mechanics)\nAny other execution errors (not related to the consistency issue) are not necessarily needed for CL but could be returned and logged to provide addition information about execution payload invalidity reason",
+      "createdAt": "2021-10-03T12:57:19.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> Forwarded from vdWijden: Both maybe? I've implemented the two errors that you specified in the merge spec, but there are a lot of other errors that can happen during execution that are currently underspecified. (e.g. preparePayload with unknown parent,...)",
+      "createdAt": "2021-10-03T12:57:19.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<trent_vanepps> Forwarded from karalabe: We've been discussing to relaunch Ropsten here. Could the different teams send over some eth addresses to prefund?",
+      "createdAt": "2021-10-03T13:59:27.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ralxz> EthereumJS dev address: 0xaaec86394441f915bce3e6ab399977e9906f3b69",
+      "createdAt": "2021-10-03T14:00:46.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<lightclient> 0x0000006916a87b82333f4245046623b23794c65c (quilt)",
+      "createdAt": "2021-10-03T14:01:31.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> 0x10F5d45854e038071485AC9e402308cF80D2d2fE",
+      "createdAt": "2021-10-03T14:02:12.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> 0xd7d76c58b3a519e9fA6Cc4D22dC017259BC49F1E",
+      "createdAt": "2021-10-03T14:02:57.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<nonveumann> 0x7cF5b79bfe291A67AB02b393E456cCc4c266F753",
+      "createdAt": "2021-10-03T14:04:51.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<adietrichs> 0xF4523c656C336734Ab6B44378739CBDA88017621",
+      "createdAt": "2021-10-03T14:12:14.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<protolambda> 0xb21c33de1fab3fa15499c62b59fe0cc3250020d1 (protolambda.eth)",
+      "createdAt": "2021-10-03T14:13:19.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Pls add a comment so I know where the funds go ti 😄",
+      "createdAt": "2021-10-03T14:14:34.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ethzed> 0xd7eDDB78ED295B3C9629240E8924fb8D8874ddD8 (Lighthouse)",
+      "createdAt": "2021-10-03T14:23:12.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Testing",
+      "parent": "",
+      "content": "Nethermind -> 0xBc11295936Aa79d594139de1B2e12629414F3BDB",
+      "createdAt": "2021-10-03T14:24:54.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "What are the requirements for a \"team\"?  😛",
+      "createdAt": "2021-10-03T14:26:48.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can Team Zoltu get some free play monies?  😆",
+      "createdAt": "2021-10-03T14:27:04.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "Note: Team Zoltu will almost certainly sell New Ropsten ETH for Mainnet ETH if granted it.  😬",
+      "createdAt": "2021-10-03T14:27:44.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Team Zoltu will be offered new rosten eth at very generous discounts 😛",
+      "createdAt": "2021-10-03T14:28:15.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\n   \"alloc\":{\n      \"0xaaec86394441f915bce3e6ab399977e9906f3b69\": 1000000, // EthereumJS\n      \"0x0000006916a87b82333f4245046623b23794c65c\": 1000000, // Quilt\n      \"0x7cF5b79bfe291A67AB02b393E456cCc4c266F753\": 1000000, // Besu\n      \"0xa2A6d93439144FFE4D27c9E088dCD8b783946263\": 1000000, // Geth\n      // Erigon\n      \"0xBc11295936Aa79d594139de1B2e12629414F3BDB\": 1000000, // Nethermind\n      \"0xd7eDDB78ED295B3C9629240E8924fb8D8874ddD8\": 1000000, // Lighthouse\n      // Teku\n      // Prism\n      \"0x8b7F0977Bb4f0fBE7076FA22bC24acA043583F5e\": 1000000, // Nimbus\n      // Loadstar\n      \"0xb21c33de1fab3fa15499c62b59fe0cc3250020d1\": 100000000, // Protolamba\n      \"0x10F5d45854e038071485AC9e402308cF80D2d2fE\": 100000000, // Tim Beiko\n      \"0xd7d76c58b3a519e9fA6Cc4D22dC017259BC49F1E\": 100000000, // Danny Ryan\n      \"0x799D329e5f583419167cD722962485926E338F4a\": 1          // Team Zoltu\n   },\n```",
+      "createdAt": "2021-10-03T14:30:02.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "Maybe I'll try to join Team Beiko or Team Ryan.  🤔",
+      "createdAt": "2021-10-03T14:30:36.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc: <@!329594653097721856> <@!340345049063882753>  <@!363800010518822915> <@!688748669268132001>",
+      "createdAt": "2021-10-03T14:31:24.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!301186049323958275> send over an eth address",
+      "createdAt": "2021-10-03T14:31:36.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Argh, can't find anyone from Nimbus 👀",
+      "createdAt": "2021-10-03T14:31:55.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<zahary_karadjov> Sorry, here is our address (Nimbus)\n0x8b7F0977Bb4f0fBE7076FA22bC24acA043583F5e",
+      "createdAt": "2021-10-03T14:36:04.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xraino",
+      "category": "Testing",
+      "parent": "",
+      "content": "0x7cF5b79bfe291A67AB02b393E456cCc4c266F753 for Rai",
+      "createdAt": "2021-10-03T14:42:01.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "?",
+      "createdAt": "2021-10-03T14:46:07.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "No personal allocs 😛",
+      "createdAt": "2021-10-03T14:46:14.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "We can give besu's pile to you if you want",
+      "createdAt": "2021-10-03T14:46:24.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "or we can give it to some other address",
+      "createdAt": "2021-10-03T14:46:30.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Tim and & get it as PM allocs 😛",
+      "createdAt": "2021-10-03T14:46:44.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Tim and Co",
+      "createdAt": "2021-10-03T14:46:59.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@456226577798135808> ? ^",
+      "createdAt": "2021-10-03T15:11:09.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "b00ris",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@206016661470314496> 0x6F7D2EEE2c20609F8F55696a418A12d75dcA87bF for Erigon",
+      "createdAt": "2021-10-03T15:20:34.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> I have a general questions regarding the API on the EL side. Previously I didn't check whether the parent block surpasses the TTD in ForkchoiceUpdated and in ConsensusValidated. In ExecutePayload I now check that the parent block surpasses the TDD iff the node is synced. \nI think those checks should be part of the spec imo. This does mean that the three methods fail if we don't have the parent available.",
+      "createdAt": "2021-10-03T15:23:38.810000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,484 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2024-09-09",
+  "messageCount": 57,
+  "sourceHash": "1c157edf9746a56b66ff0f27fe66dc17a5f131e65b0b6c49034936c461a3a619",
+  "searchText": "hmm yeah likely but can't tell for sure without `debug` logs around it, did it recover itself afterwards? (it should with block lookups) ```nim netKeyFile* {. desc: \"Source of network (secp256k1) private key file \" & \"(random|<path>)\" defaultValue: \"random\", name: \"netkey-file\" .}: string netKeyInsecurePassword* {. desc: \"Use pre-generated INSECURE password for network private key file\" defaultValue: false, name: \"insecure-netkey-password\" .}: bool ``` Actually I don't know how to run at the same time Teku in INFO and LH in DEBUG. When I remove `global_log_level` from `network_params`, it seems Kurtosis sets explicitly the INFO level debug for all nodes. So when I set `--debug-level=debug` for LH, it complains: ``` the argument '--debug-level <LEVEL>' cannot be used multiple times ``` (It turns out on prysm you can set at the same time `--verbosity=info` AND `--verbosity=debug`, and in this case DEBUG wins.) ==> <@199561711278227457> , did you achieve to run Teku in INFO and LH in DEBUG? (Reminder, we want Teku to be in INFO since it emits a lot of logs in DEBUG.) `docker inspect` with no `global_log_level` and `--debug-level=debug` for LH: ``` docker inspect cl-2-lighthouse-geth--e9fb550e0fba48f5b30779a1c9dcc4e9 ... \"Args\": [ \"beacon_node\", \"--debug-level=info\", \"--datadir=/data/lighthouse/beacon-data\", \"--disable-enr-auto-update\", \"--enr-address=172.16.0.19\", \"--enr-udp-port=9000\", \"--enr-tcp-port=9000\", \"--listen-address=0.0.0.0\", \"--port=9000\", \"--http\", \"--http-address=0.0.0.0\", \"--http-port=4000\", \"--http-allow-sync-stalled\", \"--slots-per-restore-point=32\", \"--disable-packet-filter\", \"--execution-endpoints=http://172.16.0.18:8561\", \"--jwt-secrets=/jwt/jwtsecret\", \"--suggested-fee-recipient=0x8943545177806ED17B9F23F0a21ee5948eCaa776\", \"--metrics\", \"--metrics-address=0.0.0.0\", \"--metrics-allow-origin=*\", \"--metrics-port=5054\", \"--enable-private-discovery\", \"--testnet-dir=/network-configs\", \"--boot-nodes=enr:-Mi4QKKbfy8uQYsqkuEdLVJZTMU1FVQaV0APRSXZeMeuEEUZFW6T2sJ4ka8nu2OO19iHOlW4lXEbSxroFDLI6nHQ-daGAZHVkARzh2F0dG5ldHOIAAAAAAAGAACDY3NjgYCEZXRoMpAVMknqYAAAOADh9QUAAAAAgmlkgnY0gmlwhKwQABGJc2VjcDI1NmsxoQPSdVbIS8_vjtJFPSoP50iezW0EeDjGp1iqo9xEbrMj7IhzeW5jbmV0cwCDdGNwgjLIg3VkcIIyyA\", \"--subscribe-all-data-column-subnets\", \"--debug-level=debug\" ] ``` remove global_log_level and set cl_log_level per participant 🙂 If you do that, then the log level is specified once per participant and you can specify what level you want each to be at Has the LH node forked? we have PR to fix this on review should be merged today the image is correct Interesting, will look into this hi sir, is the bug still there in Dora? could you share the config you're using? it should be mostly fine if you're using: ``` dora_params: image: ethpandaops/dora:peerdas-as-deneb ``` except some edge cases yes, I'm using that image. I'm running the interop test with grandine local image seems like the false-positive orphaned status no longer happen after epoch 3 There should be a new dora release soon-ish that would fix a bunch of things 😄 looks good now, sir! nimbus looks happy with prysm and lh, with 1 super node and 1 full node each. cc <@531934490826768418> <@466006586477772831> <@199561711278227457> haven't tested the rest yet, most likely doing that on Wednesday 🙂 <@199561711278227457> what's up with this job? https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/10775641610 Not sure, seems like it was preempted by another scheduled ci job ahh it works again we have merged PR which fixes this. just pull latest `ethpandaops/teku:nashatyrev-das` Kind of. I made a complete analysis of the mess I had here: https://hackmd.io/@6-HLeMXARN2tdFLKKcqrxw/B1pHSDj3C My hypothesis is this happen if both the block AND the columns have been received, **but** if the received block is not a descendent of the block we consider as a head. (Newsly received block and \"our\" head block are not on the same fork.) Does this make sense? so it was orphaned? but it's too early for this ahhh I got you yeah, Slot Event is about canonical chain at least looks good that 2 different supernodes stays on 1 fork. In devnet 1 we had 8 forks per 9 nodes but if/when teku or lighthouse is not going to publish all columns later on proposed block, they will split similarly without a way to recover I don't see a way fork1 and fork2 could be joined again in your case because fork2 thinks fork1 is build on unavailable data it's gone forever OK, so if in the following case, if we consider block 3 as canonical, then: - We will have the ` Collected block` log for block 4, and - We will have the ` Availability check slot 4 result` log (with VALID if we received all needed columns), but - We will have the `Slot Event *** Slot: 4, Block: ... empty` That's right? if they have less votes, it could work but they have 4 out of 6 ``` recentChainData .getChainHead() .ifPresent( (head) -> eventLog.slotEvent( ``` it's on process atestations so it's still not head after applying votes So you agree with https://discord.com/channels/595666850260713488/1252403418941624532/1282812820333006954? yeah, it looks like this I'm not 100% sure but it explains behavior in this case This is such an amazing analysis! We def need better tooling to generate some of this data automatically imo Additional question for Teku: When does the log `Received block for slot <n>` is printed? I'm asking because in my analysis, I assumed that if this log were not printed, then the beacon node did not received the block. However, I have this case: ``` 2024-09-08 14:00:34.202 INFO - Created availabilityChecker for slot 327 2024-09-08 14:00:34.202 INFO - Starting data availability check for slot 327 2024-09-08 14:00:34.202 INFO - Requested checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327) 2024-09-08 14:00:34.212 INFO - [nyota] DataColumnSidecarDB.addSidecar: new slot: 327, prevSlot count: 4, total added: 1291, finalizedSlot: 287 2024-09-08 14:00:34.214 INFO - Collected block ce60ff..902c (327), index 23, 1st cell 00000000000000, commitments 6, proofs 6,block ce60ff..902c (327), index 55, 1st cell 00000000000000, commitments 6, proofs 6,block ce60ff..902c (327), index 80, 1st cell 0c3323a01173ea, commitments 6, proofs 6,block ce60ff..902c (327), index 98, 1st cell 56f17efac9a099, commitments 6, proofs 6 DataColumnSidecars in checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327) 2024-09-08 14:00:34.234 INFO - Availability check slot 327 result: DataAndValidationResult{validationResult=VALID, dataSize=4, cause=Optional.empty} 2024-09-08 14:00:36.001 INFO - Slot Event *** Slot: 327, Block: ... empty, Justified: 9, Finalized: 8, Peers: 5 ``` There is no log `Received block for slot 327`. However there is the log `Collected block ce60ff..902c (327)` (and `ce60ff...` does correspond to the block at slot 327. How is this possible? yeah this is great, thanks <@531934490826768418> ! so it seems like the we had a split view from slot 321 due to columns not being fully published, and from then its irrecoverable because nodes can't agree since that slot? Collected .. is only about DataColumns, `block` word there is a bit confusing (it refers to the block DataColumn is linked with), but it kicks in after receiving block, so block should be received it'd be interesting to understand why the rest of columns weren't published 🤔 I've checked the code, \"Received block for slot\" is a line only when Teku is proposer `2024-09-08 14:00:34.202 INFO - Requested checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327)` is initiated in ForkChoice when importing the block, so it's received Oh OK, thanks. (That's quite a bit misleading.) So my analysis based on the assumption \"No `received block for slot <n>` printed = no block received\" is quite wrong. So it may change a lot of stuffs in my document ==> I re-put in in draft. Posted PR to change this confusing logging in a future Can we say the following: ``` 2024-09-08 12:55:32.036 INFO - Availability check for slot 2 NOT_REQUIRED, kzg commitments empty ``` ==> We received a block at slot 2, but there is no blob associated with this block. ``` 2024-09-08 12:55:57.882 INFO - Collected block 81a74c..2a1f (4), index 0, 1st cell 001611aa000000, comm, ... 2024-09-08 12:55:58.603 INFO - Availability check slot 4 result: DataAndValidationResult{validationResult=VALID, dataSize=128, cause=Optional.empty} ``` ==> We received a block at slot 4, and we received all expected columns. ``` 2024-09-08 13:59:25.885 INFO - Collected [empty],[empty],[empty],[empty],block b39c47..3428 (321), index 4, 1st cel... 2024-09-08 13:59:25.889 INFO - Availability check slot 321 result: DataAndValidationResult{validationResult=NOT_AVAILABLE, dat ``` ==> We received a block at slot 321, but we did **NOT** received all expected columns. yes! oh, it makes sense, I put this line in logging it's clearly visible what columns are not received And: (No block message between slot event 322 and slot event 323) ``` 2024-09-08 13:59:36.001 INFO - Slot Event *** Slot: 322, Block: 0a62f11b1ef095c2f2c25e8789d4735579a4d1962ccb804add8be35885ba1b7c, Justified: 9, Finalized: 8, Peers: 5 2024-09-08 13:59:36.401 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#331) 16 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN 2024-09-08 13:59:36.402 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#333) 109 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN ... 2024-09-08 13:59:41.596 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#333) 16 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN 2024-09-08 13:59:41.597 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#335) 93 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN 2024-09-08 13:59:44.064 INFO - [nyota] DataCustodySync.fillUp: synced=0 pending=0, missingColumns=0([]) 2024-09-08 13:59:45.944 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#334) 1 data column sidecars to 16Uiu2HAmAjP6h3WE58m8bicRUmSpkzPYF2KtCjrxyB24SXeGL5uH 2024-09-08 13:59:45.956 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#336) 6 data column sidecars from 16Uiu2HAmAjP6h3WE58m8bicRUmSpkzPYF2KtCjrxyB24SXeGL5uH 2024-09-08 13:59:46.599 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#335) 0 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN 2024-09-08 13:59:46.600 INFO - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#337) 93 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN 2024-09-08 13:59:48.002 INFO - Slot Event *** Slot: 323, Block: ... empty, Justified: 9, Finalized: 8, Peers: 5 ``` ==> No block received for slot 323, that's right? I like the \"Nyota\" log haha yeah, 323 is not received but I'm confused why we didn't initiate availability check for 322 or is it above? Yeah availability check for 322 is above. I don't have discord nitro so char count per message is limited. (For information all the logs are available in a ZIP, the link is in my report.) OK, I'll re-check my analysis tomorrow, see you!",
+  "excerpts": [
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm yeah likely but can't tell for sure without `debug` logs around it, did it recover itself afterwards? (it should with block lookups)",
+      "createdAt": "2024-09-09T01:09:10.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "```nim\n    netKeyFile* {.\n      desc: \"Source of network (secp256k1) private key file \" &\n            \"(random|<path>)\"\n      defaultValue: \"random\",\n      name: \"netkey-file\" .}: string\n\n    netKeyInsecurePassword* {.\n      desc: \"Use pre-generated INSECURE password for network private key file\"\n      defaultValue: false,\n      name: \"insecure-netkey-password\" .}: bool\n```",
+      "createdAt": "2024-09-09T02:42:23.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Actually I don't know how to run at the same time Teku in INFO and LH in DEBUG.\nWhen I remove `global_log_level` from `network_params`, it seems Kurtosis sets explicitly the INFO level debug for all nodes.\nSo when I set `--debug-level=debug` for LH, it complains:\n```\nthe argument '--debug-level <LEVEL>' cannot be used multiple times\n```\n(It turns out on prysm you can set at the same time `--verbosity=info` AND `--verbosity=debug`, and in this case DEBUG wins.)\n\n==> <@199561711278227457> , did you achieve to run Teku in INFO and LH in DEBUG?\n(Reminder, we want Teku to be in INFO since it emits a lot of logs in DEBUG.)",
+      "createdAt": "2024-09-09T06:57:44.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "`docker inspect` with no `global_log_level` and `--debug-level=debug` for LH:\n\n```\ndocker inspect cl-2-lighthouse-geth--e9fb550e0fba48f5b30779a1c9dcc4e9\n\n...\n\n        \"Args\": [\n            \"beacon_node\",\n            \"--debug-level=info\",\n            \"--datadir=/data/lighthouse/beacon-data\",\n            \"--disable-enr-auto-update\",\n            \"--enr-address=172.16.0.19\",\n            \"--enr-udp-port=9000\",\n            \"--enr-tcp-port=9000\",\n            \"--listen-address=0.0.0.0\",\n            \"--port=9000\",\n            \"--http\",\n            \"--http-address=0.0.0.0\",\n            \"--http-port=4000\",\n            \"--http-allow-sync-stalled\",\n            \"--slots-per-restore-point=32\",\n            \"--disable-packet-filter\",\n            \"--execution-endpoints=http://172.16.0.18:8561\",\n            \"--jwt-secrets=/jwt/jwtsecret\",\n            \"--suggested-fee-recipient=0x8943545177806ED17B9F23F0a21ee5948eCaa776\",\n            \"--metrics\",\n            \"--metrics-address=0.0.0.0\",\n            \"--metrics-allow-origin=*\",\n            \"--metrics-port=5054\",\n            \"--enable-private-discovery\",\n            \"--testnet-dir=/network-configs\",\n            \"--boot-nodes=enr:-Mi4QKKbfy8uQYsqkuEdLVJZTMU1FVQaV0APRSXZeMeuEEUZFW6T2sJ4ka8nu2OO19iHOlW4lXEbSxroFDLI6nHQ-daGAZHVkARzh2F0dG5ldHOIAAAAAAAGAACDY3NjgYCEZXRoMpAVMknqYAAAOADh9QUAAAAAgmlkgnY0gmlwhKwQABGJc2VjcDI1NmsxoQPSdVbIS8_vjtJFPSoP50iezW0EeDjGp1iqo9xEbrMj7IhzeW5jbmV0cwCDdGNwgjLIg3VkcIIyyA\",\n            \"--subscribe-all-data-column-subnets\",\n            \"--debug-level=debug\"\n        ]\n```",
+      "createdAt": "2024-09-09T06:59:27.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "remove global_log_level and set cl_log_level per participant 🙂 If you do that, then the log level is specified once per participant and you can specify what level you want each to be at",
+      "createdAt": "2024-09-09T06:59:28.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "Has the LH node forked?",
+      "createdAt": "2024-09-09T07:54:34.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have PR to fix this on review\nshould be merged today\nthe image is correct",
+      "createdAt": "2024-09-09T08:15:34.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Interesting, will look into this",
+      "createdAt": "2024-09-09T08:18:37.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "hi sir, is the bug still there in Dora?",
+      "createdAt": "2024-09-09T09:13:23.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you share the config you're using? it should be mostly fine if you're using: \n```\ndora_params:\n  image: ethpandaops/dora:peerdas-as-deneb\n```\nexcept some edge cases",
+      "createdAt": "2024-09-09T09:28:37.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, I'm using that image. I'm running the interop test with grandine local image",
+      "createdAt": "2024-09-09T09:30:22.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "seems like the false-positive orphaned status no longer happen after epoch 3",
+      "createdAt": "2024-09-09T09:31:24.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "There should be a new dora release soon-ish that would fix a bunch of things 😄",
+      "createdAt": "2024-09-09T12:41:33.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks good now, sir!",
+      "createdAt": "2024-09-09T14:21:08.651000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "28027969b21e1f9868dd07ea32cfec6394991463a77467d4bcad102b2ca88778"
+        }
+      ]
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "nimbus looks happy with prysm and lh, with 1 super node and 1 full node each.\ncc <@531934490826768418> <@466006586477772831> <@199561711278227457>",
+      "createdAt": "2024-09-09T16:14:50.884000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "8ad75382cf390b9a82d5fdd623bb70b2be63ecbe0954191b7d8bb2571e516ae9"
+        }
+      ]
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "haven't tested the rest yet, most likely doing that on Wednesday 🙂",
+      "createdAt": "2024-09-09T16:40:42.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@199561711278227457> what's up with this job?\nhttps://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/10775641610",
+      "createdAt": "2024-09-09T17:18:31.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Not sure, seems like it was preempted by another scheduled ci job",
+      "createdAt": "2024-09-09T20:10:09.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahh it works again",
+      "createdAt": "2024-09-09T20:11:00.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have merged PR which fixes this. just pull latest `ethpandaops/teku:nashatyrev-das`",
+      "createdAt": "2024-09-09T20:21:06.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Kind of.\nI made a complete analysis of the mess I had here: https://hackmd.io/@6-HLeMXARN2tdFLKKcqrxw/B1pHSDj3C",
+      "createdAt": "2024-09-09T20:55:58.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "My hypothesis is this happen if both the block AND the columns have been received, **but** if the received block is not a descendent of the block we consider as a head. (Newsly received block and \"our\" head block are not on the same fork.)\n\nDoes this make sense?",
+      "createdAt": "2024-09-09T21:07:48.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "so it was orphaned?",
+      "createdAt": "2024-09-09T21:09:58.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "but it's too early for this",
+      "createdAt": "2024-09-09T21:10:06.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahhh I got you",
+      "createdAt": "2024-09-09T21:10:26.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, Slot Event is about canonical chain",
+      "createdAt": "2024-09-09T21:10:39.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "at least looks good that 2 different supernodes stays on 1 fork. In devnet 1 we had 8 forks per 9 nodes",
+      "createdAt": "2024-09-09T21:14:56.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "but if/when teku or lighthouse is not going to publish all columns later on proposed block, they will split similarly without a way to recover",
+      "createdAt": "2024-09-09T21:17:38.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't see a way fork1 and fork2 could be joined again in your case because fork2 thinks fork1 is build on unavailable data",
+      "createdAt": "2024-09-09T21:18:38.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's gone forever",
+      "createdAt": "2024-09-09T21:18:41.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "OK, so if in the following case, if we consider block 3 as canonical, then:\n- We will have the ` Collected block` log for block 4, and\n- We will have the ` Availability check slot 4 result` log (with VALID if we received all needed columns), but\n- We will have the  `Slot Event  *** Slot: 4, Block:  ... empty`\n\nThat's right?",
+      "createdAt": "2024-09-09T21:20:09.877000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "a25a3634b4f2fdb1043d314254a5d4e3325c715d0a9a04771a236026eab58b79"
+        }
+      ]
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "if they have less votes, it could work\nbut they have 4 out of 6",
+      "createdAt": "2024-09-09T21:20:10.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\nrecentChainData\n        .getChainHead()\n        .ifPresent(\n            (head) ->\n                eventLog.slotEvent(\n```",
+      "createdAt": "2024-09-09T21:22:07+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's on process atestations",
+      "createdAt": "2024-09-09T21:22:32.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "so it's still not head after applying votes",
+      "createdAt": "2024-09-09T21:22:35.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "So you agree with https://discord.com/channels/595666850260713488/1252403418941624532/1282812820333006954?",
+      "createdAt": "2024-09-09T21:23:52.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, it looks like this",
+      "createdAt": "2024-09-09T21:24:33.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm not 100% sure",
+      "createdAt": "2024-09-09T21:24:45.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "but it explains behavior in this case",
+      "createdAt": "2024-09-09T21:24:52.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is such an amazing analysis!\n\nWe def need better tooling to generate some of this data automatically imo",
+      "createdAt": "2024-09-09T21:25:32.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Additional question for Teku:\nWhen does the log `Received block for slot <n>` is printed?\nI'm asking because in my analysis, I assumed that if this log were not printed, then the beacon node did not received the block.\n\nHowever, I have this case:\n\n```\n2024-09-08 14:00:34.202 INFO  - Created availabilityChecker for slot 327\n2024-09-08 14:00:34.202 INFO  - Starting data availability check for slot 327\n2024-09-08 14:00:34.202 INFO  - Requested checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327)\n2024-09-08 14:00:34.212 INFO  - [nyota] DataColumnSidecarDB.addSidecar: new slot: 327, prevSlot count: 4, total added: 1291, finalizedSlot: 287\n2024-09-08 14:00:34.214 INFO  - Collected block ce60ff..902c (327), index 23, 1st cell 00000000000000, commitments 6, proofs 6,block ce60ff..902c (327), index 55, 1st cell 00000000000000, commitments 6, proofs 6,block ce60ff..902c (327), index 80, 1st cell 0c3323a01173ea, commitments 6, proofs 6,block ce60ff..902c (327), index 98, 1st cell 56f17efac9a099, commitments 6, proofs 6 DataColumnSidecars in checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327)\n2024-09-08 14:00:34.234 INFO  - Availability check slot 327 result: DataAndValidationResult{validationResult=VALID, dataSize=4, cause=Optional.empty}\n2024-09-08 14:00:36.001 INFO  - Slot Event  *** Slot: 327, Block: ... empty, Justified: 9, Finalized: 8, Peers: 5\n```\n\nThere is no log `Received block for slot 327`.\nHowever there is the log `Collected block ce60ff..902c (327)` (and `ce60ff...` does correspond to the block at slot 327.\nHow is this possible?",
+      "createdAt": "2024-09-09T21:30:19.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah this is great, thanks <@531934490826768418> !\nso it seems like the we had a split view from slot 321 due to columns not being fully published, and from then its irrecoverable because nodes can't agree since that slot?",
+      "createdAt": "2024-09-09T21:32:00.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Collected .. is only about DataColumns, `block` word there is a bit confusing (it refers to the block DataColumn is linked with), but it kicks in after receiving block, so block should be received",
+      "createdAt": "2024-09-09T21:33:08.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "it'd be interesting to understand why the rest of columns weren't published 🤔",
+      "createdAt": "2024-09-09T21:34:15.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "I've checked the code, \"Received block for slot\" is a line only when Teku is proposer",
+      "createdAt": "2024-09-09T21:34:52.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "`2024-09-08 14:00:34.202 INFO  - Requested checkDataAvailability for 0xce60fff4ac3c0c4c626db51afd4eeef796bc2884556050b692b2c93d180e902c(327)`\nis initiated in ForkChoice when importing the block, so it's received",
+      "createdAt": "2024-09-09T21:35:43.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh OK, thanks. (That's quite a bit misleading.)\nSo my analysis based on the assumption \"No `received block for slot <n>` printed = no block received\" is quite wrong.\nSo it may change a lot of stuffs in my document ==> I re-put in in draft.",
+      "createdAt": "2024-09-09T21:38:03.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Posted PR to change this confusing logging in a future",
+      "createdAt": "2024-09-09T21:45:06.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can we say the following:\n```\n2024-09-08 12:55:32.036 INFO  - Availability check for slot 2 NOT_REQUIRED, kzg commitments empty\n```\n==> We received a block at slot 2, but there is no blob associated with this block.\n\n```\n2024-09-08 12:55:57.882 INFO  - Collected block 81a74c..2a1f (4), index 0, 1st cell 001611aa000000, comm, ...\n2024-09-08 12:55:58.603 INFO  - Availability check slot 4 result: DataAndValidationResult{validationResult=VALID, dataSize=128, cause=Optional.empty}\n```\n==> We received a block at slot 4, and we received all expected columns.\n\n```\n2024-09-08 13:59:25.885 INFO  - Collected [empty],[empty],[empty],[empty],block b39c47..3428 (321), index 4, 1st cel...\n2024-09-08 13:59:25.889 INFO  - Availability check slot 321 result: DataAndValidationResult{validationResult=NOT_AVAILABLE, dat\n```\n==> We received a block at slot 321, but we did **NOT** received all expected columns.",
+      "createdAt": "2024-09-09T21:49:28.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes!",
+      "createdAt": "2024-09-09T21:50:44.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh, it makes sense, I put this line in logging",
+      "createdAt": "2024-09-09T21:50:58.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's clearly visible what columns are not received",
+      "createdAt": "2024-09-09T21:51:08.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "And:\n\n(No block message between slot event 322 and slot event 323)\n```\n2024-09-08 13:59:36.001 INFO  - Slot Event  *** Slot: 322, Block: 0a62f11b1ef095c2f2c25e8789d4735579a4d1962ccb804add8be35885ba1b7c, Justified: 9, Finalized: 8, Peers: 5\n2024-09-08 13:59:36.401 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#331) 16 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n2024-09-08 13:59:36.402 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#333) 109 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n...\n2024-09-08 13:59:41.596 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#333) 16 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n2024-09-08 13:59:41.597 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#335) 93 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n2024-09-08 13:59:44.064 INFO  - [nyota] DataCustodySync.fillUp: synced=0 pending=0, missingColumns=0([])\n2024-09-08 13:59:45.944 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#334) 1 data column sidecars to 16Uiu2HAmAjP6h3WE58m8bicRUmSpkzPYF2KtCjrxyB24SXeGL5uH\n2024-09-08 13:59:45.956 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#336) 6 data column sidecars from 16Uiu2HAmAjP6h3WE58m8bicRUmSpkzPYF2KtCjrxyB24SXeGL5uH\n2024-09-08 13:59:46.599 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: RESPOND(#335) 0 data column sidecars to 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n2024-09-08 13:59:46.600 INFO  - [nyota] DataColumnSidecarsByRootMessageHandler: REQUEST(#337) 93 data column sidecars from 16Uiu2HAmBsUeED7FebAnsywHUAnigcKZ8v8R9L79uDn9wrhaWXBN\n2024-09-08 13:59:48.002 INFO  - Slot Event  *** Slot: 323, Block:                                                        ... empty, Justified: 9, Finalized: 8, Peers: 5\n```\n\n==> No block received for slot 323, that's right?",
+      "createdAt": "2024-09-09T21:52:12.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I like the \"Nyota\" log haha",
+      "createdAt": "2024-09-09T21:52:55.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, 323 is not received\nbut I'm confused why we didn't initiate availability check for 322\nor is it above?",
+      "createdAt": "2024-09-09T21:54:15.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah availability check for 322 is above. I don't have discord nitro so char count per message is limited.\n(For information all the logs are available in a ZIP, the link is in my report.)",
+      "createdAt": "2024-09-09T21:55:51.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "OK, I'll re-check my analysis tomorrow, see you!",
+      "createdAt": "2024-09-09T21:56:41.578000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "pos-consensus",
+  "date": "2019-11-13",
+  "messageCount": 175,
+  "sourceHash": "4fe0723a27e56fff124572c282231ea62065952bdcca507fceea9f73c1a11240",
+  "searchText": "Can anyone elaborate on the condition this solves? https://github.com/ethereum/eth2.0-specs/pull/1468 <@203220829473996800> <@291925846556540928> <@361447803194441738> As a validator deciding my eth1data vote to include in a block, why do I need to read the state's eth1 data votes? > The previous version was incorrectly assuming that there was an eth1_data_vote per slot, but this is not the case when 100% of proposers don't get blocks into the chain. Instead the period tail should be based upon the actual slot. Where do you need more details? why do i need to read the state at all for determining my view of eth1? To have fewer different votes. But only after some margin to allow for unique new votes. maybe this is question bigger than this PR The reason we check existing votes is to increase the likelihood that validators vote on the same eth1 block. I think this has been called the “pile on effect”. Basically, if validators are looking at different (but overlapping) windows of eth1 blocks, if they consider other votes they’ll still vote on the same thing. what is this voting mechanism? Agree with everyone else some of the time, cast your actual vote some of the time? It’s more like “vote with the majority, as long as the majority vote is valid (from your view)” valid == the correct view of eth1? Yeah, valid from your view of the eth1 chain Very simplified it’s “select a range of blocks and vote on the latest one, unless one of the other blocks in that range already has more votes than the latest one” hmm, and that is not defined? I suppose valid would mean \"any canonical eth1 block in the eth1 voting period\" I’m not sure I follow, everyone’s view of the eth1 chain is subjective when we are in the tail period, why would we consider votes from the previous eth1 voting period? wouldn't that almost always be a majority in the tail period? and also wouldn't be the same range of blocks all_eth1_votes should (in non-broken circumstances) be a superset of new_eth_votes Mm.. actually perhaps that’s not true if we select a new block in the middle of the voting period lets say everyone in previous period voted on 0x0A 1024 votes, when we are in the tail period of 992 to 1024, the votes in the new_eth1_votes are not the majority we'd favor an old vote? The votes from the previous period are discarded They’re simply not in the state anymore ah ok still triyng to wrap my head around this method we look at all of the votes in the state, then filter out some? i think my confusion is coming from these ```python new_eth1_data = [get_eth1_data(distance) for distance in range(ETH1_FOLLOW_DISTANCE, 2 * ETH1_FOLLOW_DISTANCE)] all_eth1_data = [get_eth1_data(distance) for distance in range(ETH1_FOLLOW_DISTANCE, previous_eth1_distance)] ``` imagining `get_eth1_data` since it's not defined distance is the eth1 block number? Oh let me find an issue, I tried to define this ty we've had an eth1data mechanism working since april and doesn't do this majority selection algorithm i suppose it only works because single client https://github.com/ethereum/eth2.0-specs/issues/1439 See the “clarification” section ty hmm ```python last_block_number = [block.number for block in entire_eth1_chain() if block.timestamp >= time][0] ``` so we just take the head of the eth1 chain? let me explain what we have today: 1) determine the timestamp of the start of the eth1 voting period 2) read the eth1 chain to find the block closest (but not before) this timestamp 3) use that block as our vote so i'm trying to factor in a step, 2.5, which is this \"pile on effect\" my understanding so far is - determine our vote (with the algorithm above) - look at the state's eth1 data votes - if there is a majority eth1data vote that doesn't equal our vote - determine is the majority vote \"is valid\" (to be defined) - if valid, agree with majority vote as our eth1data vote, otherwise use our vote from step 0 am i on the right track here? You're missing the delay part: we wait in the beginning of the eth1 vote period to encourage new better votes, and then only after having that as a start we get to consider to copy the majority vote. what delay? `period_tail = state.slot % SLOTS_PER_ETH1_VOTING_PERIOD >= integer_squareroot(SLOTS_PER_ETH1_VOTING_PERIOD)` ok so only check the state for majority if we are in the tail period? that's a pretty small window, only 32 slots oh wait i had it inverted, i thought tail period was the last 32 slots (tail) the tail is actually very long lol Maybe a worded it badly, what I'm trying to say is that during that start period we want to collect fresh votes. Not necessarily the majority if the majority is for older data gotcha OK so what can i use to determine validity? since it is subjective, i can lazily say \"if the block number is not N then its not a valid eth1 vote for this period\" which kind of defeats the whole process It's about emergent behavior. If every honest validator does a good effort to produce some fresh data, and pile on net-positive progress with a majority vote, there will be progress in eth1 processing. <@539495253418180618> and you had this exact discussion 2 months ago, you may want to revisit it with him thanks, I think we need some clarification here because this process, being subjective, is unlikely to converge unless there is clear communication around the process is there disparity in eth1 clients wrt block timestamps? timestamps are set by the miners an included in the block hash Right, the spec is trying to dictate the approach for honest validators to get the network to agree on something as a whole. It's not strictly enforced as part of consensus (apart from the process eth1 data conditions in the beacon spec) yeah, but we all see the same eth1 chain? hopefully we all see the same eth1 chain, that's what we're trying to vote on. if we don't our eth1 linking is broken. im not sure how this pile on effect is going to save us if the linking is broken trying to rationalize this complexity but struggling to do so if the linking is broken (e.g., every validator sees a different eth1 chain) then we're \"up shit creek without a paddle\" as my dad would say there is an underlying honest majority assumption the pile-on effect helps us if the chain views are slightly different so that eventually the beacon chain tracks the eth1 chain, possibly w/ some delay maybe someone can describe a scenario where this logic solves a problem the pile-on bit you mean? yeah the idea is to avoid lazy validators from slowing (halting?) progress on eth1 data rather than always casting my vote as i describe it we can dig up the backing issues how does this mitigate lazy validators? sounds like it encourages lazy validators https://github.com/ethereum/eth2.0-specs/issues/722 basically this scenario: https://github.com/ethereum/eth2.0-specs/issues/722#issue-417813521 if we have an honest majority then you'll make as much progress as possible during the initial part of the voting period as we don't just \"pile on\" -- which is what the original honest validator suggestion gave rise to i'm not sure that is your actual question tho my question is \"if we have an honest majority, why do we need pile on?\" what problem does this solve if we have honest majority, we will converge without pile on effect for the situation prior to what is currently in the doc -- the \"honest\" behavior was essentially to copy the first vote so if the first vote is stale, then you degrade liveness of the eth1 mechanism how does this mitigate it though? i can still do that you can still have an honest majority w/ one bad actor still do what? if an honest majority follows my algorithm above (not reading state at all to determine eth1data vote) then we dont need pile on effect > how does this mitigate it though? by changing the default behavior from \"copy the first vote\" to \"submit your latest view of the chain\" basically but that's not what it is right now, it's \"copy the majority vote after 32 slots\" so you want to get rid of the \"copying\" part entirely? my proposal above is always \"submit your view of the chain\" no copying at all, no reading state but then you need validators to converge on a particular block to get consensus, right? if i just always submit my head, there will be `VOTING_PERIOD` different block hashes yes, which would happen if there was an honest majority you dont submit the head always you submit the block at the start of the eth1 voting period it's not a moving target gotcha what happens under this new algo if there is a heavy chain split so that we can't come to consensus on the block at the start of the eth1 voting period? i'd have to think about it a bit more, but it seems you gain some resistance to forks if you can mix in some info from other validators yeah so lets say eth1 hardforks and only 50% of eth2 validators upgraded, we are in big trouble and pile on effect wouldn't help the majority vote from pile on wouldnt be valid in the view of 50% of validators i gotta run but if you think we should change it, we can move this to a PR -- i will say, some what separately, i do think this part of the spec is p confusing > you submit the block at the start of the eth1 voting period Those first few validators are doing that more or less. Just with more validators, a smaller window of possible votes, and convergence. > my proposal above is always \"submit your view of the chain\" When you are voting after that initial period, you take whatever your view of the chain is, starting after the last eth1 checkpoint. And then see what others are voting for to determine the best candidate. You don't copy things outside of your own view. pile on would help in the scenario where all the validators have latest eth1 blocks that are somewhere within the period where we're supposed to vote do i have the wrong understanding that we are voting on \"what was the eth1 block at the start of the voting period?\" i.e., if eth1 became \"unavailable\" for several hours I would say we are voting for any recent (`ETH1_FOLLOW_DISTANCE, 2 * ETH1_FOLLOW_DISTANCE`) part of your view in that initial period (`integer_squareroot(SLOTS_PER_ETH1_VOTING_PERIOD)` slots) and then for all data (`ETH1_FOLLOW_DISTANCE, previous_eth1_distance`) after that, to at least make some progress when there is no clear recent eth1 data winner. And you prefer votes in your own subjective window that others are voting for as well, to increase your chances of something in your view to get the majority, and at minimum put a vote to any progress. Scenario where pile-on helps: Imagine if you had two validators. Both of these validators have a view of the eth1 chain where the head block is less than the start of the current eth1 voting period. Both validators are on the same eth1 chain, but validator A has block #41 and validator B has block #42. _Without_ pile-on, one would vote #41 and the other #42. But, _with_ pile-on, if the validator A votes first, then validator B will also vote #41 (not #42) so we aren't voting on the block at the start of the voting period? we are asking validators to converge on any block in a 3.5 hour range of blocks? if that is the case, i think its very unlikely that the first 32 votes will agree They don't have to agree ? thats the whole point though, right? Those first votes are like seeds; others in the period will have their own view, and pick whatever seed matches theirs and has the most support. we could simplify the eth1 voting process to be - determine the timestamp at the start of the voting period - select the highest slot block, before the timestamp, and choose the next descendant (to mitigate miner influenced timestamp issues, maybe) - use this block as your vote no need to read state edit: you can read state to ensure the following - the newly cast vote is eth1 block number is greater than the previous eth1data in state And if seeding with votes for recent data fails, it will fall back on majority of any progressive vote (within the view of the",
+  "excerpts": [
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Can anyone elaborate on the condition this solves? https://github.com/ethereum/eth2.0-specs/pull/1468\n<@203220829473996800> <@291925846556540928> <@361447803194441738> \n\nAs a validator deciding my eth1data vote to include in a block, why do I need to read the state's eth1 data votes?",
+      "createdAt": "2019-11-13T19:29:07.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> The previous version was incorrectly assuming that there was an eth1_data_vote per slot, but this is not the case when 100% of proposers don't get blocks into the chain. Instead the period tail should be based upon the actual slot.\n\nWhere do you need more details?",
+      "createdAt": "2019-11-13T19:32:11.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "why do i need to read the state at all for determining my view of eth1?",
+      "createdAt": "2019-11-13T19:33:08.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "To have fewer different votes. But only after some margin to allow for unique new votes.",
+      "createdAt": "2019-11-13T19:33:33.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "maybe this is question bigger than this PR",
+      "createdAt": "2019-11-13T19:33:40.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The reason we check existing votes is to increase the likelihood that validators vote on the same eth1 block. I think this has been called the “pile on effect”.\n\nBasically, if validators are looking at different (but overlapping) windows of eth1 blocks, if they consider other votes they’ll still vote on the same thing.",
+      "createdAt": "2019-11-13T19:34:11.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "what is this voting mechanism? Agree with everyone else some of the time,  cast your actual vote some of the time?",
+      "createdAt": "2019-11-13T19:34:33.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It’s more like “vote with the majority, as long as the majority vote is valid (from your view)”",
+      "createdAt": "2019-11-13T19:35:12.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "valid == the correct view of eth1?",
+      "createdAt": "2019-11-13T19:35:48.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yeah, valid from your view of the eth1 chain",
+      "createdAt": "2019-11-13T19:36:23.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Very simplified it’s “select a range of blocks and vote on the latest one, unless one of the other blocks in that range already has more votes than the latest one”",
+      "createdAt": "2019-11-13T19:37:42.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "hmm, and that is not defined? I suppose valid would mean \"any canonical eth1 block in the eth1 voting period\"",
+      "createdAt": "2019-11-13T19:37:45.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I’m not sure I follow, everyone’s view of the eth1 chain is subjective",
+      "createdAt": "2019-11-13T19:38:30.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "when we are in the tail period, why would we consider votes from the previous eth1 voting period?",
+      "createdAt": "2019-11-13T19:38:58.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "wouldn't that almost always be a majority in the tail period?",
+      "createdAt": "2019-11-13T19:39:17.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "and also wouldn't be the same range of blocks",
+      "createdAt": "2019-11-13T19:39:36.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "all_eth1_votes should (in non-broken circumstances) be a superset of new_eth_votes",
+      "createdAt": "2019-11-13T19:40:32.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Mm.. actually perhaps that’s not true if we select a new block in the middle of the voting period",
+      "createdAt": "2019-11-13T19:41:29.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "lets say everyone in previous period voted on 0x0A 1024 votes, when we are in the tail period of 992 to 1024, the votes in the new_eth1_votes are not the majority",
+      "createdAt": "2019-11-13T19:41:56.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we'd favor an old vote?",
+      "createdAt": "2019-11-13T19:42:25.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The votes from the previous period are discarded",
+      "createdAt": "2019-11-13T19:42:26.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "They’re simply not in the state anymore",
+      "createdAt": "2019-11-13T19:42:35.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ah",
+      "createdAt": "2019-11-13T19:42:54.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2019-11-13T19:43:06.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "still triyng to wrap my head around this method",
+      "createdAt": "2019-11-13T19:43:33.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we look at all of the votes in the state, then filter out some?",
+      "createdAt": "2019-11-13T19:43:52.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i think my confusion is coming from these\n```python\n    new_eth1_data = [get_eth1_data(distance) for distance in range(ETH1_FOLLOW_DISTANCE, 2 * ETH1_FOLLOW_DISTANCE)]\n    all_eth1_data = [get_eth1_data(distance) for distance in range(ETH1_FOLLOW_DISTANCE, previous_eth1_distance)]\n\n```",
+      "createdAt": "2019-11-13T19:44:37.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "imagining `get_eth1_data` since it's not defined",
+      "createdAt": "2019-11-13T19:44:59.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "distance is the eth1 block number?",
+      "createdAt": "2019-11-13T19:45:05.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Oh let me find an issue, I tried to define this",
+      "createdAt": "2019-11-13T19:45:18.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ty",
+      "createdAt": "2019-11-13T19:45:23.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we've had an eth1data mechanism working since april and doesn't do this majority selection algorithm",
+      "createdAt": "2019-11-13T19:45:51.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i suppose it only works because single client",
+      "createdAt": "2019-11-13T19:45:59.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/eth2.0-specs/issues/1439",
+      "createdAt": "2019-11-13T19:46:04.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "See the “clarification” section",
+      "createdAt": "2019-11-13T19:46:14.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ty",
+      "createdAt": "2019-11-13T19:48:12.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "hmm",
+      "createdAt": "2019-11-13T19:49:07.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "```python\n\n  last_block_number = [block.number for block in entire_eth1_chain() if block.timestamp >= time][0]\n```",
+      "createdAt": "2019-11-13T19:49:10.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so we just take the head of the eth1 chain?",
+      "createdAt": "2019-11-13T19:49:34.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "let me explain what we have today:\n1) determine the timestamp of the start of the eth1 voting period\n2) read the eth1 chain to find the block closest (but not before) this timestamp\n3) use that block as our vote",
+      "createdAt": "2019-11-13T19:50:52.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so i'm trying to factor in a step, 2.5, which is this \"pile on effect\"",
+      "createdAt": "2019-11-13T19:51:35.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "my understanding so far is\n- determine our vote (with the algorithm above)\n- look at the state's eth1 data votes\n- if there is a majority eth1data vote that doesn't equal our vote\n- determine is the majority vote \"is valid\" (to be defined)\n- if valid, agree with majority vote as our eth1data vote, otherwise use our vote from step 0",
+      "createdAt": "2019-11-13T19:53:59.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "am i on the right track here?",
+      "createdAt": "2019-11-13T19:54:26.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "You're missing the delay part: we wait in the beginning of the eth1 vote period to encourage new better votes, and then only after having that as a start we get to consider to copy the majority vote.",
+      "createdAt": "2019-11-13T19:56:29.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "what delay?",
+      "createdAt": "2019-11-13T19:56:50.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "`period_tail = state.slot % SLOTS_PER_ETH1_VOTING_PERIOD >= integer_squareroot(SLOTS_PER_ETH1_VOTING_PERIOD)`",
+      "createdAt": "2019-11-13T19:57:10.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ok so only check the state for majority if we are in the tail period?",
+      "createdAt": "2019-11-13T19:57:33.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "that's a pretty small window, only 32 slots",
+      "createdAt": "2019-11-13T19:58:07.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "oh wait i had it inverted, i thought tail period was the last 32 slots (tail)",
+      "createdAt": "2019-11-13T19:58:38.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the tail is actually very long lol",
+      "createdAt": "2019-11-13T19:58:50.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Maybe a worded it badly, what I'm trying to say is that during that start period we want to collect fresh votes. Not necessarily the majority if the majority is for older data",
+      "createdAt": "2019-11-13T19:59:09.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "gotcha",
+      "createdAt": "2019-11-13T19:59:14.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "OK",
+      "createdAt": "2019-11-13T19:59:15.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so what can i use to determine validity?",
+      "createdAt": "2019-11-13T19:59:21.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "since it is subjective, i can lazily say \"if the block number is not N then its not a valid eth1 vote for this period\"",
+      "createdAt": "2019-11-13T20:00:14.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "which kind of defeats the whole process",
+      "createdAt": "2019-11-13T20:00:25.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It's about emergent behavior. If every honest validator does a good effort to produce some fresh data, and pile on net-positive progress with a majority vote, there will be progress in eth1 processing.",
+      "createdAt": "2019-11-13T20:01:18.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@539495253418180618> and you had this exact discussion 2 months ago, you may want to revisit it with him",
+      "createdAt": "2019-11-13T20:02:42.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "thanks, I think we need some clarification here because this process, being subjective, is unlikely to converge unless there is clear communication around the process",
+      "createdAt": "2019-11-13T20:03:36.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "is there disparity in eth1 clients wrt block timestamps?",
+      "createdAt": "2019-11-13T20:04:36.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "timestamps are set by the miners an included in the block hash",
+      "createdAt": "2019-11-13T20:04:55.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Right, the spec is trying to dictate the approach for honest validators to get the network to agree on something as a whole. It's not strictly enforced as part of consensus (apart from the process eth1 data conditions in the beacon spec)",
+      "createdAt": "2019-11-13T20:05:10.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yeah, but we all see the same eth1 chain?",
+      "createdAt": "2019-11-13T20:05:16.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "hopefully we all see the same eth1 chain, that's what we're trying to vote on. if we don't our eth1 linking is broken.",
+      "createdAt": "2019-11-13T20:05:44.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "im not sure how this pile on effect is going to save us if the linking is broken",
+      "createdAt": "2019-11-13T20:06:11.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "trying to rationalize this complexity but struggling to do so",
+      "createdAt": "2019-11-13T20:06:22.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if the linking is broken (e.g., every validator sees a different eth1 chain) then we're \"up shit creek without a paddle\" as my dad would say",
+      "createdAt": "2019-11-13T20:07:12.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "there is an underlying honest majority assumption",
+      "createdAt": "2019-11-13T20:07:32.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the pile-on effect helps us if the chain views are slightly different",
+      "createdAt": "2019-11-13T20:07:39.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so that eventually the beacon chain tracks the eth1 chain, possibly w/ some delay",
+      "createdAt": "2019-11-13T20:07:45.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "maybe someone can describe a scenario where this logic solves a problem",
+      "createdAt": "2019-11-13T20:07:48.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the pile-on bit you mean?",
+      "createdAt": "2019-11-13T20:08:08.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2019-11-13T20:08:10.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the idea is to avoid lazy validators from slowing (halting?) progress on eth1 data",
+      "createdAt": "2019-11-13T20:08:23.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "rather than always casting my vote as i describe it",
+      "createdAt": "2019-11-13T20:08:29.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we can dig up the backing issues",
+      "createdAt": "2019-11-13T20:08:36.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "how does this mitigate lazy validators?",
+      "createdAt": "2019-11-13T20:08:47.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "sounds like it encourages lazy validators",
+      "createdAt": "2019-11-13T20:08:58.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/eth2.0-specs/issues/722",
+      "createdAt": "2019-11-13T20:09:39.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "basically this scenario: https://github.com/ethereum/eth2.0-specs/issues/722#issue-417813521",
+      "createdAt": "2019-11-13T20:10:17.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if we have an honest majority then you'll make as much progress as possible during the initial part of the voting period as we don't just \"pile on\" -- which is what the original honest validator suggestion gave rise to",
+      "createdAt": "2019-11-13T20:11:18.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i'm not sure that is your actual question tho",
+      "createdAt": "2019-11-13T20:11:27.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "my question is \"if we have an honest majority, why do we need pile on?\"",
+      "createdAt": "2019-11-13T20:11:44.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "what problem does this solve",
+      "createdAt": "2019-11-13T20:11:47.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if we have honest majority, we will converge without pile on effect",
+      "createdAt": "2019-11-13T20:12:05.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "for the situation prior to what is currently in the doc -- the \"honest\" behavior was essentially to copy the first vote",
+      "createdAt": "2019-11-13T20:12:21.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so if the first vote is stale, then you degrade liveness of the eth1 mechanism",
+      "createdAt": "2019-11-13T20:12:39.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "how does this mitigate it though?",
+      "createdAt": "2019-11-13T20:12:42.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i can still do that",
+      "createdAt": "2019-11-13T20:12:47.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "you can still have an honest majority w/ one bad actor",
+      "createdAt": "2019-11-13T20:12:50.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "still do what?",
+      "createdAt": "2019-11-13T20:13:33.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if an honest majority follows my algorithm above (not reading state at all to determine eth1data vote) then we dont need pile on effect",
+      "createdAt": "2019-11-13T20:13:35.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> how does this mitigate it though?",
+      "createdAt": "2019-11-13T20:13:36.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "by changing the default behavior from \"copy the first vote\" to \"submit your latest view of the chain\" basically",
+      "createdAt": "2019-11-13T20:13:56.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but that's not what it is right now, it's \"copy the majority vote after 32 slots\"",
+      "createdAt": "2019-11-13T20:14:28.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so you want to get rid of the \"copying\" part entirely?",
+      "createdAt": "2019-11-13T20:14:39.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "my proposal above is always \"submit your view of the chain\"",
+      "createdAt": "2019-11-13T20:14:56.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "no copying at all, no reading state",
+      "createdAt": "2019-11-13T20:15:02.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but then you need validators to converge on  a particular block to get consensus, right?",
+      "createdAt": "2019-11-13T20:15:18.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if i just always submit my head, there will be `VOTING_PERIOD` different block hashes",
+      "createdAt": "2019-11-13T20:15:35.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, which would happen if there was an honest majority",
+      "createdAt": "2019-11-13T20:15:37.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "you dont submit the head always",
+      "createdAt": "2019-11-13T20:15:46.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "you submit the block at the start of the eth1 voting period",
+      "createdAt": "2019-11-13T20:15:56.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "it's not a moving target",
+      "createdAt": "2019-11-13T20:16:03.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "gotcha",
+      "createdAt": "2019-11-13T20:16:14.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "what happens under this new algo if there is a heavy chain split so that we can't come to consensus on the block at the start of the eth1 voting period?",
+      "createdAt": "2019-11-13T20:17:28.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i'd have to think about it a bit more, but it seems you gain some resistance to forks if you can mix in some info from other validators",
+      "createdAt": "2019-11-13T20:18:14.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yeah so lets say eth1 hardforks and only 50% of eth2 validators upgraded, we are in big trouble and pile on effect wouldn't help",
+      "createdAt": "2019-11-13T20:18:20.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "the majority vote from pile on wouldnt be valid in the view of 50% of validators",
+      "createdAt": "2019-11-13T20:18:44.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ralexstokes",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i gotta run but if you think we should change it, we can move this to a PR -- i will say, some what separately, i do think this part of the spec is p confusing",
+      "createdAt": "2019-11-13T20:20:16.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> you submit the block at the start of the eth1 voting period\n\nThose first few validators are doing that more or less. Just with more validators, a smaller window of possible votes, and convergence.\n\n> my proposal above is always \"submit your view of the chain\"\n\nWhen you are voting after that initial period, you take whatever your view of the chain is, starting after the last eth1 checkpoint. And then see what others are voting for to determine the best candidate. You don't copy things outside of your own view.",
+      "createdAt": "2019-11-13T20:20:32.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "pile on would help in the scenario where all the validators have latest eth1 blocks that are somewhere within the period where we're supposed to vote",
+      "createdAt": "2019-11-13T20:21:16.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "do i have the wrong understanding that we are voting on \"what was the eth1 block at the start of the voting period?\"",
+      "createdAt": "2019-11-13T20:21:35.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "i.e., if eth1 became \"unavailable\" for several hours",
+      "createdAt": "2019-11-13T20:21:37.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I would say we are voting for any recent (`ETH1_FOLLOW_DISTANCE, 2 * ETH1_FOLLOW_DISTANCE`) part of your view in that initial period (`integer_squareroot(SLOTS_PER_ETH1_VOTING_PERIOD)` slots) and then for all data (`ETH1_FOLLOW_DISTANCE, previous_eth1_distance`) after that, to at least make some progress when there is no clear recent eth1 data winner. And you prefer votes in your own subjective window that others are voting for as well, to increase your chances of something in your view to get the majority, and at minimum put a vote to any progress.",
+      "createdAt": "2019-11-13T20:26:26.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Scenario where pile-on helps:\n\nImagine if you had two validators. Both of these validators have a view of the eth1 chain where the head block is less than the start of the current eth1 voting period. Both validators are on the same eth1 chain, but validator A has block #41 and validator B has block #42.\n\n_Without_ pile-on, one would vote #41 and the other #42. But, _with_ pile-on, if the validator A votes first, then validator B will also vote #41 (not #42)",
+      "createdAt": "2019-11-13T20:29:13.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so we aren't voting on the block at the start of the voting period?",
+      "createdAt": "2019-11-13T20:29:53.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we are asking validators to converge on any block in a 3.5 hour range of blocks?",
+      "createdAt": "2019-11-13T20:30:11.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "prestonvanloon",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "if that is the case, i think its very unlikely that the first 32 votes will agree",
+      "createdAt": "2019-11-13T20:32:25.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "They don't have to agree",
+      "createdAt": "2019-11-13T20:32:45.927000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,602 @@
+{
+  "schemaVersion": 1,
+  "channel": "1559-dev",
+  "date": "2021-01-29",
+  "messageCount": 74,
+  "sourceHash": "32a7f2ef2c21b36de0ee6662e0c78d7d4d9e4212b617f80a9ee9c7fc70b91450",
+  "searchText": "could someone here let me know what the feeCap for this tx is in block 12: `0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c` okay nvm was able to get it, it's `1000` i think i'm confused, but why is that transaction valid on block 12? The base fee is `765625000` but the gas price for that tx is only `1000` ``` > eth.getBlockByNumber(12) { baseFee: \"0x2da282a8\", difficulty: \"0x1e870c9\", extraData: \"0x\", gasLimit: \"0xdffff6b9a9a00\", gasUsed: \"0x721ca536\", hash: \"0xc78327a66249838343d24320b1dc40ddcbc23439a8adc6ccf5a103778dbb7417\", ... number: \"0xc\", parentHash: \"0x724dd000d203c5925ab814cac406e60fafc2f32384f95a18a073989dd7181a94\", receiptsRoot: \"0x4004cf0394c41c84f33414aa8aea4772c903497bd3544d4a8bddb1f4b793a20c\", sha3Uncles: \"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347\", size: \"0x29c\", stateRoot: \"0x8aa786813f7f7a3fa5a289ed6c1185ef7d35141146b8f4d72ab83174a5112d17\", timestamp: \"0x60018a34\", totalDifficulty: \"0x18dde72b\", transactions: [\"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\"], transactionsRoot: \"0x957f52c4845335aa39a57c25e912a844d0e781128518179888b1d2070b37f262\", uncles: [] } > eth.getTransaction(\"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\") { blockHash: \"0xc78327a66249838343d24320b1dc40ddcbc23439a8adc6ccf5a103778dbb7417\", blockNumber: 12, from: \"0xfe3b557e8fb62b89f4916b721be55ceb828dbd73\", gas: 1000000000000000, gasPrice: 1000, hash: \"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\", input: \"0x780900dc000000000000000000000000000000000000000000000000000000000000c350\", nonce: 3, r: \"0x1a96b4ddef3d86c7a5ddd81b84a0161f2d4f9de230d0614c23722f0b5bccfceb\", s: \"0x11a31b9319f67d72f6eb3006d7726ad9948e100884ccb545ef3c84243162fd84\", to: \"0x42699a7612a82f1d9c36148af9c77354759b210b\", transactionIndex: 0, v: \"0x254\", value: 0 } ``` That does appear to be a bug. Indeed, it seems to be a bug. I will investigate. Ok I found the bug. We were ensuring the effective gas price to be higher than the base only for 1559 transactions. Instead of doing the check for legacy transactions as well Unfortunately Vulcanize Geth implementation has the same bug Testnet data wont be usable... I will wait for a full integration test with Quilt implementation before starting the state generation Unless we want to do the performance test on a bugged implementation ? I mean there is no error technically in the state because users are all big whales and have funds to pay the base fee even if the gas price was bad Can't you still test with just only EIP-1559 transactions (no legacy)? For the purpose of load/scale tests, the difference shouldn't matter. we can still test with both transaction types If Quilt disable the check that ensures the effective gas price is higher than the base fee IMO we should do that This is why I am waiting before removing this large state Otherwise we will have to wait for about ~2 weeks I'm starting to wonder if the \"fork mainnet\" option may have ended up being faster in the long run. 😬 Hmm, not sure. I mean, it would imply to do some tricky code in the client. And that won't be reusable. If we did not have those bugs we were ready 3 weeks ago And the tooling is reusable for any EIP The problem is that no one was ready to do integration tests before I started the generation (2 times) <@!574864862338088960> We added our node to ethstats and we're syncing now. How long other clients synchronize? ~2 days <@!758579010027782144> So you are saying Nethermind has also the bug ? 😸 Luckily we have fresh eyes with <@&602872761743835146> team Because the bug is from the beginning tbh don't know 🙂 I need to check it You are at block 73 so you do have the bug otherwise block 12 would have failed understand now, so yeah 🙂 it seems we also have a bug 🙂 My suggestion: - we start performance tests once Nethermind node is synced (with bugged Besu, bugged Vulcanize Geth and bugged Nethermind) - in parallel we use the first testnet (the small one) as a multi-client integration testnet and we test with fixed Besu, fixed Nethermind and Quilt Geth Thoughts ? <@!301186049323958275> <@!552133098075193354> <@!543900561460822016> <@!758579010027782144> ? 👍 I think that it is generally valuable being able to do integration tests with a forked mainnet. While this time we wanted to simulate load, in other situations we may have wanted to simulate something else. I think the requirements to fork mainnet are just a patch to the difficulty curve (which can be an EIP-like thing that is just never applied to mainnet) and a chain ID update? but the chain ID update invalidates transaction signature... Why is that a problem? That seems very much like desired behavior. (so your test transactions can't get replayed on mainnet) But if we fork mainnet past transactions signature are invalid on the new testnet with a new chain ID maybe I am missing something Oh, no. You have essentially an EIP transition that changes the chain ID from some block forward. Exactly like ETC did. ah ok yeah I see (really, we should be doing that every fork *anyway*, and in ETH2 we will do this, but that is a separate conversation not appropriate for this channel) dont you think that dApps, wallets, etc rely on the chain id sometimes ? I would *hope* that those two \"EIPs\" would be relatively easy to implement and we could reuse them anytime we want to work with a forked mainnet. wouldn't it be complex to manage All of the tooling I know correctly ask the connected JSON-RPC endpoint for the chain ID via `eth_chainId` (or maybe it is `eth_getChainId`). ok I think they even fallback to `net_version` or whatever it is if that isn't available. In general, any tooling that works with a testnet should work with a forked mainnet. From the point of view of the tooling, it is just connecting to some random testnet. I see what you mean A user should not rely on the network name displayed on the dApp Now what *would* fail in some cases are apps that have something like: ```json { \"1\": { \"Uniswap\": \"0xabcd1234...\", \"Aave\": \"0xdeadbeef...\", }, \"42\": { \"Uniswap\": \"0xcafebabe...\", \"Aave\": \"0xbaadf00d...\" } } ```but fixing those is easy, and on a brand new test network those won't work at all anyway, so it is at worst no loss. This is exactly what I had in mind when I meant dApps issues I agree it is easy But it means an update after each fork Which can be reasonable given the cadence Ah. Yeah, update chain ID every fork is a bit tricky. Apps need to prep for it in ETH2 though. indeed I have never really liked the undue weight that is given to the chain that retains the chain ID in a fork. I'm a big fan of fork based governance, and the chain ID is a power schelling point. Yep I totally agree np, i can remove the check in our implementation sounds good, let's wait for Tim's opinion ? <@!301186049323958275> you dont have any objection if we do the performance tests on this version ? I'm in favor of doing the test with the buggy implementations. We're just checking clients' performance under heavy-ish load, so it shouldn't matter if there's a bug related to the transition period. This way, we'll have data to share with AllCoreDevs when we come back next time with the ready implementations. And _worst case_, if other teams had an issue with this approach and wanted to re-run the tests a while from now, then sure, let's do it. I just feel like at this point this test is mostly a \"show it works\" exercise, especially given https://notes.ethereum.org/@vbuterin/eip_1559_spikes",
+  "excerpts": [
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "could someone here let me know what the feeCap for this tx is in block 12: `0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c`",
+      "createdAt": "2021-01-29T00:25:37.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "okay nvm was able to get it, it's `1000`",
+      "createdAt": "2021-01-29T00:39:53.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i think i'm confused, but why is that transaction valid on block 12? The base fee is `765625000` but the gas price for that tx is only `1000`",
+      "createdAt": "2021-01-29T00:41:32.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\n> eth.getBlockByNumber(12)\n{\n  baseFee: \"0x2da282a8\",\n  difficulty: \"0x1e870c9\",\n  extraData: \"0x\",\n  gasLimit: \"0xdffff6b9a9a00\",\n  gasUsed: \"0x721ca536\",\n  hash: \"0xc78327a66249838343d24320b1dc40ddcbc23439a8adc6ccf5a103778dbb7417\",\n  ...\n  number: \"0xc\",\n  parentHash: \"0x724dd000d203c5925ab814cac406e60fafc2f32384f95a18a073989dd7181a94\",\n  receiptsRoot: \"0x4004cf0394c41c84f33414aa8aea4772c903497bd3544d4a8bddb1f4b793a20c\",\n  sha3Uncles: \"0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347\",\n  size: \"0x29c\",\n  stateRoot: \"0x8aa786813f7f7a3fa5a289ed6c1185ef7d35141146b8f4d72ab83174a5112d17\",\n  timestamp: \"0x60018a34\",\n  totalDifficulty: \"0x18dde72b\",\n  transactions: [\"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\"],\n  transactionsRoot: \"0x957f52c4845335aa39a57c25e912a844d0e781128518179888b1d2070b37f262\",\n  uncles: []\n}\n> eth.getTransaction(\"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\")\n{\n  blockHash: \"0xc78327a66249838343d24320b1dc40ddcbc23439a8adc6ccf5a103778dbb7417\",\n  blockNumber: 12,\n  from: \"0xfe3b557e8fb62b89f4916b721be55ceb828dbd73\",\n  gas: 1000000000000000,\n  gasPrice: 1000,\n  hash: \"0xc04d8786452516f9477ff6c66f81af01d3fcd836b3d401e3b491c83b8f6c7e9c\",\n  input: \"0x780900dc000000000000000000000000000000000000000000000000000000000000c350\",\n  nonce: 3,\n  r: \"0x1a96b4ddef3d86c7a5ddd81b84a0161f2d4f9de230d0614c23722f0b5bccfceb\",\n  s: \"0x11a31b9319f67d72f6eb3006d7726ad9948e100884ccb545ef3c84243162fd84\",\n  to: \"0x42699a7612a82f1d9c36148af9c77354759b210b\",\n  transactionIndex: 0,\n  v: \"0x254\",\n  value: 0\n}\n```",
+      "createdAt": "2021-01-29T01:01:45.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That does appear to be a bug.",
+      "createdAt": "2021-01-29T01:53:19.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Indeed, it seems to be a bug.",
+      "createdAt": "2021-01-29T08:02:16.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will investigate.",
+      "createdAt": "2021-01-29T08:02:29.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok I found the bug. We were ensuring the effective gas price to be higher than the base only for 1559 transactions. Instead of doing the check for legacy transactions as well",
+      "createdAt": "2021-01-29T12:18:30.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unfortunately Vulcanize Geth implementation has the same bug",
+      "createdAt": "2021-01-29T12:18:46.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Testnet data wont be usable...",
+      "createdAt": "2021-01-29T12:18:59.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will wait for a full integration test with Quilt implementation before starting the state generation",
+      "createdAt": "2021-01-29T12:20:43.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Unless we want to do the performance test on a bugged implementation ? I mean there is no error technically in the state because users are all big whales and have funds to pay the base fee even if the gas price was bad",
+      "createdAt": "2021-01-29T12:21:44.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Can't you still test with just only EIP-1559 transactions (no legacy)?",
+      "createdAt": "2021-01-29T12:22:41.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For the purpose of load/scale tests, the difference shouldn't matter.",
+      "createdAt": "2021-01-29T12:22:52.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we can still test with both transaction types",
+      "createdAt": "2021-01-29T12:23:20.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If Quilt disable the check that ensures the effective gas price is higher than the base fee",
+      "createdAt": "2021-01-29T12:23:39.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "IMO we should do that",
+      "createdAt": "2021-01-29T12:23:43.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is why I am waiting before removing this large state",
+      "createdAt": "2021-01-29T12:23:56.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Otherwise we will have to wait for about ~2 weeks",
+      "createdAt": "2021-01-29T12:28:38.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm starting to wonder if the \"fork mainnet\" option may have ended up being faster in the long run.  😬",
+      "createdAt": "2021-01-29T12:29:16.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, not sure. I mean, it would imply to do some tricky code in the client. And that won't be reusable. If we did not have those bugs we were ready 3 weeks ago",
+      "createdAt": "2021-01-29T12:30:32.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And the tooling is reusable for any EIP",
+      "createdAt": "2021-01-29T12:30:38.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The problem is that no one was ready to do integration tests before I started the generation (2 times)",
+      "createdAt": "2021-01-29T12:31:10.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!574864862338088960> We added our node to ethstats and we're syncing now. How long other clients synchronize?",
+      "createdAt": "2021-01-29T12:32:54.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "~2 days",
+      "createdAt": "2021-01-29T12:33:59.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!758579010027782144> So you are saying Nethermind has also the bug ? 😸",
+      "createdAt": "2021-01-29T12:34:45.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Luckily we have fresh eyes with <@&602872761743835146> team",
+      "createdAt": "2021-01-29T12:35:01.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Because the bug is from the beginning",
+      "createdAt": "2021-01-29T12:35:10.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "tbh don't know 🙂 I need to check it",
+      "createdAt": "2021-01-29T12:36:59.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You are at block 73",
+      "createdAt": "2021-01-29T12:37:22.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so you do have the bug",
+      "createdAt": "2021-01-29T12:37:31.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "otherwise block 12 would have failed",
+      "createdAt": "2021-01-29T12:37:39.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "understand now, so yeah 🙂 it seems we also have a bug 🙂",
+      "createdAt": "2021-01-29T12:41:06.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My suggestion:\n- we start performance tests once Nethermind node is synced (with bugged Besu, bugged Vulcanize Geth and bugged Nethermind)\n- in parallel we use the first testnet (the small one) as a multi-client integration testnet and we test with fixed Besu, fixed Nethermind and Quilt Geth\nThoughts ?",
+      "createdAt": "2021-01-29T12:44:13.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> <@!552133098075193354> <@!543900561460822016> <@!758579010027782144> ?",
+      "createdAt": "2021-01-29T12:45:59.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "👍",
+      "createdAt": "2021-01-29T12:46:27.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think that it is generally valuable being able to do integration tests with a forked mainnet.  While this time we wanted to simulate load, in other situations we may have wanted to simulate something else.",
+      "createdAt": "2021-01-29T12:53:39.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the requirements to fork mainnet are just a patch to the difficulty curve (which can be an EIP-like thing that is just never applied to mainnet) and a chain ID update?",
+      "createdAt": "2021-01-29T12:54:20.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but the chain ID update invalidates transaction signature...",
+      "createdAt": "2021-01-29T12:54:46.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why is that a problem?",
+      "createdAt": "2021-01-29T12:54:55.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That seems very much like desired behavior.",
+      "createdAt": "2021-01-29T12:55:05.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(so your test transactions can't get replayed on mainnet)",
+      "createdAt": "2021-01-29T12:55:15.913000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But if we fork mainnet past transactions signature are invalid on the new testnet with a new chain ID",
+      "createdAt": "2021-01-29T12:55:56.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "maybe I am missing something",
+      "createdAt": "2021-01-29T12:56:03.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, no.",
+      "createdAt": "2021-01-29T12:56:06.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You have essentially an EIP transition that changes the chain ID from some block forward.",
+      "createdAt": "2021-01-29T12:56:20.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Exactly like ETC did.",
+      "createdAt": "2021-01-29T12:56:25.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah ok",
+      "createdAt": "2021-01-29T12:56:25.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah I see",
+      "createdAt": "2021-01-29T12:56:29.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(really, we should be doing that every fork *anyway*, and in ETH2 we will do this, but that is a separate conversation not appropriate for this channel)",
+      "createdAt": "2021-01-29T12:56:40.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "dont you think that dApps, wallets, etc rely on the chain id sometimes ?",
+      "createdAt": "2021-01-29T12:57:17.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I would *hope* that those two \"EIPs\" would be relatively easy to implement and we could reuse them anytime we want to work with a forked mainnet.",
+      "createdAt": "2021-01-29T12:57:23.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "wouldn't it be complex to manage",
+      "createdAt": "2021-01-29T12:57:26.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "All of the tooling I know correctly ask the connected JSON-RPC endpoint for the chain ID via `eth_chainId` (or maybe it is `eth_getChainId`).",
+      "createdAt": "2021-01-29T12:57:52.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2021-01-29T12:58:09.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think they even fallback to `net_version` or whatever it is if that isn't available.",
+      "createdAt": "2021-01-29T12:58:11.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In general, any tooling that works with a testnet should work with a forked mainnet.",
+      "createdAt": "2021-01-29T12:58:32.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "From the point of view of the tooling, it is just connecting to some random testnet.",
+      "createdAt": "2021-01-29T12:58:43.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see what you mean",
+      "createdAt": "2021-01-29T12:59:45.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A user should not rely on the network name displayed on the dApp",
+      "createdAt": "2021-01-29T13:00:08.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Now what *would* fail in some cases are apps that have something like:\n```json\n{\n    \"1\": {\n        \"Uniswap\": \"0xabcd1234...\",\n        \"Aave\": \"0xdeadbeef...\",\n    },\n    \"42\": {\n        \"Uniswap\": \"0xcafebabe...\",\n        \"Aave\": \"0xbaadf00d...\"\n    }\n}\n```but fixing those is easy, and on a brand new test network those won't work at all anyway, so it is at worst no loss.",
+      "createdAt": "2021-01-29T13:00:31.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is exactly what I had in mind when I meant dApps issues",
+      "createdAt": "2021-01-29T13:01:22.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I agree it is easy",
+      "createdAt": "2021-01-29T13:01:26.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But it means an update after each fork",
+      "createdAt": "2021-01-29T13:01:40.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which can be reasonable given the cadence",
+      "createdAt": "2021-01-29T13:01:52.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah.  Yeah, update chain ID every fork is a bit tricky.  Apps need to prep for it in ETH2 though.",
+      "createdAt": "2021-01-29T13:02:08.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "indeed",
+      "createdAt": "2021-01-29T13:02:23.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have never really liked the undue weight that is given to the chain that retains the chain ID in a fork.",
+      "createdAt": "2021-01-29T13:02:45.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm a big fan of fork based governance, and the chain ID is a power schelling point.",
+      "createdAt": "2021-01-29T13:03:15.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep I totally agree",
+      "createdAt": "2021-01-29T13:06:08.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "np, i can remove the check in our implementation",
+      "createdAt": "2021-01-29T13:45:06.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "abdel.stark",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "sounds good, let's wait for Tim's opinion ? <@!301186049323958275> you dont have any objection if we do the performance tests on this version ?",
+      "createdAt": "2021-01-29T14:00:45.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm in favor of doing the test with the buggy implementations. We're just checking clients' performance under heavy-ish load, so it shouldn't matter if there's a bug related to the transition period. This way, we'll have data to share with AllCoreDevs when we come back next time with the ready implementations.",
+      "createdAt": "2021-01-29T16:25:40.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And _worst case_, if other teams had an issue with this approach and wanted to re-run the tests a while from now, then sure, let's do it. I just feel like at this point this test is mostly a \"show it works\" exercise, especially given https://notes.ethereum.org/@vbuterin/eip_1559_spikes",
+      "createdAt": "2021-01-29T16:26:41.214000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,562 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2025-03-18",
+  "messageCount": 69,
+  "sourceHash": "350d1d448f9a1ed8361bd16cfa71c954b9dc9d1eefd60dfcd1d799008e4ad0d2",
+  "searchText": "Hi team, I have a quick question about nimbus. I'm running custom devnet where I increased the MAX_BLOBS_PER_BLOCK to a much higher number (like 72), and nimbus is printing error in startup: `FAT 2025-03-18 01:21:58.574+00:00 Cannot load network: PresetFileError msg=\"Cannot override config (required: MAX_BLOBS_PER_BLOCK_ELECTRA==9 - config: MAX_BLOBS_PER_BLOCK_ELECTRA=72)\" networkName=/network-config` Is overriding the max blob count in genesis not allowed in nimbus? First, that appears to be from a slightly older version of Nimbus. v25.3.0 shows an `<=` error. But, still, `MAX_BLOBS_PER_BLOCK_ELECTRA` must be `<= MAX_SUPPORTED_BLOBS_PER_BLOCK`, which is 9. I see, thank you 🙏 In the upcoming [peerdas-devnet-6 specs](https://notes.ethereum.org/@ethpandaops/peerdas-devnet-6), I think we will be using 32 as `MAX_BLOBS_PER_BLOCK_ELECTRA`.(or maybe that's only for the pre-devnet testing?) Would there be a new release in nimbus to support this? Generally speaking, we're not likely to make a release of Nimbus for PeerDAS devnets, since the assumption is that PeerDAS devnets would be using e.g., a branch from <@785811170387951616> typically. I do wonder a bit about why using a more-than-mainnet value (is it going back to the old idea of pretending that PeerDAS is one of the \"soft forks\" etc? no idea). But either way, this kind of thing can be adjusted in a branch for this purpose The trunk/released branch of Nimbus doesn't really support PeerDAS at all. It has some ofo the helper functions, it passes (all of before beta.3, now only doesn't yet have the new `compute_cell` tests implemented) the Fulu consensus spec tests, <@785811170387951616> and I have begun merging some of it, et cetera. But it can't be said as a whole to yet support PeerDAS. So any \"release\" of Nimbus is unsuitable for `peerdas-devnet-6` Ah, okay. I was just running few private devnets to test blobs in pectra/peerdas. Then I'll use a separate branch to handle the max blob count, and hold off the test with peerDAS for now! Thanks for the details 🙂 Ah, in general, \"pectra/peerdas\" is not a thing Nimbus thinks exists see my comment about \"soft forks\" PeerDAS breakout call in <t:1742306400:R> https://github.com/ethereum/pm/issues/1364 Reminder to provide feedback to the two spec PRs discussed last week ideally before the call 🙏 : - https://github.com/ethereum/EIPs/pull/9378/ - https://github.com/ethereum/consensus-specs/pull/4154 <@654267572107083777> generally speaking we would always want to be able to adjust config parameters, but not presets. Nimbus setting config parameters as presets feels backwards. I would really appriciate if you guys changed this, and would handle all config parameters for what they are, and not treat every single config parameter as a constant preset. https://github.com/status-im/nimbus-eth2/pull/6964 ~~most likely~~ i'm pretty sure in our unstable we do have runtime cofigurables, you can expect the same for the peerdas branches before devnet-6 launch using latest unstable I'm still getting: ``` FAT 2025-03-18 08:40:58.471+00:00 Cannot load network: PresetFileError msg=\"Cannot override config (required: BLOB_SIDECAR_SUBNET_COUNT_ELECTRA`<=`9 - config: BLOB_SIDECAR_SUBNET_COUNT_ELECTRA=10)\" networkName=/network-configs ``` which network is this? kurtosis you have used unstable? ok i'll see to it we can get it resolved by EOD yes, I tested latest unstable branch where does the primitive `MAX_BLOBS_PER_BLOCK_ELECTRA must be <= MAX_SUPPORTED_BLOBS_PER_BLOCK` come from? afaik `MAX_SUPPORTED_BLOBS_PER_BLOCK` isn't a config or a preset value > MAX_SUPPORTED_BLOBS_PER_BLOCK isn't a config or a preset value agree <@785811170387951616> it also seems to be an issue with nimbusel btw <@498331483732312075> looks like the custom blob numbers also doesn't work well for grandine btw. <@498331483732312075> this is what I've tested: ```yaml participants: - el_type: geth el_image: ethereum/client-go:v1.15.5 cl_type: teku cl_image: consensys/teku:develop - el_type: geth el_image: ethereum/client-go:v1.15.5 cl_type: grandine cl_image: ethpandaops/grandine:hangleang-peerdas-fulu-696bfff network_params: max_blobs_per_block_electra: 20 target_blobs_per_block_electra: 10 electra_fork_epoch: 1 additional_services: - dora - spamoor_blob spamoor_blob_params: throughput: 20 max_blobs: 2 max_pending: 40 ``` in which network 🙂 i don't work on nimbus el, you can talk to <@706747269424218124> kurtosis ser. grandine set those params in preset, so not able to customize via config cc <@777935002263617576> it shouldn’t be a preset yeah, I agree ohh sorry not all those params, grandine define `max_blobs_per_block*` in preset target is config max is preset?! the target, it is not config for cl, right? yeah just the max is, afaik CL has no reason to know the target - that's done by the blockbuilder The status quo is in between -- most config parameters are truly configurable, some (`checkCompatibility` in `beacon_chain/spec/presets.nim`) are not. This particular `MAX_BLOCKS_PER_BLOB_FOO` one did go to being, as <@199561711278227457> noted, a bit more artificially constrained in the last month or so (to accomodate Gnosis's changing it) any reason that presets are not just https://github.com/ethereum/consensus-specs/tree/dev/presets/mainnet these values? https://github.com/status-im/nimbus-eth2/blob/fad7b9a7133faf63efb552b6caaa3fb1554aba19/beacon_chain/spec/presets.nim#L805-L910 It varies somewhat configs = user overridable should be all these: https://github.com/ethereum/consensus-specs/blob/dev/configs/mainnet.yaml and the presets should be these Some it's more or less arbitrary, some more of a design issue, some have literally never been changed, once, across any of the networks people have reported Nimbus running on, et cetera. Some theoretically might have, but only apply to past forks. Many of them have built-in relationships with each other that break. if only subsets are changed and effectively those would have have to be `doAssert`ed for sanity somewhere, or because the implementation assumes they'll be >= some value (or less than some value, typically the \"actual\" bounds are quite a bit broader than enforced. Anyway, very case-by-case the idea is that all these should in theory be configurable, if its not, then it shouldn't be in the config on the spec side but nimbus team re-ordering based on \"how frequently\" one is changed is just the wrong approach imo e.g we been trying to test faster slots times, but we can't because nimbus doesn't allow it. Every other client does. So what do we do? We just test everything without including nimbus Slot times is one of the main ones where it probably should be, and it's exactly a case involving a larger change. Which should happen, that one has demonstable value being configurable. I'm a bit hesitant to extrapolate that to many of the others, where it's never come up to my knowledge. I think going forward it would be a good general rule of thumb that all new config parameters are actually configurable And of course the number of blobs should be configurable for future fulu testings as we going to need to heavily test different number of target/maxes going forward Fulu doesn't have this constraint For blob numbers in order to be able to compare perf values between electra and fulu I think it would also be nice to make it customizable for electra already we can make it configurable before devnet 6 for fulu Yeah, that one is one of the more arbitrary constraints currently Would be good to be able to compare apples to apples tho, and thats why it would be great to already be able to customize it for electra, not just fulu e.g lets say we want 50 blobs for fulu, lets see if without peerdas what the load would be with 50 blobs. and then compare that with peerdas I mean, it's arbitrary for Electra too in that the codebase doesn't deeply care about it. Parts do, but it's kind of cosmetic I agree, being able to do head-to-head comparisons is useful here so of the two specific examples: - `SECONDS_PER_SLOT`: agree, should be actually-configurable; and - `MAX_BLOBS_PER_BLOCK_ELECTRA`: well, for the trunk branch, maybe, we'll see, these things are all tradeoffs, and yeah, there are tradeoffs on the other side (for one thing, `unstable` can't do PeerDAS in any meaningful way, so the head-to-head comparison can't happen), but the PeerDAS branch(es) sure, why not And for the record, I do think this is the true in a bunch of cases (and no, this is not the time/place to get into which) Hello all! Sunnyside Labs has been running another round of tests on pectra / peerdas devnet to find out any issues with increasing the blob counts. I'd appreciate any feedback or thoughts about the results of the tests: https://testinprod.notion.site/Sunnyside-Devnet-Updates-03-18-1ba8fc57f54680a29153e02aaf684620?pvs=4 Our next priority is `break peerdas network and identify where it breaks`, `how to best monitor peerdas metrics` For this, - any thoughts on which type of analysis would be most helpful for the core devs - what everyone's opinion is on the best(suitable) network configuration for running peerdas. Thanks! best would be to raise this in the [peerdas call ](https://github.com/ethereum/pm/issues/1364)in 5 mins Will do if there's some time remaining at the end! 👍 call happening now: https://ethereumfoundation.zoom.us/j/87225793361?pwd=Pe0H4sFMX9wr1HFRLfQo3yrDB6a4hk.1 Devnets to figure out blob count Please engage here: https://discord.com/channels/595666850260713488/1252403418941624532/1351554405891051561 in order to find out what blob counts are possible and what data we want to collect to agree on a blob count Overall, any opposition to cgc optimistic/backfill flag in ENR? My 5 cents: - if we expect some greedy nodes, who will code them and what's their purpose? From the first view, not a big DoS vector possible. - we could add some protection for it, say 6 hours same cgc + optimistic flag = ban - we could start shielding from it only when the issue occurs The backfill pointer is a fast-changing data point. How often would you update the ENR? Or should it just include a bool meaning - optimistic = true: backfill syncing / I don't have blocks - optimistic = false: done / I have all blocks",
+  "excerpts": [
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hi team, I have a quick question about nimbus. \nI'm running custom devnet where I increased the MAX_BLOBS_PER_BLOCK to a much higher number (like 72), and nimbus is printing error in startup: `FAT 2025-03-18 01:21:58.574+00:00 Cannot load network: PresetFileError       msg=\"Cannot override config (required: MAX_BLOBS_PER_BLOCK_ELECTRA==9 - config: MAX_BLOBS_PER_BLOCK_ELECTRA=72)\" networkName=/network-config`\nIs overriding the max blob count in genesis not allowed in nimbus?",
+      "createdAt": "2025-03-18T01:23:29.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "First, that appears to be from a slightly older version of Nimbus. v25.3.0 shows an `<=` error. But, still, `MAX_BLOBS_PER_BLOCK_ELECTRA` must be `<= MAX_SUPPORTED_BLOBS_PER_BLOCK`, which is 9.",
+      "createdAt": "2025-03-18T05:33:02.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see, thank you 🙏 In the upcoming [peerdas-devnet-6 specs](https://notes.ethereum.org/@ethpandaops/peerdas-devnet-6), I think we will be using 32 as `MAX_BLOBS_PER_BLOCK_ELECTRA`.(or maybe that's only for the pre-devnet testing?) Would there be a new release in nimbus to support this?",
+      "createdAt": "2025-03-18T05:35:09.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Generally speaking, we're not likely to make a release of Nimbus for PeerDAS devnets, since the assumption is that PeerDAS devnets would be using e.g., a branch from <@785811170387951616> typically. I do wonder a bit about why using a more-than-mainnet value (is it going back to the old idea of pretending that PeerDAS is one of the \"soft forks\" etc? no idea). But either way, this kind of thing can be adjusted in a branch for this purpose",
+      "createdAt": "2025-03-18T05:38:54.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "The trunk/released branch of Nimbus doesn't really support PeerDAS at all. It has some ofo the helper functions, it passes (all of before beta.3, now only doesn't yet have the new `compute_cell` tests implemented) the Fulu consensus spec tests, <@785811170387951616> and I have begun merging some of it, et cetera. But it can't be said as a whole to yet support PeerDAS. So any \"release\" of Nimbus is unsuitable for `peerdas-devnet-6`",
+      "createdAt": "2025-03-18T05:41:13.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, okay. I was just running few private devnets to test blobs in pectra/peerdas. Then I'll use a separate branch to handle the max blob count, and hold off the test with peerDAS for now! Thanks for the details 🙂",
+      "createdAt": "2025-03-18T06:04:27.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, in general, \"pectra/peerdas\" is not a thing Nimbus thinks exists",
+      "createdAt": "2025-03-18T06:12:27.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "see my comment about \"soft forks\"",
+      "createdAt": "2025-03-18T06:12:39.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "PeerDAS breakout call in <t:1742306400:R>\nhttps://github.com/ethereum/pm/issues/1364\n\nReminder to provide feedback to the two spec PRs discussed last week ideally before the call 🙏 :\n- https://github.com/ethereum/EIPs/pull/9378/\n- https://github.com/ethereum/consensus-specs/pull/4154",
+      "createdAt": "2025-03-18T06:37:04.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@654267572107083777> generally speaking we would always want to be able to adjust config parameters, but not presets. Nimbus setting config parameters as presets feels backwards. I would really appriciate if you guys changed this, and would handle all config parameters for what they are, and not treat every single config parameter as a constant preset.",
+      "createdAt": "2025-03-18T08:24:53.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/status-im/nimbus-eth2/pull/6964 ~~most likely~~ i'm pretty sure in our unstable we do have runtime cofigurables, you can expect the same for the peerdas branches before devnet-6 launch",
+      "createdAt": "2025-03-18T08:38:09.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "using latest unstable I'm still getting:\n```\nFAT 2025-03-18 08:40:58.471+00:00 Cannot load network: PresetFileError       msg=\"Cannot override config (required: BLOB_SIDECAR_SUBNET_COUNT_ELECTRA`<=`9 - config: BLOB_SIDECAR_SUBNET_COUNT_ELECTRA=10)\" networkName=/network-configs\n```",
+      "createdAt": "2025-03-18T08:42:27.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "which network is this?",
+      "createdAt": "2025-03-18T08:43:15.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "kurtosis",
+      "createdAt": "2025-03-18T08:43:31.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "you have used unstable?",
+      "createdAt": "2025-03-18T08:43:40.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok i'll see to it",
+      "createdAt": "2025-03-18T08:44:56.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "we can get it resolved by EOD",
+      "createdAt": "2025-03-18T08:45:09.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, I tested latest unstable branch",
+      "createdAt": "2025-03-18T08:48:16.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "where does the primitive `MAX_BLOBS_PER_BLOCK_ELECTRA must be <= MAX_SUPPORTED_BLOBS_PER_BLOCK` come from? afaik `MAX_SUPPORTED_BLOBS_PER_BLOCK` isn't a config or a preset value",
+      "createdAt": "2025-03-18T08:49:14.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "> MAX_SUPPORTED_BLOBS_PER_BLOCK isn't a config or a preset value\nagree",
+      "createdAt": "2025-03-18T08:51:25.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@785811170387951616> it also seems to be an issue with nimbusel btw",
+      "createdAt": "2025-03-18T09:35:19.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@498331483732312075> looks like the custom blob numbers also doesn't work well for grandine btw.",
+      "createdAt": "2025-03-18T09:58:16.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@498331483732312075> this is what I've tested:\n```yaml\nparticipants:\n  - el_type: geth\n    el_image: ethereum/client-go:v1.15.5\n    cl_type: teku\n    cl_image: consensys/teku:develop\n  - el_type: geth\n    el_image: ethereum/client-go:v1.15.5\n    cl_type: grandine\n    cl_image: ethpandaops/grandine:hangleang-peerdas-fulu-696bfff\nnetwork_params:\n  max_blobs_per_block_electra: 20\n  target_blobs_per_block_electra: 10\n  electra_fork_epoch: 1\nadditional_services:\n  - dora\n  - spamoor_blob\nspamoor_blob_params:\n  throughput: 20\n  max_blobs: 2\n  max_pending: 40\n```",
+      "createdAt": "2025-03-18T10:00:59.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "in which network 🙂",
+      "createdAt": "2025-03-18T10:03:06.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i don't work on nimbus el, you can talk to <@706747269424218124>",
+      "createdAt": "2025-03-18T10:03:23.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "kurtosis ser.",
+      "createdAt": "2025-03-18T10:04:06.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "grandine set those params in preset, so not able to customize via config\n\ncc <@777935002263617576>",
+      "createdAt": "2025-03-18T10:27:01.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "it shouldn’t be a preset",
+      "createdAt": "2025-03-18T10:27:33.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, I agree",
+      "createdAt": "2025-03-18T10:28:21.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "ohh sorry not all those params, grandine define `max_blobs_per_block*` in preset",
+      "createdAt": "2025-03-18T10:29:53.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "target is config max is preset?!",
+      "createdAt": "2025-03-18T10:36:17.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "the target, it is not config for cl, right?",
+      "createdAt": "2025-03-18T10:38:53.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah just the max is, afaik CL has no reason to know the target - that's done by the blockbuilder",
+      "createdAt": "2025-03-18T10:43:27.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "The status quo is in between -- most config parameters are truly configurable, some (`checkCompatibility` in `beacon_chain/spec/presets.nim`) are not. This particular `MAX_BLOCKS_PER_BLOB_FOO` one did go to being, as <@199561711278227457> noted, a bit more artificially constrained in the last month or so (to accomodate Gnosis's changing it)",
+      "createdAt": "2025-03-18T11:49:46.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "any reason that presets are not just https://github.com/ethereum/consensus-specs/tree/dev/presets/mainnet these values?",
+      "createdAt": "2025-03-18T11:51:54.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/status-im/nimbus-eth2/blob/fad7b9a7133faf63efb552b6caaa3fb1554aba19/beacon_chain/spec/presets.nim#L805-L910",
+      "createdAt": "2025-03-18T11:53:18.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "It varies somewhat",
+      "createdAt": "2025-03-18T11:54:01.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "configs = user overridable should be all these: https://github.com/ethereum/consensus-specs/blob/dev/configs/mainnet.yaml",
+      "createdAt": "2025-03-18T12:01:37.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and the presets should be these",
+      "createdAt": "2025-03-18T12:01:53.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Some it's more or less arbitrary, some more of a design issue, some have literally never been changed, once, across any of the networks people have reported Nimbus running on, et cetera. Some theoretically might have, but only apply to past forks. Many of them have built-in relationships with each other that break. if only subsets are changed and effectively those would have have to be `doAssert`ed for sanity somewhere, or because the implementation assumes they'll be >= some value (or less than some value, typically the \"actual\" bounds are quite a bit broader than enforced.",
+      "createdAt": "2025-03-18T12:02:08.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Anyway, very case-by-case",
+      "createdAt": "2025-03-18T12:02:53.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "the idea is that all these should in theory be configurable, if its not, then it shouldn't be in the config on the spec side",
+      "createdAt": "2025-03-18T12:03:04.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "but nimbus team re-ordering based on \"how frequently\" one is changed is just the wrong approach imo",
+      "createdAt": "2025-03-18T12:03:25.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "e.g we been trying to test faster slots times, but we can't because nimbus doesn't allow it. Every other client does.",
+      "createdAt": "2025-03-18T12:03:54.610000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "So what do we do? We just test everything without including nimbus",
+      "createdAt": "2025-03-18T12:04:07.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Slot times is one of the main ones where it probably should be, and it's exactly a case involving a larger change. Which should happen, that one has demonstable value being configurable. I'm a bit hesitant to extrapolate that to many of the others, where it's never come up to my knowledge.",
+      "createdAt": "2025-03-18T12:05:36.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think going forward it would be a good general rule of thumb that all new config parameters are actually configurable",
+      "createdAt": "2025-03-18T12:07:25.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "And of course the number of blobs should be configurable for future fulu testings",
+      "createdAt": "2025-03-18T12:07:46.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "as we going to need to heavily test different number of target/maxes going forward",
+      "createdAt": "2025-03-18T12:08:06.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Fulu doesn't have this constraint",
+      "createdAt": "2025-03-18T12:14:48.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "For blob numbers",
+      "createdAt": "2025-03-18T12:15:08.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "in order to be able to compare perf values between electra and fulu I think it would also be nice to make it customizable for electra already",
+      "createdAt": "2025-03-18T12:15:29.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "we can make it configurable before devnet 6 for fulu",
+      "createdAt": "2025-03-18T12:15:51.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah, that one is one of the more arbitrary constraints currently",
+      "createdAt": "2025-03-18T12:16:36.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Would be good to be able to compare apples to apples tho, and thats why it would be great to already be able to customize it for electra, not just fulu",
+      "createdAt": "2025-03-18T12:17:00.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "e.g lets say we want 50 blobs for fulu, lets see if without peerdas what the load would be with 50 blobs.",
+      "createdAt": "2025-03-18T12:17:34.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and then compare that with peerdas",
+      "createdAt": "2025-03-18T12:17:43.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I mean, it's arbitrary for Electra too in that the codebase doesn't deeply care about it. Parts do, but it's kind of cosmetic",
+      "createdAt": "2025-03-18T12:17:55.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I agree, being able to do head-to-head comparisons is useful here",
+      "createdAt": "2025-03-18T12:18:12.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "so of the two specific examples:\n- `SECONDS_PER_SLOT`: agree, should be actually-configurable; and\n-  `MAX_BLOBS_PER_BLOCK_ELECTRA`: well, for the trunk branch, maybe, we'll see, these things are all tradeoffs, and yeah, there are tradeoffs on the other side (for one thing, `unstable` can't do PeerDAS in any meaningful way, so the head-to-head comparison can't happen), but the PeerDAS branch(es) sure, why not",
+      "createdAt": "2025-03-18T12:26:27.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "And for the record, I do think this is the true in a bunch of cases (and no, this is not the time/place to get into which)",
+      "createdAt": "2025-03-18T12:56:42.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hello all! \nSunnyside Labs has been running another round of tests on pectra / peerdas devnet to find out any issues with increasing the blob counts. \nI'd appreciate any feedback or thoughts about the results of the tests: https://testinprod.notion.site/Sunnyside-Devnet-Updates-03-18-1ba8fc57f54680a29153e02aaf684620?pvs=4\n\nOur next priority is `break peerdas network and identify where it breaks`, `how to best monitor peerdas metrics`\nFor this, \n- any thoughts on which type of analysis would be most helpful for the core devs\n- what everyone's opinion is on the best(suitable) network configuration for running peerdas. \n\nThanks!",
+      "createdAt": "2025-03-18T13:54:41.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "best would be to raise this in the [peerdas call ](https://github.com/ethereum/pm/issues/1364)in 5 mins",
+      "createdAt": "2025-03-18T13:56:13.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Will do if there's some time remaining at the end! 👍",
+      "createdAt": "2025-03-18T13:56:46.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "call happening now: https://ethereumfoundation.zoom.us/j/87225793361?pwd=Pe0H4sFMX9wr1HFRLfQo3yrDB6a4hk.1",
+      "createdAt": "2025-03-18T13:59:59.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Devnets to figure out blob count",
+      "createdAt": "2025-03-18T15:13:57.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Please engage here: https://discord.com/channels/595666850260713488/1252403418941624532/1351554405891051561\n\nin order to find out what blob counts are possible and what data we want to collect to agree on a blob count",
+      "createdAt": "2025-03-18T15:14:28.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "Overall, any opposition to cgc optimistic/backfill flag in ENR?\nMy 5 cents:\n- if we expect some greedy nodes, who will code them and what's their purpose? From the first view, not a big  DoS vector possible.\n- we could add some protection for it, say 6 hours same cgc + optimistic flag =  ban\n- we could start shielding from it only when the issue occurs",
+      "createdAt": "2025-03-18T22:53:32.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dapplion",
+      "category": "Testing",
+      "parent": "",
+      "content": "The backfill pointer is a fast-changing data point. How often would you update the ENR? Or should it just include a bool meaning \n- optimistic = true: backfill syncing / I don't have blocks\n- optimistic = false: done / I have all blocks",
+      "createdAt": "2025-03-18T23:30:56.981000+00:00",
+      "attachments": []
+    }
+  ]
+}

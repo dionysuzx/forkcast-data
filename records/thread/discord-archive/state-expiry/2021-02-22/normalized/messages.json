@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "state-expiry",
+  "date": "2021-02-22",
+  "messageCount": 232,
+  "sourceHash": "f5f008b58840d2864ef14a94b7d31ebf751e1a7260026518b5dc51c60408f271",
+  "searchText": "<@!273808422753796097> I am still thinking about your \"Theory of State Management\" article, specifically about the resurrection conflicts. My current thoughts (also after thinking about this issue for months when researching possible ways of implementing State Rent) is that the main thing that creates a resurrection problem is the fact that \"technically\" storage belongs to a smart contract, but \"actually\" bits and pieces of it belong to someone else who will be unhappy for these bits and pieces to be destroyed. This design also creates an issue with access control. ETH balances in Externally-Owned-Accounts are protected by the access control invariants coded into the Eth clients. However, token balances and other claimed ownership is only enforced by the smart contract code, and that often gets broken (that's why people rightly consider ETH balances to be much more secure than any other ownership \"claims\" in Ethereum). I believe that it is probably not worth the while to try to adjust to that broken model of storage. Instead, a new model of storage (where ownership of storage is 2-dimensional: beneficiary (+rent payer) and operator (smart contract code) would be much better for both security (with access control also enforced by ETH clients) and more straightforward for rent and expiry (without resurrection) when the balance of the owner is zero. I proposed this kind of model in the very first State Rent doc, but I know it is being regarded as \"too radical\". By now I have decided that we have to choose between \"very radical\" and \"very messy\". Is the idea that user accounts (like EOAs or contracts or whatever) would have storage and each contract would be able to write to a \"slice\" of that (essentially)? Something like account correlated storage access would be something like `hash(contract, slot)`? Then when a contract wants to write a token balance, they write it in the account's storage tree, rather than the contract's storage tree? The `contract` part of that hash would be controlled by the EVM, so *only* contract A can read/write to an account's storage slot for contract A? I think the problem is that there are plenty of applications where storage slots do not cleanly map to owners or where you have to maintain the integrity of some data structure (eg. a queue) Presumably this would live side-by-side with contract storage? For tokens, *most* of the storage would be per-account, and someone who goes on vacation for 5 years can archive their account storage tree and then we can tombstone it. right, but tokens aren't the only use case Sure. I think account storage would be cheaper because it is much more likely that we'll be able to tombstone it eventually, unlike contract storage. Because *people* leave Ethereum wholesale. Like one whole account will go away (keys lost, person loses interest, person switched accounts, cold storage, etc.) right, though ideally, for privacy reasons people would use a different account for each token we don't actually want to encourage people to have all their activity under one roof I don't think ~~anyone~~ mayn people *actually* do that? Because the UX isn't there but it should be! I think it comes back to the gas problem. Having a dozen accounts but all transactions for them are sponsored by the same person doesn't give you real privacy. right You can do 3rd party sponsored transactions, in which case you end up paying more for to transact (an already very high fee). I think what it comes down to for me at the moment is that I think the privacy solution benefits don't outweigh the storage cost reduction benefits since we don't really have a full generalized privacy solution. Things like airdrops or token decimal rebasing would be much more expensive with this proposal right. (I know airdrops aren't a popular use case, but there are legit uses of them). Merkle drops are popular these days, and they are basically free to launch. 🤔 I guess you wouldn't be able to send tokens to a tombstoned account unless you provided a storage proof along with it. That is an interesting property. (which means you would have to pay for resurrection) Maybe you would even have to pay for full resurrection, not partial? That way we can have entire accounts be tombstoned or not, rather than individual branches (thus greatly simplifying the tombstoning process)? This runs the risk of treating all user balances of tokens the same and taking flexibility away from individual tokens. There would need to be some big advantages for most tokens to opt-in to that (e.g. gas costs). So the problem I see with tombstoning is that ultimately it's still only a partial solution Unless we can tombstone entire subsets of the account tree, that is Because if it's per-account, right now accounts are 1/6 of the state, and if you're leaving ~1/5 of each account, then there's still 1/30 of the state that's left lying around forever And if we're okay with things lying around forever, then it's much better to just go the weak statelessness route and let block proposers hold the entire state forever so everyone else can hold nothing We could tombstone an entire account at once couldn't we? sure But that still leaves this problem > Because if it's per-account, right now accounts are 1/6 of the state, and if you're leaving ~1/5 of each account, then there's still 1/30 of the state that's left lying around forever Why would we be leaving 1/5 of each account? Because info-theoretically a tombstone is at least 20 bytes (the address) Just the tombstone record you mean? yeah Is there *any* solution to the nonce problem of full deletion? I guess that is what your high bits epoch proposal was? right I think the very abstract solution is that signatures go bad after a while essentially. Since nonces are for replay protection, as long as we have something to prevent replays then we can delete nonces. But this is still ad-hoc; there are plenty of contracts that are O(1)-sized and would be left lying around (thinking out loud, this may already be known stuff) Supporting expirable signatures wouldn't achieve the same thing without having to do hacky things with the nonce? And this would be even more true if people start using these \"token balance holding contracts\" Would the nonce problem *also* be solved (hypothetically) if all transactions had an epoch associated with them and nonces reset each epoch? yeah there's many things in that category that work So I don't think replay protection is the core problem This is closer to the core problem imo we should be careful with things with hard edges, like \"resetting all nonces at once\", it becomes a hard edge case to take into account while building applications making it more explicit makes sense from an app dev perspective, you don't have to take into account such events, just \"make your transaction expire, otherwise if you don't they will become valid again if your account ever gets deleted\" This is much easier to shoot yourself in the foot with. If you forget to handle it, then you get replayed. Well, there are many ways to shoot yourself in the foot if you are signing transactions manually, it's something that should be backed on the main libraries for example: ethers adding an expiration by default to all transactions What other ways are there to shoot yourself in the foot easily? *Forgetting* to do something is generally a very easy way to shoot oneself in foot. That is, it is harder to make a mistake where an active decision was made than when you can passively make a mistake. Fair enough, but imho still having to account for weird edge cases becomes harder, \"I signed x transactions but it's not valid because I didn't account for the nonce reset\" you could argue \"invalid by default\" it's better than \"valid by default\" but it really depends on the application, it could lead to frozen funds too That is a very fast failure, so doesn't bother me. Your Ethereum client will just reject it immediately and you can fix your library. So right now it sounds like we're stuck between: - expiration but not clearing accounts which results in needing to \"tombstone\" accounts that go cold, shouldering us with an implicit long tail cost where we still have to retain a non-trivial amount of storage dedicated to \"tombstones\" forever. - actual account clearing which has a few security issues that are unsolved (such as replaying txns due to nonce being reset or the complexities of resurrection schemes) I still like the idea of a gas advantaged storage type for accounts where the ERC20 defines a \"dust\" balance level below which a balance is made 0. It's opt in and configurable per ERC20, not sure if it could be abused though. I don't think replay protection is the problem. That is solvable. There is the third option, which is tree-level tombstoning So you tombstone entire subsets of the tree that only contain expired accounts Right, this is effectively an optimzation or \"compression\" scheme that still leaves us with some (maybe non-trivial) amount of tombstone data right? And resurrection doesn't resurrect that part of the tree, it just creates a copy of the data being resurrected in a live tree right? Actually no, the amount of tombstone data is bounded by `L * log(d)` where there are `L` live accounts and `d` dead accounts So there's no long tail that grows forever That's not intuitive for me. Supposing that the ordered leaves of the tree were alternating between live and tombstoned accounts, then the storage cost seems like it would be linear because you would have no \"groups\" of tombstone'd accounts so the upper bound seems to be `O(N)`, with the expected case being lower since things are randomly distributed in the trie. > alternating between live and tombstoned accounts, So this is the `L = D` case But in the `D = 1000 * L` case You can compress the 1000 dead nodes between each live node into log(1000) tombstones so *worst* case is that if we have `L` accounts, then we expect no worse than `2 * L * <cost-per-tombstone>`? Oh, we aren't talking about <@273808422753796097>'s proposal to use the high bits of account addresses to partition the tree by account age? right And accounts can be \"moved\" from aged sections of the tree to new ones, and resurrected accounts would resurrect in new sections not old. I think they might be orthogonal... or have minimal interplay That proposal is a related proposal, which helps make sure that if we tombstone subsets of the tree there's always some new subset that you can create new accounts in The tree partitioning should get us nearly perfect deletion shouldn't it? Though even that proposal is not strictly necessary; a client could just keep track of 1/1000 of the dead tree so they can create new accounts there That is, any account that hasn't been touched in a year would end up in a dead branch together. yeah And that dead branch would have no living parts to it, and the living parts of the tree would have no dead leaves in it. What is the downside of that strategy? It seems \"simple\" (conceptually) compared to a lot of other solutions. I guess we end up with data duplication during that 1 year decay period. The main downside that I have heard is that it requires adding data to the middle of the tree, which breaks the nice clean abstraction of a tree as being a pure key/value store But I don't think that this is practically a big deal It would still be a key value store wouldn't it? Just where every key is `<epoch>.<path>` essentially? Aaaah I see you're talking about my \"1 trillion slices\" proposal Uhh.... maybe? 😬 🤣 Ah if you mean the thing I posted on ethresearch Then no, it would not I'm talking about an idea I have in my head that appeared around the time I read a document you wrote. 😆 becuase you still need to keep track of live nodes inside old epochs Why? because they're live? Maybe I'm proposing something new. yeah maybe Imagine you have epoch 1, 2, and 3. We are currently in epoch 3. Epoch 1 contains only dead nodes",
+  "excerpts": [
+    {
+      "author": "Deleted User",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!273808422753796097> I am still thinking about your \"Theory of State Management\" article, specifically about the resurrection conflicts. My current thoughts (also after thinking about this issue for months when researching possible ways of implementing State Rent) is that the main thing that creates a resurrection problem is the fact that \"technically\" storage belongs to a smart contract, but \"actually\" bits and pieces of it belong to someone else who will be unhappy for these bits and pieces to be destroyed. This design also creates an issue with access control. ETH balances in Externally-Owned-Accounts are protected by the access control invariants coded into the Eth clients. However, token balances and other claimed ownership is only enforced by the smart contract code, and that often gets broken (that's why people rightly consider ETH balances to be much more secure than any other ownership \"claims\" in Ethereum). I believe that it is probably not worth the while to try to adjust to that broken model of storage. Instead, a new model of storage (where ownership of storage is 2-dimensional: beneficiary (+rent payer) and operator (smart contract code) would be much better for both security (with access control also enforced by ETH clients) and more straightforward for rent and expiry (without resurrection) when the balance of the owner is zero. I proposed this kind of model in the very first State Rent doc, but I know it is being regarded as \"too radical\". By now I have decided that we have to choose between \"very radical\" and \"very messy\".",
+      "createdAt": "2021-02-22T08:48:34.177000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is the idea that user accounts (like EOAs or contracts or whatever) would have storage and each contract would be able to write to a \"slice\" of that (essentially)?",
+      "createdAt": "2021-02-22T16:03:27.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Something like account correlated storage access would be something like `hash(contract, slot)`?",
+      "createdAt": "2021-02-22T16:04:00.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Then when a contract wants to write a token balance, they write it in the account's storage tree, rather than the contract's storage tree?",
+      "createdAt": "2021-02-22T16:04:41.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The `contract` part of that hash would be controlled by the EVM, so *only* contract A can read/write to an account's storage slot for contract A?",
+      "createdAt": "2021-02-22T16:05:29.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think the problem is that there are plenty of applications where storage slots do not cleanly map to owners",
+      "createdAt": "2021-02-22T16:05:49.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "or where you have to maintain the integrity of some data structure (eg. a queue)",
+      "createdAt": "2021-02-22T16:06:00.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Presumably this would live side-by-side with contract storage?",
+      "createdAt": "2021-02-22T16:06:05.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "For tokens, *most* of the storage would be per-account, and someone who goes on vacation for 5 years can archive their account storage tree and then we can tombstone it.",
+      "createdAt": "2021-02-22T16:06:41.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right, but tokens aren't the only use case",
+      "createdAt": "2021-02-22T16:07:06.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Sure.  I think account storage would be cheaper because it is much more likely that we'll be able to tombstone it eventually, unlike contract storage.",
+      "createdAt": "2021-02-22T16:07:50.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because *people* leave Ethereum wholesale.",
+      "createdAt": "2021-02-22T16:08:01.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Like one whole account will go away (keys lost, person loses interest, person switched accounts, cold storage, etc.)",
+      "createdAt": "2021-02-22T16:08:06.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right, though ideally, for privacy reasons people would use a different account for each token",
+      "createdAt": "2021-02-22T16:08:23.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we don't actually want to encourage people to have all their activity under one roof",
+      "createdAt": "2021-02-22T16:08:37.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think ~~anyone~~ mayn people *actually* do that?",
+      "createdAt": "2021-02-22T16:08:39.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because the UX isn't there but it should be!",
+      "createdAt": "2021-02-22T16:08:47.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think it comes back to the gas problem.",
+      "createdAt": "2021-02-22T16:09:07.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Having a dozen accounts but all transactions for them are sponsored by the same person doesn't give you real privacy.",
+      "createdAt": "2021-02-22T16:09:20.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-02-22T16:09:33.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You can do 3rd party sponsored transactions, in which case you end up paying more for to transact (an already very high fee).",
+      "createdAt": "2021-02-22T16:09:36.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think what it comes down to for me at the moment is that I think the privacy solution benefits don't outweigh the storage cost reduction benefits since we don't really have a full generalized privacy solution.",
+      "createdAt": "2021-02-22T16:10:53.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mightypenguin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Things like airdrops or token decimal rebasing would be much more expensive with this proposal right. (I know airdrops aren't a popular use case, but there are legit uses of them).",
+      "createdAt": "2021-02-22T16:11:34.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Merkle drops are popular these days, and they are basically free to launch.",
+      "createdAt": "2021-02-22T16:11:59.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "🤔 I guess you wouldn't be able to send tokens to a tombstoned account unless you provided a storage proof along with it.  That is an interesting property.",
+      "createdAt": "2021-02-22T16:13:06.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(which means you would have to pay for resurrection)",
+      "createdAt": "2021-02-22T16:13:21.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Maybe you would even have to pay for full resurrection, not partial?  That way we can have entire accounts be tombstoned or not, rather than individual branches (thus greatly simplifying the tombstoning process)?",
+      "createdAt": "2021-02-22T16:13:45.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mightypenguin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This runs the risk of treating all user balances of tokens the same and taking flexibility away from individual tokens.\nThere would need to be some big advantages for most tokens to opt-in to that (e.g. gas costs).",
+      "createdAt": "2021-02-22T16:17:07.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So the problem I see with tombstoning is that ultimately it's still only a partial solution",
+      "createdAt": "2021-02-22T16:17:49.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Unless we can tombstone entire subsets of the account tree, that is",
+      "createdAt": "2021-02-22T16:17:58.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because if it's per-account, right now accounts are 1/6 of the state, and if you're leaving ~1/5 of each account, then there's still 1/30 of the state that's left lying around forever",
+      "createdAt": "2021-02-22T16:18:45.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And if we're okay with things lying around forever, then it's much better to just go the weak statelessness route and let block proposers hold the entire state forever so everyone else can hold nothing",
+      "createdAt": "2021-02-22T16:19:25.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "We could tombstone an entire account at once couldn't we?",
+      "createdAt": "2021-02-22T16:19:37.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sure",
+      "createdAt": "2021-02-22T16:19:44.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But that still leaves this problem",
+      "createdAt": "2021-02-22T16:19:49.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Because if it's per-account, right now accounts are 1/6 of the state, and if you're leaving ~1/5 of each account, then there's still 1/30 of the state that's left lying around forever",
+      "createdAt": "2021-02-22T16:19:52.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why would we be leaving 1/5 of each account?",
+      "createdAt": "2021-02-22T16:20:14.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because info-theoretically a tombstone is at least 20 bytes",
+      "createdAt": "2021-02-22T16:20:25.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(the address)",
+      "createdAt": "2021-02-22T16:20:27.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Just the tombstone record you mean?",
+      "createdAt": "2021-02-22T16:20:28.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2021-02-22T16:20:34.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Is there *any* solution to the nonce problem of full deletion?",
+      "createdAt": "2021-02-22T16:20:46.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess that is what your high bits epoch proposal was?",
+      "createdAt": "2021-02-22T16:21:01.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-02-22T16:21:09.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think the very abstract solution is that signatures go bad after a while essentially.",
+      "createdAt": "2021-02-22T16:21:18.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Since nonces are for replay protection, as long as we have something to prevent replays then we can delete nonces.",
+      "createdAt": "2021-02-22T16:21:53.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But this is still ad-hoc; there are plenty of contracts that are O(1)-sized and would be left lying around",
+      "createdAt": "2021-02-22T16:22:03.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(thinking out loud, this may already be known stuff)",
+      "createdAt": "2021-02-22T16:22:04.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Supporting expirable signatures wouldn't achieve the same thing without having to do hacky things with the nonce?",
+      "createdAt": "2021-02-22T16:22:19.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And this would be even more true if people start using these \"token balance holding contracts\"",
+      "createdAt": "2021-02-22T16:22:39.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Would the nonce problem *also* be solved (hypothetically) if all transactions had an epoch associated with them and nonces reset each epoch?",
+      "createdAt": "2021-02-22T16:23:16.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah there's many things in that category that work",
+      "createdAt": "2021-02-22T16:23:32.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So I don't think replay protection is the core problem",
+      "createdAt": "2021-02-22T16:23:40.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is closer to the core problem",
+      "createdAt": "2021-02-22T16:24:12.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "imo we should be careful with things with hard edges, like \"resetting all nonces at once\", it becomes a hard edge case to take into account while building applications",
+      "createdAt": "2021-02-22T16:24:13.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "making it more explicit makes sense from an app dev perspective, you don't have to take into account such events, just \"make your transaction expire, otherwise if you don't they will become valid again if your account ever gets deleted\"",
+      "createdAt": "2021-02-22T16:25:20.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "This is much easier to shoot yourself in the foot with.  If you forget to handle it, then you get replayed.",
+      "createdAt": "2021-02-22T16:25:57.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Well, there are many ways to shoot yourself in the foot if you are signing transactions manually, it's something that should be backed on the main libraries",
+      "createdAt": "2021-02-22T16:26:31.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "for example: ethers adding an expiration by default to all transactions",
+      "createdAt": "2021-02-22T16:27:13.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What other ways are there to shoot yourself in the foot easily?",
+      "createdAt": "2021-02-22T16:27:43.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "*Forgetting* to do something is generally a very easy way to shoot oneself in foot.",
+      "createdAt": "2021-02-22T16:27:59.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is, it is harder to make a mistake where an active decision was made than when you can passively make a mistake.",
+      "createdAt": "2021-02-22T16:28:29.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Fair enough, but imho still having to account for weird edge cases becomes harder, \"I signed x transactions but it's not valid because I didn't account for the nonce reset\"",
+      "createdAt": "2021-02-22T16:29:22.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agusx1211",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you could argue \"invalid by default\" it's better than \"valid by default\" but it really depends on the application, it could lead to frozen funds too",
+      "createdAt": "2021-02-22T16:29:55.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is a very fast failure, so doesn't bother me.  Your Ethereum client will just reject it immediately and you can fix your library.",
+      "createdAt": "2021-02-22T16:30:05.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So right now it sounds like we're stuck between:\n\n- expiration but not clearing accounts which results in needing to \"tombstone\" accounts that go cold, shouldering us with an implicit long tail cost where we still have to retain a non-trivial amount of storage dedicated to \"tombstones\" forever.\n- actual account clearing which has a few security issues that are unsolved (such as replaying txns due to nonce being reset or the complexities of resurrection schemes)",
+      "createdAt": "2021-02-22T16:30:13.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mightypenguin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I still like the idea of a gas advantaged storage type for accounts where the ERC20 defines a \"dust\" balance level below which a balance is made 0.\nIt's opt in and configurable per ERC20, not sure if it could be abused though.",
+      "createdAt": "2021-02-22T16:30:44.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't think replay protection is the problem.  That is solvable.",
+      "createdAt": "2021-02-22T16:30:53.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "There is the third option, which is tree-level tombstoning",
+      "createdAt": "2021-02-22T16:31:08.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So you tombstone entire subsets of the tree that only contain expired accounts",
+      "createdAt": "2021-02-22T16:31:20.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, this is effectively an optimzation or \"compression\" scheme that still leaves us with some (maybe non-trivial) amount of tombstone data right?",
+      "createdAt": "2021-02-22T16:32:01.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And resurrection doesn't resurrect that part of the tree, it just creates a copy of the data being resurrected in a live tree right?",
+      "createdAt": "2021-02-22T16:32:07.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Actually no, the amount of tombstone data is bounded by `L * log(d)` where there are `L` live accounts and `d` dead accounts",
+      "createdAt": "2021-02-22T16:32:35.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So there's no long tail that grows forever",
+      "createdAt": "2021-02-22T16:32:53.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That's not intuitive for me.  Supposing that the ordered leaves of the tree were alternating between live and tombstoned accounts, then the storage cost seems like it would be linear because you would have no \"groups\" of tombstone'd accounts so the upper bound seems to be `O(N)`, with the expected case being lower since things are randomly distributed in the trie.",
+      "createdAt": "2021-02-22T16:35:01.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> alternating between live and tombstoned accounts,",
+      "createdAt": "2021-02-22T16:35:14.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So this is the `L = D` case",
+      "createdAt": "2021-02-22T16:35:18.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But in the `D = 1000 * L` case",
+      "createdAt": "2021-02-22T16:35:35.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You can compress the 1000 dead nodes between each live node into log(1000) tombstones",
+      "createdAt": "2021-02-22T16:35:49.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so *worst* case is that if we have `L` accounts, then we expect no worse than `2 * L * <cost-per-tombstone>`?",
+      "createdAt": "2021-02-22T16:36:34.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Oh, we aren't talking about <@273808422753796097>'s proposal to use the high bits of account addresses to partition the tree by account age?",
+      "createdAt": "2021-02-22T16:37:11.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-02-22T16:37:30.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And accounts can be \"moved\" from aged sections of the tree to new ones, and resurrected accounts would resurrect in new sections not old.",
+      "createdAt": "2021-02-22T16:37:39.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pipermerriam",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think they might be orthogonal...  or have minimal interplay",
+      "createdAt": "2021-02-22T16:37:41.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That proposal is a related proposal, which helps make sure that if we tombstone subsets of the tree there's always some new subset that you can create new accounts in",
+      "createdAt": "2021-02-22T16:38:03.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The tree partitioning should get us nearly perfect deletion shouldn't it?",
+      "createdAt": "2021-02-22T16:38:17.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Though even that proposal is not strictly necessary; a client could just keep track of 1/1000 of the dead tree so they can create new accounts there",
+      "createdAt": "2021-02-22T16:38:30.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "That is, any account that hasn't been touched in a year would end up in a dead branch together.",
+      "createdAt": "2021-02-22T16:38:43.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2021-02-22T16:38:48.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And that dead branch would have no living parts to it, and the living parts of the tree would have no dead leaves in it.",
+      "createdAt": "2021-02-22T16:39:14.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "What is the downside of that strategy?",
+      "createdAt": "2021-02-22T16:39:23.162000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It seems \"simple\" (conceptually) compared to a lot of other solutions.",
+      "createdAt": "2021-02-22T16:39:35.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I guess we end up with data duplication during that 1 year decay period.",
+      "createdAt": "2021-02-22T16:39:56.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The main downside that I have heard is that it requires adding data to the middle of the tree, which breaks the nice clean abstraction of a tree as being a pure key/value store",
+      "createdAt": "2021-02-22T16:39:57.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But I don't think that this is practically a big deal",
+      "createdAt": "2021-02-22T16:40:21.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It would still be a key value store wouldn't it?  Just where every key is `<epoch>.<path>` essentially?",
+      "createdAt": "2021-02-22T16:40:47.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Aaaah I see you're talking about my \"1 trillion slices\" proposal",
+      "createdAt": "2021-02-22T16:41:00.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Uhh.... maybe?  😬",
+      "createdAt": "2021-02-22T16:41:08.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "🤣",
+      "createdAt": "2021-02-22T16:41:17.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah if you mean the thing I posted on ethresearch",
+      "createdAt": "2021-02-22T16:41:28.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Then no, it would not",
+      "createdAt": "2021-02-22T16:41:31.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm talking about an idea I have in my head that appeared around the time I read a document you wrote.  😆",
+      "createdAt": "2021-02-22T16:41:35.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "becuase you still need to keep track of live nodes inside old epochs",
+      "createdAt": "2021-02-22T16:41:44.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Why?",
+      "createdAt": "2021-02-22T16:41:49.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "because they're live?",
+      "createdAt": "2021-02-22T16:41:54.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Maybe I'm proposing something new.",
+      "createdAt": "2021-02-22T16:41:56.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah maybe",
+      "createdAt": "2021-02-22T16:42:02.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Imagine you have epoch 1, 2, and 3.  We are currently in epoch 3.  Epoch 1 contains only dead nodes.  Epoch 2 contains nodes that haven't been touched in a while, and if they *are* touched (sometime during epoch 3) they get *copied* to the epoch 3 section of the tree.  Any nodes in epoch 2 that aren't touched by epoch 4 will then completely die when epoch 4 starts.",
+      "createdAt": "2021-02-22T16:43:22.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "By \"completely die\" you mean there's no possibility of resurrection?",
+      "createdAt": "2021-02-22T16:44:00.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "If so I don't think people would accept that",
+      "createdAt": "2021-02-22T16:44:08.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "You can resurrect with a proof, but doing so *copies* to the current epoch.",
+      "createdAt": "2021-02-22T16:44:13.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It doesn't resurrect *inside* epoch 1.",
+      "createdAt": "2021-02-22T16:44:22.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok but then you have resurrection conflict issues",
+      "createdAt": "2021-02-22T16:44:22.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "How so?",
+      "createdAt": "2021-02-22T16:44:27.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Because something new could be created in the exact same position in the current epoch?",
+      "createdAt": "2021-02-22T16:44:40.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah right, that problem.  😖",
+      "createdAt": "2021-02-22T16:44:57.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "*grumble*",
+      "createdAt": "2021-02-22T16:45:01.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Or do you mean some different hash key is used to preserve non-collision?",
+      "createdAt": "2021-02-22T16:45:06.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "🤔",
+      "createdAt": "2021-02-22T16:45:14.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "actually, that could be interesting....",
+      "createdAt": "2021-02-22T16:45:21.622000+00:00",
+      "attachments": []
+    }
+  ]
+}

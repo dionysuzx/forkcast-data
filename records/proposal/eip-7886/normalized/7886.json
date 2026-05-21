@@ -1,0 +1,74 @@
+{
+  "id": 7886,
+  "title": "EIP-7886: Delayed execution",
+  "status": "Stagnant",
+  "description": "Separate block validation from execution",
+  "laymanDescription": "Lets validators attest before execution by deferring execution outputs, improving throughput headroom.",
+  "author": "Francesco D'Amato (@fradamt), Toni Wahrstätter (@nerolation)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-02-18",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7886-delayed-execution/22890",
+  "requires": [
+    "1559",
+    "2930",
+    "4844",
+    "7623",
+    "7702"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [],
+      "isHeadliner": false,
+      "wasHeadlinerCandidate": true,
+      "presentationHistory": [
+        {
+          "type": "headliner_proposal",
+          "link": "https://ethereum-magicians.org/t/eip-7886-delayed-execution-the-case-for-glamsterdam/24500",
+          "date": "2025-06-09"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Largely transparent; faster attestations possible, but no guaranteed MEV/fairness changes. Same-block funding patterns may fail due to pre-checks."
+    },
+    "appDevs": {
+      "description": "Must handle deferred receipts/logs in the child header and possible payload reversion; core application semantics and APIs remain unchanged."
+    },
+    "walletDevs": {
+      "description": "Adapt UX for attestation-before-execution, surfacing pending states; enforce nonce/balance prechecks and warn about same-block funding limitations."
+    },
+    "toolingInfra": {
+      "description": "Indexers, explorers, and RPCs must track deferred execution outputs, the execution_reverted flag, and updated base-fee behavior for reverted parents."
+    },
+    "layer2s": {
+      "description": "Bridges and settlement relying on L1 receipts should accommodate one-block deferral and detect reverted-parent semantics; data availability rules remain unchanged."
+    },
+    "stakersNodes": {
+      "description": "Validators/proposers attest earlier after static checks; need new header validation, deferred-output tracking, and off-critical-path execution scheduling."
+    },
+    "clClients": {
+      "description": "Must process new header fields and parent flags, manage EL request deferrals, and integrate with EL without changing fork-choice rules."
+    },
+    "elClients": {
+      "description": "Significant work: split static validation from execution, implement sender pre-charging, snapshots/reversion, new chain-state tracking, and base-fee handling for reverts."
+    }
+  },
+  "benefits": [
+    "Asynchronous attestation before execution reduces the critical path, enabling higher gas limits and overall network throughput.",
+    "Minimal checks using previous state and parent outputs let validators deem blocks valid without executing transactions.",
+    "Senders are pre-charged maximum fees and balances/nonces verified, significantly reducing execution-time failures and fragile same-block dependencies.",
+    "Snapshot-and-revert preserves liveness: mismatched gas used resets receipts, logs, and execution outputs without discarding blocks from the chain.",
+    "Base-fee dynamics remain fair: reverted parents count as zero gas used, preventing fee-market manipulation via overdeclared usage."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This proposal introduces a mechanism to make execution blocks statically verifiable through minimal checks that only require the previous state, without requiring execution of the block's transactions. This enables validators to attest to a block's validity without completing its execution. ## Motivation The primary advantage of this proposal is **asynchronous block validation**. In the current Ethereum protocol, blocks must be fully executed before validators can attest to them. This requirement creates a bottleneck in the consensus process, as attestors must wait for execution results before committing their votes, limiting the network's throughput potential. By introducing a mechanism where execution payloads can be reverted rather than invalidating the entire block, execution is no longer an immediate requirement for validation. Instead, a block's validity can be determined based on its structural correctness and the upfront payment of transaction fees by senders. This allows attestation to happen earlier in the slot, independent of execution, potentially enabling higher block gas limits and significant throughput improvements across the network. ## Specification ### Header Changes The block header structure is extended to support delayed execution: ```python @dataclass class Header: # Existing fields parent_hash: Hash32 ommers_hash: Hash32 coinbase: Address # Pre-execution state root - this is the state root before executing transactions pre_state_root: Root # Deferred execution outputs from parent block parent_transactions_root: Root # Transaction root from parent block parent_receipt_root: Root # Receipt root from parent block parent_bloom: Bloom # Logs bloom from parent block parent_requests_hash: Hash32 # Hash of requests from the parent block parent_execution_reverted: bool # Indicates if parent block's execution was reverted # Other existing fields difficulty: Uint number: Uint gas_limit: Uint gas_used: Uint # Declared gas used by txs, validated post-execution timestamp: U256 extra_data: Bytes prev_randao: Bytes32 nonce: Bytes8 base_fee_per_gas: Uint withdrawals_root: Root blob_gas_used: U64 # Total blob gas used by transactions excess_blob_gas: U64 parent_beacon_block_root: Root ``` The key changes are: 1. `pre_state_root`: Represents the state root before execution (checked against the post-execution state of the parent block) 2. `parent_receipt_root`: Receipt root from the parent block (deferred execution output) 3. `parent_bloom`: Logs bloom from the parent block (deferred execution output) 4. `parent_requests_hash`: Hash of requests from the parent block (deferred execution output) 5. `parent_execution_reverted`: Indicates whether the parent block's execution was reverted A block header MUST include all these fields to be considered valid under this EIP. The `pre_state_root` MUST match the state root after applying the parent block's execution. The parent execution outputs MUST accurately reflect the previous block's execution results to maintain chain integrity. ### Chain State Tracking The blockchain object is extended to track execution outputs for verification in subsequent blocks: ```python @dataclass class BlockChain: blocks: List[Block] state: State chain_id: U64 last_transactions_root: Root # Transaction root from the last executed block last_receipt_root: Root # Receipt root from last executed block last_block_logs_bloom: Bloom # Logs bloom from last executed block last_requests_hash: Bytes # Requests hash from last executed block last_execution_reverted: bool # Indicates if the last block's execution was reverted ``` These additional fields are used to verify the deferred execution outputs claimed in subsequent blocks. The `last_transactions_root`, `last_receipt_root`, `last_block_logs_bloom`, `last_requests_hash`, and `last_execution_reverted` act as critical chain state references that MUST be updated after each block execution to ensure proper state progression. When a block's execution is reverted due to a gas mismatch, the `last_execution_reverted` field is set to `True`, which affects the base fee calculation of subsequent blocks. ### Block Validation Static validation is performed separately from execution. In this phase, all checks that can be done without executing transactions are performed: ```python def validate_block(chain: BlockChain, block: Block) -> None: # Validate header against parent validate_header(chain, block.header) # Validate deferred execution outputs from the parent if block.header.parent_transactions_root != chain.last_transactions_root: raise InvalidBlock if block.header.parent_receipt_root != chain.last_receipt_root: raise InvalidBlock if block.header.parent_bloom != chain.last_block_logs_bloom: raise InvalidBlock if block.header.parent_requests_hash != chain.last_requests_hash: raise InvalidBlock if block.header.pre_state_root != state_root(chain.state): raise InvalidBlock if block.header.parent_execution_reverted != chain.last_execution_reverted: raise InvalidBlock ... # Process all transactions trie and validate transactions total_inclusion_gas = Uint(0) total_blob_gas_used = Uint(0) withdrawals_trie = Trie(secured=False, default=None) # Track sender balances and nonces by address sender_balances = {} sender_nonces = {} # Calculate blob gas price based on excess blob gas blob_gas_price = calculate_blob_gas_price(block.header.excess_blob_gas) # Validate each transaction for i, tx in enumerate(map(decode_transaction, block.transactions)): # Validate transaction parameters (signature, fees, etc.) validate_transaction(tx, block.header.base_fee_per_gas, block.header.excess_blob_gas) # Recover sender sender_address = recover_sender(chain.chain_id, tx) # Calculate gas costs (both EIP-7623 intrinsic cost and floor cost) intrinsic_gas, calldata_floor_gas_cost = calculate_intrinsic_cost(tx) blob_gas_used = calculate_total_blob_gas(tx) # Track total gas usage (using the maximum of intrinsic gas and floor cost) total_inclusion_ga"
+}

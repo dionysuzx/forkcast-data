@@ -1,0 +1,72 @@
+{
+  "id": 7918,
+  "title": "EIP-7918: Blob base fee bounded by execution cost",
+  "status": "Final",
+  "description": "Imposes that the price of GAS_PER_BLOB blob gas is greater than the price of BLOB_BASE_COST execution gas.",
+  "laymanDescription": "This addresses blob fee market problems by introducing a reserve price tied to execution costs. When Layer 2 execution costs dominate blob costs, this prevents the blob fee market from becoming ineffective at 1 wei. See a storybook-style explanation [here](https://notes.ethereum.org/@anderselowsson/AIG)!",
+  "author": "Anders Elowsson (@anderselowsson), Ben Adams (@benaadams), Francesco D'Amato (@fradamt)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2025-03-25",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-blob-base-fee-bounded-by-price-of-blob-carrying-transaction/23271",
+  "requires": [
+    "4844",
+    "7840"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Fusaka",
+      "statusHistory": [
+        {
+          "status": "Scheduled",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Included",
+          "call": null,
+          "date": null
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "More stable and predictable Layer 2 transaction costs, avoiding dramatic fee spikes when blob market becomes inelastic."
+    },
+    "appDevs": {
+      "description": "More predictable blob cost modeling for applications, especially those with consistent data posting patterns."
+    },
+    "walletDevs": {
+      "description": "More predictable fee estimation for Layer 2 transactions due to improved blob pricing stability."
+    },
+    "toolingInfra": {
+      "description": "Blob fee estimation tools and Layer 2 cost analysis dashboards need updates for the new reserve price mechanism."
+    },
+    "layer2s": {
+      "description": "Fundamental improvement to blob economics - prevents scenarios where blob fees become insignificant relative to execution costs, ensuring healthy fee market dynamics."
+    },
+    "stakersNodes": {
+      "description": "Ensures fair compensation for KZG proof verification compute costs through minimum blob pricing tied to execution base fee."
+    },
+    "clClients": {
+      "description": "Minimal impact as this primarily affects execution layer blob fee calculation mechanisms."
+    },
+    "elClients": {
+      "description": "Need to implement modified calc_excess_blob_gas() function with new reserve price logic and BLOB_BASE_COST parameter."
+    }
+  },
+  "benefits": [
+    "Prevents blob fee market collapse",
+    "Maintains effective price discovery",
+    "Ensures blob consumers pay fair market price for compute",
+    "Reduces dramatic fee spikes"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP assigns a reserve price `BLOB_BASE_COST * base_fee_per_gas` to blobs by introducing an `if`-clause in `calc_excess_blob_gas()`. Specifically, when the reserve price is higher than `GAS_PER_BLOB * base_fee_per_blob_gas`, the function will not subtract `target_blob_gas` from `excess_blob_gas`, causing `excess_blob_gas` to increase according to `blob_gas_used`, while keeping the per-block maximum increase unchanged. The proposal ensures that the blob fee market can function properly and that blob consumers pay at least a relevant fraction of the market rate for the compute they request from nodes. ## Motivation Ethereum uses a dynamic pricing auction to set the blob base fee, lowering the fee if less gas is consumed than `target_blob_gas = GAS_PER_BLOB * blobSchedule.target` and raising the fee if more gas is consumed. Such an auction can function well when the blob base fee represents the price signal, allowing the mechanism to control the real price for blob consumers. However, when execution costs dominate, the price signal is lost. The blob base fee then no longer represents a significant component of the total cost facing the consumer, and the protocol can no longer rely on the blob base fee to control the equilibrium quantity of blobs consumed. The current mechanism can therefore end up repeatedly lowering the blob base fee until it eventually settles at 1 wei. A change in the blob base fee of 10% may under such circumstances shift the total cost of utilizing blobspace by just 0.0000001%. Whenever demand picks up, over an hour of near-full blocks is required to restore a market-clearing equilibrium fee, with the mechanism intermittently resorting to a first-price auction, considered a worse UX by blob consumers. The resulting spikiness in resource consumption is suboptimal for scaling blobspace. To alleviate this, the proposal imposes a reserve price that reflects execution costs, through a simple `if`-clause in `calc_excess_blob_gas()`. The reserve price also fulfills a second function. Nodes must cryptographically verify KZG `proofs` to ensure that associated `commitments` correspond to provided blobs. This process is computationally expensive. It seems desirable to ensure that blob consumers pay at least some fraction of the market rate for the compute they impose on nodes. In this context, the execution base fee reflects how in-demand nodes' compute services are at the time that blob consumers request them. By applying the reserve price to the blob base fee, the proposal jointly ensures that: 1. The blob base fee update mechanism can function properly, by establishing a reserve price which is significant relative to L1 execution costs of blob consumers. 2. Blob consumers pay at least a relevant fraction of the market rate for the compute they request from nodes, with any additional fees for data determined independently in the blob fee market. ## Specification ### Parameters | Constant | Value | - | - | | `BLOB_BASE_COST` | `2**13` | ### Functions An `if`-clause is added to `calc_excess_blob_gas()` from [EIP-4844](./eip-4844.md). The function no longer subtracts `target_blob_gas` when updating `excess_blob_gas` if the price of a `blob` is below the price of `BLOB_BASE_COST` execution gas. The `blobSchedule` for referencing target and max blobs was introduced in [EIP-7840](./eip-7840.md). The current block's `blobSchedule` is used during processing. Thus, in the first block after a fork—when calculating `base_fee_per_blob_gas` via `get_base_fee_per_blob_gas(parent)`—`fake_exponential()` must use the *new* `blobSchedule.baseFeeUpdateFraction`. Likewise, the *new* `blobSchedule.max` and `blobSchedule.target` must be used in `calc_excess_blob_gas()`. ```python def calc_excess_blob_gas(parent: Header) -> int: target_blob_gas = GAS_PER_BLOB * blobSchedule.target if parent.excess_blob_gas + parent.blob_gas_used < target_blob_gas: return 0 if BLOB_BASE_COST * parent.base_fee_per_gas > GAS_PER_BLOB * get_base_fee_per_blob_gas(parent): return parent.excess_blob_gas + parent.blob_gas_used * (blobSchedule.max - blobSchedule.target) // blobSchedule.max else: return parent.excess_blob_gas + parent.blob_gas_used - target_blob_gas ``` ## Rationale ### Fee-inelasticity and reserve price This proposal alleviates idiosyncrasies in the blob base fee auction. When a rollup's costs are dominated by execution costs for the blob-carrying transactions, ZK proof verification, or priority fees, the protocol can no longer rely on the blob base fee to control the equilibrium quantity of blobs consumed. The fee update mechanism is unaware of the full price of the goods that it regulates the price for and therefore fails to converge on equilibrium in a timely manner. We can express a simple real demand function for blobspace as $Q(b + c).$ It maps the quantity of blobs demanded $Q$ to the blob base fee $b$ and the user's execution costs, expressed \"per blob gas\", $c$: ```python c = execution_cost * base_fee_per_gas / GAS_PER_BLOB ``` According to the *law of demand*, the lower the price $b+c$, the higher the demand. From the perspective of the blob base fee update mechanism, $c$ is fixed. If $c>0$, the demand curve will therefore have an \"inelasticity horizon\", beyond which further reductions in $b$ no longer increase $Q$: $\\lim_{b \\to 0} Q(b + c) = Q(c).$ In essence, the demand curve becomes a vertical line, where changes to the blob base fee $b$ no longer affect demand. Figure 1 illustrates this, with real demand curves (black to red) computed under four different execution base fees when purchasing two blobs. The hypothetical organic demand is illustrated in black. Any demand curve where execution costs are positive ($c>0$) eventually becomes vertical as the blob base fee falls. The protocol also uses a long-run perfectly inelastic supply curve (vertical blue line). Therefore, relatively small shifts in organic demand or the execution base fee (arrows) can lead to dramatic shifts in the "
+}

@@ -1,0 +1,280 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2022-08-25",
+  "messageCount": 33,
+  "sourceHash": "4ab5004192632b129667218c31b266d35116fca1114bce37e81e40526c661495",
+  "searchText": "Hi, we have s user claiming that at least Geth samples the transaction pool at the time of the FCU call and that all transactions seen between FCU and `getPayload` will not be included in the block. Is this true? Are all ELs like this? Can this be improved on our side (eg would calling again FCU on the same head resample the tx pool without ditching the block that has started being constructed?) I was under the impression that ELs continuously kept refreshing the Tx pool and kept adding to the block. But that was only an impression not founded on any actual knowledge this would be pretty significantly not great, yeah. For a while, my understanding had been that the optimal strategy for a CL was to send fcU basically as early as the correct head/etc are known, then let the EL converge to a payload, then eventually `getPayload`. But if Geth is doing this, Nimbus's previous strategy of just doing, fairly late, fcU then immediately `getPayload` [which I'd understood to be, well, basically a bug to be fixed] was actually correct for Geth. The trouble here is that Nethermind, at least, made it clear that it wasn't optimal for them. So if Geth and Nethermind require just opposite strategies to extract maximal profit from the local EL, that's unfortunate the engine api spec seems to call for up-to-date, I believe that's the case Same with Prysm. We call fcu as early as the head is known or wait until half of the slot (miss slot case) then let the EL converge to a payload. FCU then immediately getPayload was considered to be a bug iirc I understand Potuz more now. We are talking about slightly different things. What I thought: FCU (start building) getPayload(stop builder) What he meant: FCU (freeze TX pool, start building a block including only from this frozen pool) GetPayload(stop building) I actually dont know if the TX pool is freezed Yeah the EL should be using the time it has available to build the best possible block. If the EL is only considering transactions in the pool when fCU is received that's a poorly optimised EL. The situation is essentially no different to PoW mining where mining typically starts on an empty block and transactions are added as they're ready while the miner keeps searching for the solution. If more valuable transactions are found before mining finds the PoW solution, they should be added into the block. The only difference now is that \"mining\" is just the fCU call to start and getPayload to end rather than getWork and whatever the submit solution call is. It wouldn't surprise me if this logic wasn't well optimised by a lot of ELs yet though as most EL clients haven't been used for PoW mining in large numbers - except geth so it's a little surprising if it isn't building the best possible block. Wait I thought `transactionRoot` was part of the block header and thus if the txs changed you’d have to start PoW hashing over? I guess there’s no real concept of “starting over” though since it’s not like you can reasonably do an exhaustive search. Since its a random process, it doesn't matter if you add in new transactions to the hashing process. The end result would still be the same That is my impression as well, and it is based on conversations with ELs and geth team in particular. Let us ask <@360491619402776577> to shed a light on this situation There could be different strategies for EL in attempt to build the best block. It may build a new payload every say 500ms and then return the best one on `getPayload`, it may append transactions to the end of already built payload and entirely rebuilt it when it makes sense. But the best payload should take into account all transactions received between `fcU` and `getPayload`, otherwise, it's gonna be poorly optimised building process as Adrian has mentioned Yeah so right now we only take the txs at the beginning of the slot. We have the refresh mechanism for pow, so it's pretty easy to do the same thing post merge Just won't be in the merge release, just an improvement afterwards > Can this be improved on our side (eg would calling again FCU on the same head resample the tx pool without ditching the block that has started being constructed?) IMO, we should not adjust CL logic in a way that it is opinionated on the processes which EL has responsibilities for. The more we couple the two parts the harder would be in the future to make any changes. This is why I am against any timeout on `getPayload` induced on EL side, EL should not help CL fix itself. We have a clear separation of concerns now and would be great if we won't mess the things What risks would there be to adding the refresh mechanism ? Or is it just to have a stable/fixed release for the merge for now, so no new non-critical changes are to be added in The latter, we don't want to merge anything but critical fixes until the merge Hey, I was the one that first realized this. It makes sense to not ship any new features in geth before the merge. But I just wanted to point out that not having block refresh isn't without consequences: - From a UX perspective, Ethereum users will have to wait an extra 10sec on average to get their tx included. - CL impl have different timing strategies to call FCU, Prysm call it upon publish of prior block, Lighthouse call it 8 sec into the slot earliest - Validators calling FCU later make a bit more (better block) its on our TODO list to add improvements to try to produce better blocks. I am not sure if it will be before the merge or in release after. similar situation Don't make hacks in clients for EL to support quircks in CL an vice/versa. Lets decouple them as much as possible, not the contrary We have some interop issues because on EL client there was wait implemented on getPayload Or that CL clients were designed to work with cetrain order of sync would love to resolve them by decoupling and making the assumptions about the other side less, not more Calling FCU too close to getPayload was regarded as a bug. CL clients previously called FCU right before getPayload and this was an issue as it caused failed proposals in some cases. I am not too keen on changing it now since this is a temporary situation. Marius has mentioned that its easy enough to add in the refresh in the release post-merge, so it would be better to wait for it to be added in I known, I wasn't suggesting to do this. Btw, I checked last week, Lodestar and Nimbus still have this bug I think. https://github.com/status-im/nimbus-eth2/pull/4012 Thanks for the clarification. I tend to agree that this is an optimization on the EL rather than something that has to be specified. My recommendation to add a specification for something like repeated FCUS to refresh the Tx pool is only if this makes it simpler to implement on the EL. But if this is a simple change without involving the CL then all the better. I would prioritize this though since this is another insurance where validators will be encouraged to run a not so tested relayer/builder otherwise Thanks indeed I learned something out of this. In the prysm thread you mention that PoW miners do have a mechanism to refresh the block template. Is this on the eth_namespace or is this something that they need to hack geth to do? <@755590043632140352> It's in the miner worker of geth, there is a param called recommit which by default is 3sec: https://github.com/ethereum/go-ethereum/blob/f03c37b73e966249ef9e51178c4631a54c3efdc1/miner/worker.go#L417 From there miners call eth_getWork that return the latest ah thanks, alright at least for geth with my little understanding of their code it looks like this should be just an optimization on the EL with no intervention of the CL. Most of us have modified geth to balance a bunch of factors along with maximizing block income.",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hi, we have s user claiming that at least Geth samples the transaction pool at the time of the FCU call and that all transactions seen between FCU and `getPayload` will not be included in the block. Is this true? Are all ELs like this? Can this be improved on our side (eg would calling again FCU on the same head resample the tx pool without ditching the block that has started being constructed?)",
+      "createdAt": "2022-08-25T01:21:28.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I was under the impression that ELs continuously kept refreshing the Tx pool and kept adding to the block. But that was only an impression not founded on any actual knowledge",
+      "createdAt": "2022-08-25T01:22:48.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this would be pretty significantly not great, yeah. For a while, my understanding had been that the optimal strategy for a CL was to send fcU basically as early as the correct head/etc are known, then let the EL converge to a payload, then eventually `getPayload`. But if Geth is doing this, Nimbus's previous strategy of just doing, fairly late, fcU then immediately `getPayload` [which I'd understood to be, well, basically a bug to be fixed] was actually correct for Geth.\n\nThe trouble here is that Nethermind, at least, made it clear that it wasn't optimal for them. So if Geth and Nethermind require just opposite strategies to extract maximal profit from the local EL, that's unfortunate",
+      "createdAt": "2022-08-25T01:29:33.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the engine api spec seems to call for up-to-date, I believe that's the case",
+      "createdAt": "2022-08-25T01:29:53.984000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screen_Shot_2022-08-24_at_6.29.08_PM.png",
+          "content": "7feec757eac0ca3c7c288823ce463d09ad2295737a6bebfc6bd1a0f3828a667d"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Same with Prysm. We call fcu as early as the head is known or wait until half of the slot (miss slot case) then let the EL converge to a payload.  FCU then immediately getPayload was considered to be a bug iirc",
+      "createdAt": "2022-08-25T01:31:40.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I understand Potuz more now. We are talking about slightly different things.\nWhat I thought:\nFCU (start building) \ngetPayload(stop builder)\n\nWhat he meant:\nFCU (freeze TX pool, start building a block including only from this frozen pool)\nGetPayload(stop building)\n\nI actually dont know if the TX pool is freezed",
+      "createdAt": "2022-08-25T02:02:22.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah the EL should be using the time it has available to build the best possible block. If the EL is only considering transactions in the pool when fCU is received that's a poorly optimised EL.  The situation is essentially no different to PoW mining where mining typically starts on an empty block and transactions are added as they're ready while the miner keeps searching for the solution. If more valuable transactions are found before mining finds the PoW solution, they should be added into the block.  The only difference now is that \"mining\" is just the fCU call to start and getPayload to end rather than getWork and whatever the submit solution call is.\n\nIt wouldn't surprise me if this logic wasn't well optimised by a lot of ELs yet though as most EL clients haven't been used for PoW mining in large numbers - except geth so it's a little surprising if it isn't building the best possible block.",
+      "createdAt": "2022-08-25T02:37:18.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Wait I thought `transactionRoot` was part of the block header and thus if the txs changed you’d have to start PoW hashing over?",
+      "createdAt": "2022-08-25T03:19:55.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ryanleeschneider",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess there’s no real concept of “starting over” though since it’s not like you can reasonably do an exhaustive search.",
+      "createdAt": "2022-08-25T03:21:04.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Since its a random process, it doesn't matter if you add in new transactions to the hashing process. The end result would still be the same",
+      "createdAt": "2022-08-25T03:21:38.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That is my impression as well, and it is based on conversations with ELs and geth team in particular. Let us ask <@360491619402776577> to shed a light on this situation",
+      "createdAt": "2022-08-25T06:25:24.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There could be different strategies for EL in attempt to build the best block. It may build a new payload every say 500ms and then return the best one on `getPayload`, it may append transactions to the end of already built payload and entirely rebuilt it when it makes sense.\n\nBut the best payload should take into account all transactions received between `fcU` and `getPayload`, otherwise, it's gonna be poorly optimised building process as Adrian has mentioned",
+      "createdAt": "2022-08-25T06:28:01.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah so right now we only take the txs at the beginning of the slot. We have the refresh mechanism for pow, so it's pretty easy to do the same thing post merge\nJust won't be in the merge release, just an improvement afterwards",
+      "createdAt": "2022-08-25T06:35:31.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> Can this be improved on our side (eg would calling again FCU on the same head resample the tx pool without ditching the block that has started being constructed?)\n\nIMO, we should not adjust CL logic in a way that it is opinionated on the processes which EL has responsibilities for. The more we couple the two parts the harder would be in the future to make any changes. This is why I am against any timeout on `getPayload` induced on EL side, EL should not help CL fix itself. We have a clear separation of concerns now and would be great if we won't mess the things",
+      "createdAt": "2022-08-25T06:35:51.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What risks would there be to adding the refresh mechanism ? Or is it just to have a stable/fixed release for the merge for now, so no new non-critical changes are to be added in",
+      "createdAt": "2022-08-25T06:51:50.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The latter, we don't want to merge anything but critical fixes until the merge",
+      "createdAt": "2022-08-25T06:52:31.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hey, I was the one that first realized this. It makes sense to not ship any new features in geth before the merge. But I just wanted to point out that not having block refresh isn't without consequences:  \n- From a UX perspective, Ethereum users will have to wait an extra 10sec on average to get their tx included.\n- CL impl have different timing strategies to call FCU, Prysm call it upon publish of prior block, Lighthouse call it 8 sec into the slot earliest\n- Validators calling FCU later make a bit more (better block)",
+      "createdAt": "2022-08-25T09:13:47.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "its on our TODO list to add improvements to try to produce better blocks. I am not sure if it will be before the merge or in release after.",
+      "createdAt": "2022-08-25T09:16:28.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "similar situation",
+      "createdAt": "2022-08-25T09:23:56.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Don't make hacks in clients for EL to support quircks in CL an vice/versa. Lets decouple them as much as possible, not the contrary",
+      "createdAt": "2022-08-25T09:24:44.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We have some interop issues because on EL client there was wait implemented on getPayload\nOr that CL clients were designed to work with cetrain order of sync",
+      "createdAt": "2022-08-25T09:26:23.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would love to resolve them by decoupling",
+      "createdAt": "2022-08-25T09:26:33.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and making the assumptions about the other side less, not more",
+      "createdAt": "2022-08-25T09:26:51.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Calling FCU too close to getPayload was regarded as a bug. CL clients previously called FCU right before getPayload and this was an issue as it caused failed proposals in some cases. I am not too keen on changing it now since this is a temporary situation. Marius has mentioned that its easy enough to add in the refresh in the release post-merge, so it would be better to wait for it to be added in",
+      "createdAt": "2022-08-25T10:47:18.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I known, I wasn't suggesting to do this. Btw, I checked last week, Lodestar and Nimbus still have this bug I think.",
+      "createdAt": "2022-08-25T11:25:15.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/status-im/nimbus-eth2/pull/4012",
+      "createdAt": "2022-08-25T11:36:19.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks for the clarification. I tend to agree that this is an optimization on the EL rather than something that has to be specified. My recommendation to add a specification for something like repeated FCUS to refresh the Tx pool is only if this makes it simpler to implement on the EL. But if this is a simple change without involving the CL then all the better. I would prioritize this though since this is another insurance where validators will be encouraged to run a not so tested relayer/builder otherwise",
+      "createdAt": "2022-08-25T11:41:45.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks indeed I learned something out of this. In the prysm thread you mention that PoW miners do have a mechanism to refresh the block template. Is this on the eth_namespace or is this something that they need to hack geth to do?",
+      "createdAt": "2022-08-25T12:27:03.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352>  It's in the miner worker of geth, there is a param called recommit which by default is 3sec: https://github.com/ethereum/go-ethereum/blob/f03c37b73e966249ef9e51178c4631a54c3efdc1/miner/worker.go#L417",
+      "createdAt": "2022-08-25T12:55:57.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "From there miners call eth_getWork",
+      "createdAt": "2022-08-25T12:56:30.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that return the latest",
+      "createdAt": "2022-08-25T12:56:41.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah thanks, alright at least for geth with my little understanding of their code it looks like this should be just an optimization on the EL with no intervention of the CL.",
+      "createdAt": "2022-08-25T12:59:24.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chris2_2_2",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Most of us have modified geth to balance a bunch of factors along with maximizing block income.",
+      "createdAt": "2022-08-25T18:25:07.421000+00:00",
+      "attachments": []
+    }
+  ]
+}

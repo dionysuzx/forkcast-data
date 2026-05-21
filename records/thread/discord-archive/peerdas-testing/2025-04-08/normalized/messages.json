@@ -1,0 +1,982 @@
+{
+  "schemaVersion": 1,
+  "channel": "peerdas-testing",
+  "date": "2025-04-08",
+  "messageCount": 161,
+  "sourceHash": "efd6402f0a58602418b0bc922fe3bc05a843adebfa510e87aeefe7fcda79f0a2",
+  "searchText": "Reth - engine_newPayload (max blobs/tx) <@412614104222531604> I noticed `lighthouse-geth-1` is down on devnet-5 again - we have fixed the issue. However we've merged the offload proof computation changes into our main branch, so we'll probably be focusing on devnet-6 from now on. Do we want to keep devnet-5 running for longer? Im happy to yeet devnet 5, but would wanna spin up devnet 6 in the meantime do we have 3/3 EL/CLs ready with devnet 6 spec? So far nethermind/reth/geth (wip) and lh/grandine seems to be ready(ish) would be good to add prysm and teku on the CL side before we launch, and ideally also nimbus i think it should recover itself though, might just need some time, But we'll probably stop maintaining the devnet-5 branch any eta on devnet 6 readiness ? <@531934490826768418> <@785811170387951616> <@425907307621122049> Think thats fair focus on devnet 6 imo by the next week call distributed blobs up to the spec validator custody up to the spec distibuted cell proofs in the work I have the[ peerdas-devnet-6](https://github.com/prysmaticlabs/prysm/tree/peerdas-devnet-6) branch working fine with Prysm only (tested with Nethermind). However, I have some state diffs when interoping with LH at Fulu fork. (Not related to peerDAS, the issue happens even without blobs.) Trying to understand why. (The issue is very probably on Prysm side, not LH) I can also look into this tmr - i think we want this fixed before devnet-6 launch enabled autobuild for this haha yeah indeed, because now Prysm and LH totally live on separate forks. There is \"some\" diffs in post-state 😉 ``` data -> deposit_requests_start_index -> [ \"18446744073709551615\" :: \"0\" ] data -> next_withdrawal_validator_index -> [ \"128\" :: \"256\" ] data -> latest_execution_payload_header -> block_hash -> [ \"0x29d9ae1d19c75e497ccaf8b29e4afa78581247c34d7e0060089e98b7821c5ad6\" :: \"0x1ec9fca8e48718d99e180ca8408a8ea7eeeda1b61d63d15bebac5c256ba7fc59\" ] data -> latest_execution_payload_header -> prev_randao -> [ \"0xf7a5b2501d1ead2b27442ff2f91002cf3ea00bded574b9e98c500f025d1ffa5c\" :: \"0x5787c7dd8c5090fafddd78710792f5860546b8fa02fd8318ee13d4133c389da7\" ] data -> latest_execution_payload_header -> timestamp -> [ \"1744098255\" :: \"1744098243\" ] data -> latest_execution_payload_header -> parent_hash -> [ \"0x1ec9fca8e48718d99e180ca8408a8ea7eeeda1b61d63d15bebac5c256ba7fc59\" :: \"0x9b86ae955b1dff64b0df4a0335811ee3c0a9f51e0cbb1123e6627c7462fbc94c\" ] data -> latest_execution_payload_header -> block_number -> [ \"29\" :: \"28\" ] data -> latest_execution_payload_header -> base_fee_per_gas -> [ \"20808157\" :: \"23780750\" ] data -> latest_execution_payload_header -> state_root -> [ \"0x45a46addcfebea693959729cc2d87a4d9c582206469a390133cc51d6d2e4ec94\" :: \"0xd34e531fec3f0f92e4a1563841287ebcf2ad5e99334ab1238e8f5588db11bfff\" ] data -> latest_block_header -> body_root -> [ \"0xa36e7f7e87e9edf5241d5a8a2da609c298135b58ed4a0e5dba203f10b0cd5945\" :: \"0x2a864a0e29c2568a1dcb1c326fc665a3de4214dd45e8e7b6dd03d181bb376b51\" ] data -> latest_block_header -> slot -> [ \"32\" :: \"31\" ] data -> latest_block_header -> state_root -> [ \"0x0000000000000000000000000000000000000000000000000000000000000000\" :: \"0xeaae0584e0e64b6ee447c0cb5209389ce531ebecd47daffb4acd8b6bfdc42ed1\" ] data -> latest_block_header -> proposer_index -> [ \"361\" :: \"50\" ] ``` <@412614104222531604> how do i make spamoor go crazy, this doesnt seem to do anything 🤔 ``` spamoor_blob_params: image: ethpandaops/spamoor:blob-v1 throughput: 72 ``` wrong image? This one is already suspiscious: ``` data -> deposit_requests_start_index -> [ \"18446744073709551615\" :: \"0\" ] ``` `0` is on Prysm side. (I did not yet added spectests for `upgrade_to_fulu`. Should do it rather sooner than later). that should be it 😄 our spec tests are also not up to date, we'll work on it too but we noticed that sometimes the spammor just stops If you want to have it incrementally increase the blob count like our tests, you can try https://github.com/mininny/spamoor/tree/feat/mininny/incremental-blob-count and specify the param like this `--throughput-increment-interval=600` yeah, also seeing that. restarting the spamoor when it happen I think we can use `max_blobs` to be higher, this will bump blobs count per tx Hi all, I’m curious, do we have any data on average getBlobs hit rate on mainnet? In this [conversation](https://discord.com/channels/595666850260713488/1357997173983412386/1358692852388859956) we said that partial getBlobs response is not used in mainnet. I’m wondering how much will be that case in mainnet with many private mempools, etc <@654267572107083777> and I have some spec clarifications for getBlobsV2, unless they are clarified in today’s breakout, we won’t be merging atm got a pr? Not yet in a working condition we have `nethermind_number_of_requested_blobs` and `nethermind_number_of_sent_blobs` For val custody we are upto spec apart from Manu’s pr related to finalized beacon state Getting 99% of blobs is useless for CL when engine_getblobsv2 is called, is it correct? yes I mean, it can backfill the rest, but 99% alone is useless What if we return empty response if not every blob is found? (not talking about peerdas columns etc I guess?) (because then one has the erasure encoding) in any case, for a CL it's ultimately all or nothing So I guess we can save some time on serialization and checks if we return nothing, wdyt? well, the CL can still try to backfill, or wait for it to show up in gossip again, and it arguably helps. It's not obvious to me that returning nothing is better but an empirical question, really, because getBlobs can function as one way of many to get blobs, which CLs could combine when it works, it's the most efficient mechanism it has it relates to my comments on https://github.com/ethereum/execution-apis/pull/630 So it can be not just \"all or nothing\" depending on cl implementation? I guess with v2 we can reconstruct? And recover if we have more than half? Because we have cell proofs? Can somebody confirm? v2 returns blobs, not cells. And if we have no blob we have no proof the erasure encoding is on columns, not blobs. I don't think the mechanism are defined (?) to incorporate part-blobs into the blobs-from-column reconstruction And we can also try to respond in binary format in SSZ encoding if some CL has time for such experiment (and sees it relevant) i don't recall fully, but you could convert blobs -> cellproofs -> columns something like that right <@531934490826768418> prysm likes to gang up on others 😂 this is devnet 6? devnet 6 spec yes its kurtosis ok we can join later, after the dust settles XD it's often more complicated if the mess up is a cross client group effort Also <@412614104222531604> pls don’t yeet devnet 5 yet I have some more experiments to run there can't make it in person, async update [here](https://github.com/ethereum/pm/issues/1425#issuecomment-2785776284). echoing <@520034910149410861>'s earlier point, very much in favor of consolidating breakout time to eth o'clock That's exactly what I say in my message 😉 sure <:crazycry:932693133546889216> <@412614104222531604> you can try with the latest commit of the branch. nethermind blob-sharing building like <@654267572107083777> said, you can't do this because the erasure coding is horizontal, not vertical. Having 50% of the blobs doesn't let you reconstruct the columns. I am not sure what use you could have for a subset of the blobs in the current design. How would you get the others if you can't get them from getBlobs? Most of the utility of getBlobs in the current design is (imo) allowing local block building with limited upload bandwidth. For regular block building (when private mempools are in play) it just doesn't matter that much, the builder can push out the data fast enough > How would you get the others if you can't get them from getBlobs? we need to get the rest from the network in that case https://ethereumfoundation.zoom.us/j/89262256299?pwd=hAYw0AjbgMYbqPUK1VPC6fqyWiS6jx.1 there was a statistic by jimmy a month ago the CL gossips columns, not blobs unfortunately i didn't follow closely but i thought v2 was there a solution to the hit rate problem in v1 in that case retry i assume <@688748669268132001> we extract the columns from the blobs you receive via getblobsv2 what I meant is, if you only get partial blobs you don't have a way of getting the remaining ones from the CL so imo it would be ok for the EL to give an empty response whenever it doesn't have all blobs IMO that's really important I'm preparing a writeup for cell-level messaging and all it's advantages ( <@520034910149410861> we've discussed it a few times but I've never made a writeup besides in chats). In my Nim implementation for FullDAS I'm using cell-level messaging, but I'm wondering who else is experimenting with it. why? because the getBlobs timeout is 1 whole second yeah, never leave it for timeouts. Explicit response with reason code is always better. so strategically it's safer to reject the partial response and resort to gossip than see what is missing and try to get that from gossip I think lighthouse just drops partial responses which is what I would expect all clients to do with the current spec we check gossip and retry getBlobs across threads, whichever task completes first applies the block but the cpu utilization shoots up in that case Maybe we skip peerdas and go fulldas 😹 what do you mean by check gossip? validate blob gossip and download blobs from gossip are you talking about the EL or CL? CL so you mean download columns? for fusaka yes download columns for pectra download blobs, similar idea So one could also reactively request blobs on EL That's an EL-side thing, but on the CL the partial response is just useless But it is important to have the right semantics on the API call. The \"do you have it right now\" should not be confused with the \"can you get it for me\". you can then decide to retry, and maybe the EL on its side has done some requesting i agree anyway, I guess we'll just talk about it on the call shortly 😄 ok So on the getBlobs API, there are a few possible semantics: - give me all these or an error: useful now - give me what you can of all these: useful only if we have cell-level messaging - get me all these please: useful to trigger EL fetch > give me all these or an error: useful now big agree on this Were there any discussion in keeping the blob gossiping in CL side only for getting the missing blob? For supernodes that need all blobs, leveraging as much on getBlobs then filling the gap from CL gossiping (or EL by request) could also work..? CL-side \"blob gossiping\" is row topics and we've discussed that quite a lot 🙂 could we not do getColumns 🙂 Ah okay, definitely don't mean to bring back old discussions! no worries, it wasn't conclusive. We have to fit it in the upgrade rodemap wisely. because CLs usually don't have so much time, just about 2 seconds So for blob tranmissions, there is before the block decision was made, and there is after. - Before happens on EL, no question - For the after, we could - do nothing - do \"expedited EL\", - do CL as we did in our DAS studies. The time available is not different. What is different is how sources are made available in the system, and what network stack we use. <@520034910149410861> in general i wanted to understand was there an improvement in mind when we came up with getBlobsV2 from V1? if so what was it Given that blob gossip will anyway continue in parallel on the EL, imo it makes sense to keep it there and at most just be more aggressive about requesting the specific things that are now known to be in the block v2 is entirely about cell proofs (talking about Fusaka) It does sound like it makes sense 🙂 Then the trigger is block arrival + getBlobs call to EL? Or just the block arrival to EL? (jsut trying to unwrap event sequence) also, if we keep it in EL, cell level reconstruction is harder to support on rows. getBlobs seems to make sense because you might ",
+  "excerpts": [
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "Reth - engine_newPayload (max blobs/tx)",
+      "createdAt": "2025-04-08T03:44:34.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> I noticed `lighthouse-geth-1` is down on devnet-5 again - we have fixed the issue. However we've merged the offload proof computation changes into our main branch, so we'll probably be focusing on devnet-6 from now on. \n\nDo we want to keep devnet-5 running for longer?",
+      "createdAt": "2025-04-08T08:06:52.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Im happy to yeet devnet 5, but would wanna spin up devnet 6 in the meantime",
+      "createdAt": "2025-04-08T08:08:10.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "do we have 3/3 EL/CLs ready with devnet 6 spec?",
+      "createdAt": "2025-04-08T08:08:28.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "So far nethermind/reth/geth (wip) and lh/grandine seems to be ready(ish)",
+      "createdAt": "2025-04-08T08:08:40.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "would be good to add prysm and teku on the CL side before we launch, and ideally also nimbus",
+      "createdAt": "2025-04-08T08:09:08.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think it should recover itself though, might just need some time, But we'll probably stop maintaining the devnet-5 branch",
+      "createdAt": "2025-04-08T08:09:27.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "any eta on devnet 6 readiness ? <@531934490826768418> <@785811170387951616> <@425907307621122049>",
+      "createdAt": "2025-04-08T08:09:29.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Think thats fair",
+      "createdAt": "2025-04-08T08:10:50.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "focus on devnet 6 imo",
+      "createdAt": "2025-04-08T08:10:54.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dmitriishmatko",
+      "category": "Testing",
+      "parent": "",
+      "content": "by the next week call\ndistributed blobs up to the spec\nvalidator custody up to the spec\ndistibuted cell proofs in the work",
+      "createdAt": "2025-04-08T08:12:32.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "I have the[ peerdas-devnet-6](https://github.com/prysmaticlabs/prysm/tree/peerdas-devnet-6) branch working fine with Prysm only (tested with Nethermind). However, I have some state diffs when interoping with LH at Fulu fork. (Not related to peerDAS, the issue happens even without blobs.)\nTrying to understand why. (The issue is very probably on Prysm side, not LH)",
+      "createdAt": "2025-04-08T08:13:02.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can also look into this tmr -  i think we want this fixed before devnet-6 launch",
+      "createdAt": "2025-04-08T08:14:11.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "enabled autobuild for this",
+      "createdAt": "2025-04-08T08:14:35.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "haha yeah indeed, because now Prysm and LH totally live on separate forks.",
+      "createdAt": "2025-04-08T08:14:58.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "There is \"some\" diffs in post-state 😉\n\n```\n data -> deposit_requests_start_index -> [ \"18446744073709551615\" :: \"0\" ]\n data -> next_withdrawal_validator_index -> [ \"128\" :: \"256\" ]\n data -> latest_execution_payload_header -> block_hash -> [ \"0x29d9ae1d19c75e497ccaf8b29e4afa78581247c34d7e0060089e98b7821c5ad6\" :: \"0x1ec9fca8e48718d99e180ca8408a8ea7eeeda1b61d63d15bebac5c256ba7fc59\" ]\n data -> latest_execution_payload_header -> prev_randao -> [ \"0xf7a5b2501d1ead2b27442ff2f91002cf3ea00bded574b9e98c500f025d1ffa5c\" :: \"0x5787c7dd8c5090fafddd78710792f5860546b8fa02fd8318ee13d4133c389da7\" ]\n data -> latest_execution_payload_header -> timestamp -> [ \"1744098255\" :: \"1744098243\" ]\n data -> latest_execution_payload_header -> parent_hash -> [ \"0x1ec9fca8e48718d99e180ca8408a8ea7eeeda1b61d63d15bebac5c256ba7fc59\" :: \"0x9b86ae955b1dff64b0df4a0335811ee3c0a9f51e0cbb1123e6627c7462fbc94c\" ]\n data -> latest_execution_payload_header -> block_number -> [ \"29\" :: \"28\" ]\n data -> latest_execution_payload_header -> base_fee_per_gas -> [ \"20808157\" :: \"23780750\" ]\n data -> latest_execution_payload_header -> state_root -> [ \"0x45a46addcfebea693959729cc2d87a4d9c582206469a390133cc51d6d2e4ec94\" :: \"0xd34e531fec3f0f92e4a1563841287ebcf2ad5e99334ab1238e8f5588db11bfff\" ]\n data -> latest_block_header -> body_root -> [ \"0xa36e7f7e87e9edf5241d5a8a2da609c298135b58ed4a0e5dba203f10b0cd5945\" :: \"0x2a864a0e29c2568a1dcb1c326fc665a3de4214dd45e8e7b6dd03d181bb376b51\" ]\n data -> latest_block_header -> slot -> [ \"32\" :: \"31\" ]\n data -> latest_block_header -> state_root -> [ \"0x0000000000000000000000000000000000000000000000000000000000000000\" :: \"0xeaae0584e0e64b6ee447c0cb5209389ce531ebecd47daffb4acd8b6bfdc42ed1\" ]\n data -> latest_block_header -> proposer_index -> [ \"361\" :: \"50\" ]\n```",
+      "createdAt": "2025-04-08T08:16:07.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> how do i make spamoor go crazy, this doesnt seem to do anything 🤔 \n```\nspamoor_blob_params:\n  image: ethpandaops/spamoor:blob-v1\n  throughput: 72\n```",
+      "createdAt": "2025-04-08T08:17:02.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "wrong image?",
+      "createdAt": "2025-04-08T08:17:14.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "This one is already suspiscious:\n```\n data -> deposit_requests_start_index -> [ \"18446744073709551615\" :: \"0\" ]\n```\n\n`0` is on Prysm side.\n(I did not yet added spectests for `upgrade_to_fulu`. Should do it rather sooner than later).",
+      "createdAt": "2025-04-08T08:19:26.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "that should be it 😄",
+      "createdAt": "2025-04-08T08:21:11.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "our spec tests are also not up to date, we'll work on it too",
+      "createdAt": "2025-04-08T08:21:17.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "but we noticed that sometimes the spammor just stops",
+      "createdAt": "2025-04-08T08:21:23.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "If you want to have it incrementally increase the blob count like our tests, you can try https://github.com/mininny/spamoor/tree/feat/mininny/incremental-blob-count and specify the param like this `--throughput-increment-interval=600`",
+      "createdAt": "2025-04-08T08:22:50.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, also seeing that. restarting the spamoor when it happen",
+      "createdAt": "2025-04-08T08:27:17.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang.eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think we can use `max_blobs` to be higher, this will bump blobs count per tx",
+      "createdAt": "2025-04-08T08:29:08.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hi all, I’m curious, do we have any data on average getBlobs hit rate on mainnet? In this [conversation](https://discord.com/channels/595666850260713488/1357997173983412386/1358692852388859956) we said that partial getBlobs response is not used in mainnet. I’m wondering how much will be that case in mainnet with many private mempools, etc",
+      "createdAt": "2025-04-08T08:43:22.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@654267572107083777> and I have some spec clarifications for getBlobsV2, unless they are clarified in today’s breakout, we won’t be merging atm",
+      "createdAt": "2025-04-08T08:44:32.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "got a pr?",
+      "createdAt": "2025-04-08T08:44:50.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Not yet in a working condition",
+      "createdAt": "2025-04-08T08:45:11.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marcinds",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have `nethermind_number_of_requested_blobs` and `nethermind_number_of_sent_blobs`",
+      "createdAt": "2025-04-08T08:46:02.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "For val custody we are upto spec apart from Manu’s pr related to finalized beacon state",
+      "createdAt": "2025-04-08T08:46:22.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "Getting 99% of blobs is useless for CL when engine_getblobsv2 is called, is it correct?",
+      "createdAt": "2025-04-08T08:46:52.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2025-04-08T08:47:23.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I mean, it can backfill the rest, but 99% alone is useless",
+      "createdAt": "2025-04-08T08:47:42.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "What if we return empty response if not every blob is found?",
+      "createdAt": "2025-04-08T08:47:53.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(not talking about peerdas columns etc I guess?)",
+      "createdAt": "2025-04-08T08:48:07.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(because then one has the erasure encoding)",
+      "createdAt": "2025-04-08T08:48:20.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "in any case, for a CL it's ultimately all or nothing",
+      "createdAt": "2025-04-08T08:48:57.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "So I guess we can save some time on serialization and checks if we return nothing, wdyt?",
+      "createdAt": "2025-04-08T08:49:53.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "well, the CL can still try to backfill, or wait for it to show up in gossip again, and it arguably helps. It's not obvious to me that returning nothing is better",
+      "createdAt": "2025-04-08T08:50:42.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "but an empirical question, really, because getBlobs can function as one way of many to get blobs, which CLs could combine",
+      "createdAt": "2025-04-08T08:51:08.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "when it works, it's the most efficient mechanism it has",
+      "createdAt": "2025-04-08T08:51:22.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "it relates to my comments on https://github.com/ethereum/execution-apis/pull/630",
+      "createdAt": "2025-04-08T08:53:50.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "So it can be not just \"all or nothing\" depending on cl implementation?",
+      "createdAt": "2025-04-08T08:54:37.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "I guess with v2 we can reconstruct?",
+      "createdAt": "2025-04-08T08:54:39.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "And recover if we have more than half?",
+      "createdAt": "2025-04-08T08:54:54.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Because we have cell proofs?",
+      "createdAt": "2025-04-08T08:55:02.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can somebody confirm?",
+      "createdAt": "2025-04-08T08:55:08.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "v2 returns blobs, not cells. And if we have no blob we have no proof",
+      "createdAt": "2025-04-08T08:56:15.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "the erasure encoding is on columns, not blobs. I don't think the mechanism are defined (?) to incorporate part-blobs into the blobs-from-column reconstruction",
+      "createdAt": "2025-04-08T08:56:15.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "And we can also try to respond in binary format in SSZ encoding if some CL has time for such experiment (and sees it relevant)",
+      "createdAt": "2025-04-08T08:58:18.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i don't recall fully, but you could convert blobs -> cellproofs -> columns",
+      "createdAt": "2025-04-08T09:08:12.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "something like that right <@531934490826768418>",
+      "createdAt": "2025-04-08T09:08:28.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm likes to gang up on others 😂",
+      "createdAt": "2025-04-08T09:08:28.597000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2025-04-08_at_11.08.07.png",
+          "content": "12ffd41612ad1c527be055e8edeaefa9911e1c7875fb114a1a79acd855cf8d54"
+        }
+      ]
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is devnet 6?",
+      "createdAt": "2025-04-08T09:08:52.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "devnet 6 spec yes",
+      "createdAt": "2025-04-08T09:09:07.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its kurtosis",
+      "createdAt": "2025-04-08T09:09:12.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok we can join later, after the dust settles",
+      "createdAt": "2025-04-08T09:09:20.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "XD",
+      "createdAt": "2025-04-08T09:09:22.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's often more complicated if the mess up is a cross client group effort",
+      "createdAt": "2025-04-08T09:11:21.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also <@412614104222531604> pls don’t yeet devnet 5 yet",
+      "createdAt": "2025-04-08T09:12:44.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "I have some more experiments to run there",
+      "createdAt": "2025-04-08T09:12:56.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "closer__",
+      "category": "Testing",
+      "parent": "",
+      "content": "can't make it in person, async update [here](https://github.com/ethereum/pm/issues/1425#issuecomment-2785776284). echoing <@520034910149410861>'s earlier point, very much in favor of consolidating breakout time to eth o'clock",
+      "createdAt": "2025-04-08T09:16:17.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "That's exactly what I say in my message 😉",
+      "createdAt": "2025-04-08T09:17:23.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "sure <:crazycry:932693133546889216>",
+      "createdAt": "2025-04-08T09:17:41.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> you can try with the latest commit of the branch.",
+      "createdAt": "2025-04-08T09:47:59.626000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "982c71e062dcddb71c56a565a45e6061144614c71d2f327e874cb769c19e04b3"
+        }
+      ]
+    },
+    {
+      "author": "corcoranwill",
+      "category": "Testing",
+      "parent": "",
+      "content": "nethermind blob-sharing",
+      "createdAt": "2025-04-08T09:51:51.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "building",
+      "createdAt": "2025-04-08T09:57:40.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "like <@654267572107083777> said, you can't do this because the erasure coding is horizontal, not vertical. Having 50% of the blobs doesn't let you reconstruct the columns.",
+      "createdAt": "2025-04-08T09:58:11.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "I am not sure what use you could have for a subset of the blobs in the current design. How would you get the others if you can't get them from getBlobs?",
+      "createdAt": "2025-04-08T09:58:31.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "Most of the utility of getBlobs in the current design is (imo) allowing local block building with limited upload bandwidth. For regular block building (when private mempools are in play) it just doesn't matter that much, the builder can push out the data fast enough",
+      "createdAt": "2025-04-08T10:00:13.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "> How would you get the others if you can't get them from getBlobs?\nwe need to get the rest from the network in that case",
+      "createdAt": "2025-04-08T10:00:35.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "corcoranwill",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://ethereumfoundation.zoom.us/j/89262256299?pwd=hAYw0AjbgMYbqPUK1VPC6fqyWiS6jx.1",
+      "createdAt": "2025-04-08T10:01:38.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "there was a statistic by jimmy a month ago",
+      "createdAt": "2025-04-08T10:01:51.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "the CL gossips columns, not blobs",
+      "createdAt": "2025-04-08T10:03:59.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "unfortunately i didn't follow closely but i thought v2 was there a solution to the hit rate problem in v1",
+      "createdAt": "2025-04-08T10:04:05.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "in that case retry i assume",
+      "createdAt": "2025-04-08T10:04:57.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@688748669268132001>",
+      "createdAt": "2025-04-08T10:05:05.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "we extract the columns from the blobs you receive via getblobsv2",
+      "createdAt": "2025-04-08T10:05:47.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "what I meant is, if you only get partial blobs you don't have a way of getting the remaining ones from the CL",
+      "createdAt": "2025-04-08T10:06:40.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "so imo it would be ok for the EL to give an empty response whenever it doesn't have all blobs",
+      "createdAt": "2025-04-08T10:07:14.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "IMO that's really important",
+      "createdAt": "2025-04-08T10:09:46.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm preparing a writeup for cell-level messaging and all it's advantages ( <@520034910149410861> we've discussed it a few times but I've never made a writeup besides in chats). In my Nim implementation for FullDAS I'm using cell-level messaging, but I'm wondering who else is experimenting with it.",
+      "createdAt": "2025-04-08T10:10:15.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "why?",
+      "createdAt": "2025-04-08T10:10:32.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "because the getBlobs timeout is 1 whole second",
+      "createdAt": "2025-04-08T10:10:51.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, never leave it for timeouts. Explicit response with reason code is always better.",
+      "createdAt": "2025-04-08T10:11:17.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "so strategically it's safer to reject the partial response and resort to gossip than see what is missing and try to get that from gossip",
+      "createdAt": "2025-04-08T10:11:53.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think lighthouse just drops partial responses",
+      "createdAt": "2025-04-08T10:12:29.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "which is what I would expect all clients to do with the current spec",
+      "createdAt": "2025-04-08T10:12:50.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "we check gossip and retry getBlobs across threads, whichever task completes first applies the block",
+      "createdAt": "2025-04-08T10:13:10.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "but the cpu utilization shoots up in that case",
+      "createdAt": "2025-04-08T10:13:18.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "__flcl",
+      "category": "Testing",
+      "parent": "",
+      "content": "Maybe we skip peerdas and go fulldas 😹",
+      "createdAt": "2025-04-08T10:13:30.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "what do you mean by check gossip?",
+      "createdAt": "2025-04-08T10:13:31.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "validate blob gossip",
+      "createdAt": "2025-04-08T10:13:56.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "and download blobs from gossip",
+      "createdAt": "2025-04-08T10:14:17.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "are you talking about the EL or CL?",
+      "createdAt": "2025-04-08T10:14:28.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "CL",
+      "createdAt": "2025-04-08T10:14:33.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "so you mean download columns?",
+      "createdAt": "2025-04-08T10:14:42.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "for fusaka yes download columns",
+      "createdAt": "2025-04-08T10:14:56.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "for pectra download blobs, similar idea",
+      "createdAt": "2025-04-08T10:15:06.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "So one could also reactively request blobs on EL",
+      "createdAt": "2025-04-08T10:15:07.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "That's an EL-side thing, but on the CL the partial response is just useless",
+      "createdAt": "2025-04-08T10:15:44.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "But it is important to have the right semantics on the API call. The \"do you have it right now\" should not be confused with the \"can you get it for me\".",
+      "createdAt": "2025-04-08T10:15:48.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can then decide to retry, and maybe the EL on its side has done some requesting",
+      "createdAt": "2025-04-08T10:15:55.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "i agree",
+      "createdAt": "2025-04-08T10:15:57.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "anyway, I guess we'll just talk about it on the call shortly 😄",
+      "createdAt": "2025-04-08T10:16:34.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2025-04-08T10:17:17.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "So on the getBlobs API, there are a few possible semantics:\n- give me all these or an error: useful now\n- give me what you can of all these: useful only if we have cell-level messaging\n- get me all these please: useful to trigger EL fetch",
+      "createdAt": "2025-04-08T10:17:42.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "> give me all these or an error: useful now\nbig agree on this",
+      "createdAt": "2025-04-08T10:18:09.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Were there any discussion in keeping the blob gossiping in CL side only for getting the missing blob? For supernodes that need all blobs, leveraging as much on getBlobs then filling the gap from CL gossiping (or EL by request) could also work..?",
+      "createdAt": "2025-04-08T10:18:16.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "CL-side \"blob gossiping\" is row topics",
+      "createdAt": "2025-04-08T10:18:54.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "and we've discussed that quite a lot 🙂",
+      "createdAt": "2025-04-08T10:19:02.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "could we not do getColumns 🙂",
+      "createdAt": "2025-04-08T10:19:32.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mininny",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah okay, definitely don't mean to bring back old discussions!",
+      "createdAt": "2025-04-08T10:20:27.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "no worries, it wasn't conclusive. We have to fit it in the upgrade rodemap wisely.",
+      "createdAt": "2025-04-08T10:20:58.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "because CLs usually don't have so much time, just about 2 seconds",
+      "createdAt": "2025-04-08T10:22:29.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Testing",
+      "parent": "",
+      "content": "So for blob tranmissions, there is before the block decision was made, and there is after.\n- Before happens on EL, no question\n- For the after, we could\n   -  do nothing\n   - do \"expedited EL\", \n   - do CL as we did in our DAS studies.\nThe time available is not different. What is different is how sources are made available in the system,  and what network stack we use.",
+      "createdAt": "2025-04-08T10:25:37.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@520034910149410861> in general i wanted to understand was there an improvement in mind when we came up with getBlobsV2 from V1?",
+      "createdAt": "2025-04-08T10:26:35.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Testing",
+      "parent": "",
+      "content": "if so what was it",
+      "createdAt": "2025-04-08T10:26:42.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Testing",
+      "parent": "",
+      "content": "Given that blob gossip will anyway continue in parallel on the EL, imo it makes sense to keep it there and at most just be more aggressive about requesting the specific things that are now known to be in the block",
+      "createdAt": "2025-04-08T10:26:46.779000+00:00",
+      "attachments": []
+    }
+  ]
+}

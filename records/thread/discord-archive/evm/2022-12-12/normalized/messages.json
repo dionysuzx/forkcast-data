@@ -1,0 +1,282 @@
+{
+  "schemaVersion": 1,
+  "channel": "evm",
+  "date": "2022-12-12",
+  "messageCount": 34,
+  "sourceHash": "31c35ae659299fa40f4ec067c4d836c52531d41fb3123e766baba1e77942e422",
+  "searchText": "<@425274498732916736> A couple of corrections to the `CALLF` spec in EIP-4750: a) it should use `data_stack.height` instead of `caller_stack_height` (`return_stack` may be empty before item 7) and b) item 1 just before `JUMPF` should be item 8 actually More accurately, item 2 should be \"If data stack has less than `type[code_section_index].inputs` items, execution results in exceptional halt.\" And the formula in item 3 should use `data_stack.height` instead of `caller_stack_height` <@583892532644151312> I'm a little confused by this - your change would allow the child frame to access data stack items from the parent frame, which is not desirable and verified to not happen at deploy time via 5450. > return_stack may be empty before item 7 this is incorrect, see 2) in \"Execution\" > Return stack is initialized to contain one item: (code_section_index = 0, offset = 0, stack_height = 0) Ah, OK, perhaps it's a misunderstanding on my part. Let me think about it. The last item of the `CALLF` spec should be 8 though, not 1. i think this is a rendering issue with the EIPs website A question. Why doesn't `JUMPF` have the 1024 checks of `CALLF`? Also, is `JUMPF` mostly for tail-call optimization? so in section 4 of code validation: > Code section is invalid in case an immediate argument of any JUMPF is such that type[callee_section_index].outputs != type[caller_section_index].outputs, i.e. it is allowed to only jump to functions with the same output type. this means that JUMPF simply piggybacks off of the CALLF check I'm confused about the gas cost of `RJUMP` & `RJUMPI`/`RJUMPV`. Currently `JUMP` costs 8 gas and `JUMPI` costs 10 gas. It contradicts the following statement from EIP-4200: \"RJUMP should cost 2, and RJUMPI and RJUMPV should cost 4. This is a reduction of 2 gas, compared to JUMP and JUMPI.\" cc <@425274498732916736> <@425279588009246720> looks like a typo A typo. We have higher gas costs some time ago, originally -2 from `JUMP` and `JUMPI`. <@583892532644151312> Are you implementing anything? I'm reviewing a PR to erigon by an external contributor. So what's the cost of `RJUMP`? As far as I see it, -2 discount to `JUMP` makes sense (i.e. `JUMP` costing 8 and `RJUMP` costing 6). But `JUMP` costing 8 and `RJUMP` costing 2 looks unjustified to me. It is justified: it loads 2-byte value from the code and changes PC accordingly (without any additional checks). This is cheaper than PUSH2 which needs additional stack overflow check. And all PUSH instructions should cost 2 anyway. They are no different than `CHAINID`. But it also moves PC by a maximum of 32767, which can lead to cache misses when looking up the new code. True, but how do you want to assign the cost for this? To my mind we already have a proxy for that: the cost of `JUMP` `JUMP` and `RJUMP` should be priced consistently \"return stack height must not exceed 1024\" - how can this enforced at code validation time? Have code conditionally CALLF itself and it cannot be statically analyzed. This feels like a runtime check, not a code validation check. Same with the maximum data stack portion, while it can be guaranteed within a single code section, recursion ruins things. Correct. Both are runtime checks Unified spec has it under code validation. I don't maintain the unified spec 🧌 <@543900561460822016> <@425279588009246720> right, return stack needs to be runtime check, but you should be able to check if any single function overflows 1024 during validation? (still need to check `1024 <= len(stack) + types[section].MaxStackHeight` though for CALLFs (fixed return_stack runtime check, the data_stack check is already there)) Right, so stack check could fail at validation (single run of 1025 PUSH0s, or 1023 PUSH0s followed by a CALLF into max-height 5) and it could fail at runtime (PUSH0 CALLF self) how can we validate CALLF self? we won't know wether or not to reject on stack height until stack analysis is done. Do we have to do stack validation first? NVM, we use the type section and believe it. Must type registered max stack height match stack validation's conclusions? It's a problem if validation goes over the type declared limit. Am I missing where that is in 5450? yes, the registered max stack height need to match the validations conclusion - 5450 hasn't been updated for this yet",
+  "excerpts": [
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@425274498732916736> A couple of corrections to the `CALLF` spec in EIP-4750: a) it should use `data_stack.height` instead of `caller_stack_height` (`return_stack` may be empty before item 7) and b) item 1 just before `JUMPF` should be item 8 actually",
+      "createdAt": "2022-12-12T12:00:36.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "More accurately, item 2 should be \"If data stack has less than  `type[code_section_index].inputs` items, execution results in exceptional halt.\"",
+      "createdAt": "2022-12-12T12:19:16.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And the formula in item 3 should use `data_stack.height` instead of `caller_stack_height`",
+      "createdAt": "2022-12-12T12:21:01.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@583892532644151312> I'm a little confused by this - your change would allow the child frame to access data stack items from the parent frame, which is not desirable and verified to not happen at deploy time via 5450. \n\n> return_stack may be empty before item 7\n\nthis is incorrect, see 2) in \"Execution\"\n\n> Return stack is initialized to contain one item: (code_section_index = 0, offset = 0, stack_height = 0)",
+      "createdAt": "2022-12-12T13:16:08.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Ah, OK, perhaps it's a misunderstanding on my part. Let me think about it.",
+      "createdAt": "2022-12-12T13:21:30.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "The last item of the `CALLF` spec should be 8 though, not 1.",
+      "createdAt": "2022-12-12T13:22:06.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "i think this is a rendering issue with the EIPs website",
+      "createdAt": "2022-12-12T13:23:24.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "A question. Why doesn't `JUMPF` have the 1024 checks of `CALLF`?",
+      "createdAt": "2022-12-12T14:07:59.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Also, is `JUMPF` mostly for tail-call optimization?",
+      "createdAt": "2022-12-12T14:10:14.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "so in section 4 of code validation:\n\n> Code section is invalid in case an immediate argument of any JUMPF is such that type[callee_section_index].outputs != type[caller_section_index].outputs, i.e. it is allowed to only jump to functions with the same output type.\n\nthis means that JUMPF simply piggybacks off of the CALLF check",
+      "createdAt": "2022-12-12T14:22:38.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm confused about the gas cost of `RJUMP` & `RJUMPI`/`RJUMPV`.  Currently `JUMP` costs 8 gas and `JUMPI` costs 10 gas. It contradicts the following statement from EIP-4200: \"RJUMP should cost 2, and RJUMPI and RJUMPV should cost 4. This is a reduction of 2 gas, compared to JUMP and JUMPI.\"",
+      "createdAt": "2022-12-12T15:50:15.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cc <@425274498732916736> <@425279588009246720>",
+      "createdAt": "2022-12-12T16:05:30.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "looks like a typo",
+      "createdAt": "2022-12-12T16:13:10.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "A typo. We have higher gas costs some time ago, originally -2 from `JUMP` and `JUMPI`.",
+      "createdAt": "2022-12-12T16:35:37.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@583892532644151312> Are you implementing anything?",
+      "createdAt": "2022-12-12T16:35:52.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm reviewing a PR to erigon by an external contributor.",
+      "createdAt": "2022-12-12T17:23:36.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "So what's the cost of `RJUMP`? As far as I see it, -2 discount to `JUMP` makes sense (i.e. `JUMP` costing 8 and `RJUMP` costing 6). But `JUMP` costing 8 and `RJUMP` costing 2 looks unjustified to me.",
+      "createdAt": "2022-12-12T17:26:14.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "It is justified: it loads 2-byte value from the code and changes PC accordingly (without any additional checks). This is cheaper than PUSH2 which needs additional stack overflow check.",
+      "createdAt": "2022-12-12T17:41:03.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "And all PUSH instructions should cost 2 anyway. They are no different than `CHAINID`.",
+      "createdAt": "2022-12-12T17:42:06.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "But it also moves PC by a maximum of 32767, which can lead to cache misses when looking up the new code.",
+      "createdAt": "2022-12-12T17:43:34.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "True, but how do you want to assign the cost for this?",
+      "createdAt": "2022-12-12T17:47:47.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "To my mind we already have a proxy for that: the cost of `JUMP`",
+      "createdAt": "2022-12-12T17:48:26.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yperbasis",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "`JUMP` and `RJUMP` should be priced consistently",
+      "createdAt": "2022-12-12T17:48:50.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "\"return stack height must not exceed 1024\" - how can this enforced at code validation time?  Have code conditionally CALLF itself and it cannot be statically analyzed.  This feels like a runtime check, not a code validation check. Same with the maximum data stack portion, while it can be guaranteed within a single code section, recursion ruins things.",
+      "createdAt": "2022-12-12T17:54:59.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Correct. Both are runtime checks",
+      "createdAt": "2022-12-12T17:56:01.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Unified spec has it under code validation.",
+      "createdAt": "2022-12-12T17:56:23.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I don't maintain the unified spec 🧌  <@543900561460822016> <@425279588009246720>",
+      "createdAt": "2022-12-12T17:57:17.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "right, return stack needs to be runtime check, but you should be able to check if any single function overflows 1024 during validation? (still need to check `1024 <= len(stack) + types[section].MaxStackHeight` though for CALLFs",
+      "createdAt": "2022-12-12T18:02:22.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(fixed return_stack runtime check, the data_stack check is already there))",
+      "createdAt": "2022-12-12T18:04:36.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Right, so stack check could fail at validation (single run of 1025 PUSH0s, or 1023 PUSH0s followed by a CALLF into max-height 5) and it could fail at runtime (PUSH0 CALLF self)",
+      "createdAt": "2022-12-12T18:21:36.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "how can we validate CALLF self?  we won't know wether or not to reject on stack height until stack analysis is done.  Do we have to do stack validation first?",
+      "createdAt": "2022-12-12T18:22:29.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "NVM, we use the type section and believe it.",
+      "createdAt": "2022-12-12T18:22:55.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_shemnon",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Must type registered max stack height match stack validation's conclusions?  It's a problem if validation goes over the type declared limit.  Am I missing where that is in 5450?",
+      "createdAt": "2022-12-12T18:25:56.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, the registered max stack height need to match the validations conclusion - 5450 hasn't been updated for this yet",
+      "createdAt": "2022-12-12T18:27:58.544000+00:00",
+      "attachments": []
+    }
+  ]
+}

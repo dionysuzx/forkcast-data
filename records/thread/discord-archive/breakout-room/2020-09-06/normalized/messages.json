@@ -1,0 +1,778 @@
+{
+  "schemaVersion": 1,
+  "channel": "breakout-room",
+  "date": "2020-09-06",
+  "messageCount": 96,
+  "sourceHash": "032aa638c612aba263b372c2cf7da75fb533810eb59b2e80315a98c12bf4cf1a",
+  "searchText": "Thought about it some more <@!425279588009246720>, and I actually think that what we want is `0 || v || r || s || rlp(nonce, gasPrice, gasLimit, to, value, data)`, which is equivalent to `ssz(0, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data))` Correct me if I'm wrong, but I believe currently in Ethereum, in order to verify the signature you actually have to unpack the RLP encoded transaction, remove the signature, and then re-pack into RLP without the signature. <@301186049323958275> yes you're right By extracting the signature out of the RLP encoded part, we can make it so you can verify the signature without having to decode and then encode. If we are going to do that anyway, SSZ seems like a good choice because it can either be treated as SSZ *or* it can be treated as just 4 fixed size values concatenated followed by a dynamic sized value (which can be extracted without any specialized decoder if desired). e.g., `v = transaction_bytes.slice(1, 33)` Hmm, actually not quite. SSZ dynamic length values have a prefix in the fixed part though. Are you defining it as a SSZ container with 5 fields? (0, v, r, s, rlp)? Yeah, the idea would be SSZ container with 5 fields. And I believe you are correct, the 5th field would be an offset (though always the same in this case). Indeed How large is the pointer? Just 4 bytes It's more interesting when you've many dynamic fields ``` ssz(0, v, r, s, rlp(...)) == 0 || v || r || s || pointer || rlp(...) ``` seem about right? Yes Where `v`, `r`, `s` are each 32 bytes, `0` is 1 byte, and `pointer` is 4 bytes. So it would be trivial to decode without an actual SSZ decoder (which is nice), or if you have an SSZ decoder that will work too. The SSZ data pointer is offset from beginning, or offset from the pointer? Would it just be a 4-byte `0` in this case? Offsets include the length of the fixed size part, incl pointer. So `101` (1 + 32 + 32 + 32 + 4)? The need for a pointer when there's only a single dynamic field is one of the few things that SSZ does \"inefficiently\", but is there for consistency Yes, 101, as little endian uint32 Bleh, little endian. My nemesis. `0x65000000`? Looks correct If you end up adding a field, it would have it's fixed size contents encoded in place, a pointer if it's dynamic length So the old pointer to the rlp may then skip over those new contents SSZ is not meant for forwards compatibility like this, and rather uses versioning outside of the encoded data. But I guess it's something to consider here Doesn't matter here, we won't be messing with legacy transaction format in the future. We merely need to wrap legacy transactions in the new 2718 format is all, and I'm trying to do it in a way that maybe helps clean up the whole \"decode => encode => verify\" shenanigans along the way. Bleh, though EIP-155 is going to cause complications. Since there are actually 2 valid legacy transaction formats, and they are currently encoded in a way to make them look the same. I guess we can create two initial transaction formats: ``` ssz(0, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data)) ssz(1, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0)) ``` Will baloon the spec a bit because I'll have to specify what `v` is (`yParity + chainId * 2 + 35` for one and `yParity + 27` for the other. 🤔 though, we could just drop `v` and have `yParity` instead. Would save some space (technically `v` right now is 4-bytes I believe). And would make the signature verification algorithm a bit simpler. Alternatively `ssz(v, r, s, x || legacy_rlp)`, and versioning outside of the encoding (not sure about context here, but works for us in eth2 req/resp protocol) Versioning is *technically* outside of the encoding. `TransactionType || Payload` It just so happens that with SSZ you can move that *into* the SSZ container if you want. You seem to have a better overview of all the context and legacy here, whatever works best. Lmk if you've other questions about SSZ I think I understand SSZ *enough* for the moment. Thanks! I still haven't had the time to read through stuff (trying to have a weekend lol), but if we want to utilise the benefits of a fixed-size encoding (including SSZ), then we should agree on https://eips.ethereum.org/EIPS/eip-2681 <@!211091239112671234>'s recommendation can be seen on the discussion URL > trying to have a weekend lol Man, that sounds nice... weekends are when I get caught up from falling behind during the week. 😛 I've done way too many non-weekends in the past X years and it is just not healthy long term I agree that 2681 should be pushed to final. I don't think it matters for 2718 though because we don't want to re-encode the signed portion, only the signature + signed data container. So nonce (for 2718) will still live *inside* the rlp encoded bit. If you want to have a fixed-size encoding of nonce, currently it has to be 32 bytes long... Agreed. However, we won't be getting fixed size encoded nonces with 2718 (because of backward compatibility). Traditionally, if you have a `parity` variable, does 0 mean even and 1 mean odd? You can look at the definition for serial communication, perhaps that is what you could call \"traditional\" And IIRC serial communication had both 🙂 I think that is a bit different from mathematic parity. We need the \"parity of the y value\" in order to recover the address from a signature and signed data. > 🤔 though, we could just drop `v` and have `yParity` instead. Would save some space (technically `v` right now is 4-bytes I believe). Even if you drop `v` in the style of EIP-2098, you still need to introduce a field for `chanid`. So it is making one thing clear at the expense of making another one less clear. My tentative plan is: ``` `0x00 || yParity || r || s || 0x65000000 || rlp(nonce, gasPrice, gasLimit, to, value, data) `0x01 || yParity || r || s || 0x65000000 || rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0) ``` That is SSZ compatible, but also easily decoded without any SSZ library. It also gets rid of the awkwardness of extracting the chainId from `v` that legacy transactions had, and it gets rid of the silly `+27` thing (which I never understood and suspect someone will explain to me why it is absolutely critical at some point). The +27 came from the encoding in Bitcoin which I think had it due to the some ASN.1 encoding rule in some IETF spec. This would also mean that you no longer have to `verify_signature(rlp_encode(strip_signature(rlp_decode(transaction))), extracte_signature)`, which is annoying. So you are not \"dropping\" `v`, just renaming it. Renaming it and simplifying it. I don't want to call it `v` because there is *sooo* much baggage with `v` in Ethereum. btw the sign RPC method used it without the +27 for a long while Yeah, that is the kind of baggage I'm referring to. 🙂 What is the `0x6500....` thing ? Just makes the whole thing SSZ compatible, should one wish to use an SSZ encoder/decoder. If you just want to do positional extractions or concatenation you can, if you happen to have an SSZ encoder/decoder you could use that too. Is this just the re-encoding of the current signed RLP? I'm not married to that solution, just seemed like it would be nice to make it SSZ compatible at the cost of 4 bytes. Or which format is this? 🙂 Yeah, so we would take a legacy raw transaction (either from a third party signer or during pending pool upgrade at fork block) of the form `rlp(nonce, gasPrice, gasLimit, to, value, data, v, r, s)` and convert it into either type 0 transaction or type 1 transaction depending on the value of `v`. We would then have either a type 0 or type 1 eip-2718 transaction that gets gossiped over devp2p or included in a block. The type 0/1 transactions are simpler to validate and process than legacy transactions because we get rid of all of that baggage/complexity from eip-155, and we get rid of the need to decode/encode in order to validate the signature when processing a block or processing a devp2p message. My belief is that overall, client complexity will decrease slightly with this change as clients can move all of the EIP-155 and decode/encode complexity out to the edges (e.g., JSON-RPC layer). I don't remember, is the tx RLP serialised prior to signing with r/v/s set to 0 or those fields are skipped? I think overall the transaction size on the wire and on-disk (assuming it is stored on disk in wire encoded form) may decrease slightly as well, but I haven't actually run the numbers (it also may be slightly larger). Signing today goes like: ```js to_be_signed = rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0) // or: to_be_signed = rlp(nonce, gasPrice, gasLimit, to, value, data) yParity, r, s = secp256k1(to_be_signed) v = yParity + chainId * 2 + 32 // or: v = yParity + 27 raw_transaction = rlp(nonce, gasPrice, gasLimit, to, value, data, v, r, s) ``` I think the fields are included as 0, so your \"type = 0\" above should have `rlp(..., 0, 0, 0)` If the goal is to accommodate extremely old hardware wallets, which I think we have to to avoid loss of funds. Only for EIP-155. Pre-155 transactions are still valid (only 6 fields). Pre-155 transactions have 6 fields in the signed data, post-155 transactions have 9 fields in the signed data. In order to tell which type a transaction is, you have to extract `v` and then look to see if it is 27 or 28 (if so then it is a pre-155 transaction). Once you have that information you then need to rebuild the signed data from the extracted raw transaction and then validate the signature against it. The whole thing is quite the PITA for both validators and signers IMO. I know, dealt with this myself, but luckily excluded myself from this part for at least 2 years now. Oh man, you get weekends *and* you haven't had to deal with ETH1 signing/validation for 2 years?! I envy your life so much.... Apparently my weekends are screwed 😬 Well, you still have the second part at least... until today. I guess I have destroyed your life today huh. My bad. I can tell you that working on instruction sets comes with their own problems 🙂 Back to the original question, if I call the value `yParity`, will people naturally think that means \"y is even\" when the value is `0` and \"y is odd\" when the value is `1`? And if so, is it natural enough that I can skip defining that explicitly, or is it uncertain enough that I should probably define `yParity` in the spec? In any case defining it has no downsides. Adding Nethermind - <@!489256758989029405> EIP-2718: Break out-room discussion is scheduled on Monday, Sep 07 at 1400 UTC. Agenda: https://github.com/ethereum/pm/issues/204 Zoom details will be shared in this channel.",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Thought about it some more <@!425279588009246720>, and I actually think that what we want is `0 || v || r || s || rlp(nonce, gasPrice, gasLimit, to, value, data)`, which is equivalent to `ssz(0, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data))`",
+      "createdAt": "2020-09-06T11:25:37.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Correct me if I'm wrong, but I believe currently in Ethereum, in order to verify the signature you actually have to unpack the RLP encoded transaction, remove the signature, and then re-pack into RLP without the signature.",
+      "createdAt": "2020-09-06T11:26:25.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "_andlan",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<@301186049323958275> yes you're right",
+      "createdAt": "2020-09-06T11:27:11.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "By extracting the signature out of the RLP encoded part, we can make it so you can verify the signature without having to decode and then encode.  If we are going to do that anyway, SSZ seems like a good choice because it can either be treated as SSZ *or* it can be treated as just 4 fixed size values concatenated followed by a dynamic sized value (which can be extracted without any specialized decoder if desired).",
+      "createdAt": "2020-09-06T11:27:53.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "e.g., `v = transaction_bytes.slice(1, 33)`",
+      "createdAt": "2020-09-06T11:28:27.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Hmm, actually not quite.",
+      "createdAt": "2020-09-06T11:29:18.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "SSZ dynamic length values have a prefix in the fixed part though. Are you defining it as a SSZ container with 5 fields? (0, v, r, s, rlp)?",
+      "createdAt": "2020-09-06T11:29:38.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Yeah, the idea would be SSZ container with 5 fields.",
+      "createdAt": "2020-09-06T11:29:55.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "And I believe you are correct, the 5th field would be an offset (though always the same in this case).",
+      "createdAt": "2020-09-06T11:30:11.582000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Indeed",
+      "createdAt": "2020-09-06T11:30:22.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "How large is the pointer?",
+      "createdAt": "2020-09-06T11:30:45.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Just 4 bytes",
+      "createdAt": "2020-09-06T11:30:54.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "It's more interesting when you've many dynamic fields",
+      "createdAt": "2020-09-06T11:31:14.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "```\nssz(0, v, r, s, rlp(...)) == 0 || v || r || s || pointer || rlp(...)\n``` seem about right?",
+      "createdAt": "2020-09-06T11:31:17.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2020-09-06T11:31:26.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Where `v`, `r`, `s` are each 32 bytes, `0` is 1 byte, and `pointer` is 4 bytes.",
+      "createdAt": "2020-09-06T11:31:37.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "So it would be trivial to decode without an actual SSZ decoder (which is nice), or if you have an SSZ decoder that will work too.",
+      "createdAt": "2020-09-06T11:31:54.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "The SSZ data pointer is offset from beginning, or offset from the pointer?",
+      "createdAt": "2020-09-06T11:32:56.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Would it just be a 4-byte `0` in this case?",
+      "createdAt": "2020-09-06T11:33:06.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Offsets include the length of the fixed size part, incl pointer.",
+      "createdAt": "2020-09-06T11:33:48.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "So `101` (1 + 32 + 32 + 32 + 4)?",
+      "createdAt": "2020-09-06T11:34:34.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "The need for a pointer when there's only a single dynamic field is one of the few things that SSZ does  \"inefficiently\", but is there for consistency",
+      "createdAt": "2020-09-06T11:35:15.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Yes, 101, as little endian uint32",
+      "createdAt": "2020-09-06T11:35:49.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Bleh, little endian.  My nemesis.",
+      "createdAt": "2020-09-06T11:36:05.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "`0x65000000`?",
+      "createdAt": "2020-09-06T11:36:35.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Looks correct",
+      "createdAt": "2020-09-06T11:37:03.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "If you end up adding a field, it would have it's fixed size contents encoded in place, a pointer if it's dynamic length",
+      "createdAt": "2020-09-06T11:38:37.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "So the old pointer to the rlp may then skip over those new contents",
+      "createdAt": "2020-09-06T11:39:03.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "SSZ is not meant for forwards compatibility like this, and rather uses versioning outside of the encoded data. But I guess it's something to consider here",
+      "createdAt": "2020-09-06T11:40:05.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Doesn't matter here, we won't be messing with legacy transaction format in the future.",
+      "createdAt": "2020-09-06T11:40:26.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "We merely need to wrap legacy transactions in the new 2718 format is all, and I'm trying to do it in a way that maybe helps clean up the whole \"decode => encode => verify\" shenanigans along the way.",
+      "createdAt": "2020-09-06T11:41:02.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Bleh, though EIP-155 is going to cause complications.",
+      "createdAt": "2020-09-06T11:41:24.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Since there are actually 2 valid legacy transaction formats, and they are currently encoded in a way to make them look the same.",
+      "createdAt": "2020-09-06T11:41:42.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I guess we can create two initial transaction formats:\n```\nssz(0, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data))\nssz(1, v, r, s, rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0))\n```",
+      "createdAt": "2020-09-06T11:43:31.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Will baloon the spec a bit because I'll have to specify what `v` is (`yParity + chainId * 2 + 35` for one and `yParity + 27` for the other.",
+      "createdAt": "2020-09-06T11:44:31.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "🤔  though, we could just drop `v` and have `yParity` instead.  Would save some space (technically `v` right now is 4-bytes I believe).",
+      "createdAt": "2020-09-06T11:46:03.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "And would make the signature verification algorithm a bit simpler.",
+      "createdAt": "2020-09-06T11:46:14.614000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Alternatively `ssz(v, r, s, x || legacy_rlp)`, and versioning outside of the encoding (not sure about context here, but works for us in eth2 req/resp protocol)",
+      "createdAt": "2020-09-06T11:46:55.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Versioning is *technically* outside of the encoding.",
+      "createdAt": "2020-09-06T11:47:12.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "`TransactionType || Payload`",
+      "createdAt": "2020-09-06T11:47:20.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "It just so happens that with SSZ you can move that *into* the SSZ container if you want.",
+      "createdAt": "2020-09-06T11:47:32.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "You seem to have a better overview of all the context and legacy here, whatever works best. Lmk if you've other questions about SSZ",
+      "createdAt": "2020-09-06T11:49:54.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I think I understand SSZ *enough* for the moment.  Thanks!",
+      "createdAt": "2020-09-06T11:52:10.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I still haven't had the time to read through stuff (trying to have a weekend lol), but if we want to utilise the benefits of a fixed-size encoding (including SSZ), then we should agree on https://eips.ethereum.org/EIPS/eip-2681",
+      "createdAt": "2020-09-06T11:54:05.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "<@!211091239112671234>'s recommendation can be seen on the discussion URL",
+      "createdAt": "2020-09-06T11:54:38.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "> trying to have a weekend lol\nMan, that sounds nice... weekends are when I get caught up from falling behind during the week.  😛",
+      "createdAt": "2020-09-06T11:54:49.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I've done way too many non-weekends in the past X years and it is just not healthy long term",
+      "createdAt": "2020-09-06T11:55:16.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I agree that 2681 should be pushed to final.  I don't think it matters for 2718 though because we don't want to re-encode the signed portion, only the signature + signed data container.",
+      "createdAt": "2020-09-06T11:55:55.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "So nonce (for 2718) will still live *inside* the rlp encoded bit.",
+      "createdAt": "2020-09-06T11:56:17.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "If you want to have a fixed-size encoding of nonce, currently it has to be 32 bytes long...",
+      "createdAt": "2020-09-06T11:56:23.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Agreed.  However, we won't be getting fixed size encoded nonces with 2718 (because of backward compatibility).",
+      "createdAt": "2020-09-06T11:56:45.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Traditionally, if you have a `parity` variable, does 0 mean even and 1 mean odd?",
+      "createdAt": "2020-09-06T11:57:23.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "You can look at the definition for serial communication, perhaps that is what you could call \"traditional\"",
+      "createdAt": "2020-09-06T11:58:02.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "And IIRC serial communication had both 🙂",
+      "createdAt": "2020-09-06T11:58:26.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I think that is a bit different from mathematic parity.",
+      "createdAt": "2020-09-06T11:59:09.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "We need the \"parity of the y value\" in order to recover the address from a signature and signed data.",
+      "createdAt": "2020-09-06T12:01:03.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "> 🤔  though, we could just drop `v` and have `yParity` instead.  Would save some space (technically `v` right now is 4-bytes I believe).\n\nEven if you drop `v` in the style of EIP-2098, you still need to introduce a field for `chanid`. So it is making one thing clear at the expense of making another one less clear.",
+      "createdAt": "2020-09-06T12:01:08.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "My tentative plan is:\n```\n`0x00 || yParity || r || s || 0x65000000 || rlp(nonce, gasPrice, gasLimit, to, value, data)\n`0x01 || yParity || r || s || 0x65000000 || rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0)\n```",
+      "createdAt": "2020-09-06T12:02:05.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "That is SSZ compatible, but also easily decoded without any SSZ library.  It also gets rid of the awkwardness of extracting the chainId from `v` that legacy transactions had, and it gets rid of the silly `+27` thing (which I never understood and suspect someone will explain to me why it is absolutely critical at some point).",
+      "createdAt": "2020-09-06T12:03:18.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "The +27 came from the encoding in Bitcoin which I think had it due to the some ASN.1 encoding rule in some IETF spec.",
+      "createdAt": "2020-09-06T12:03:46.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "This would also mean that you no longer have to `verify_signature(rlp_encode(strip_signature(rlp_decode(transaction))), extracte_signature)`, which is annoying.",
+      "createdAt": "2020-09-06T12:03:51.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "So you are not \"dropping\" `v`, just renaming it.",
+      "createdAt": "2020-09-06T12:05:00.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Renaming it and simplifying it.  I don't want to call it `v` because there is *sooo* much baggage with `v` in Ethereum.",
+      "createdAt": "2020-09-06T12:05:18.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "btw the sign RPC method used it without the +27 for a long while",
+      "createdAt": "2020-09-06T12:05:18.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Yeah, that is the kind of baggage I'm referring to.  🙂",
+      "createdAt": "2020-09-06T12:05:34.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "What is the `0x6500....` thing ?",
+      "createdAt": "2020-09-06T12:05:56.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Just makes the whole thing SSZ compatible, should one wish to use an SSZ encoder/decoder.",
+      "createdAt": "2020-09-06T12:06:11.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "If you just want to do positional extractions or concatenation you can, if you happen to have an SSZ encoder/decoder you could use that too.",
+      "createdAt": "2020-09-06T12:06:45.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Is this just the re-encoding of the current signed RLP?",
+      "createdAt": "2020-09-06T12:07:16.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I'm not married to that solution, just seemed like it would be nice to make it SSZ compatible at the cost of 4 bytes.",
+      "createdAt": "2020-09-06T12:07:20.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Or which format is this? 🙂",
+      "createdAt": "2020-09-06T12:07:41.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Yeah, so we would take a legacy raw transaction (either from a third party signer or during pending pool upgrade at fork block) of the form `rlp(nonce, gasPrice, gasLimit, to, value, data, v, r, s)` and convert it into either type 0 transaction or type 1 transaction depending on the value of `v`.  We would then have either a type 0 or type 1 eip-2718 transaction that gets gossiped over devp2p or included in a block.",
+      "createdAt": "2020-09-06T12:09:17.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "The type 0/1 transactions are simpler to validate and process than legacy transactions because we get rid of all of that baggage/complexity from eip-155, and we get rid of the need to decode/encode in order to validate the signature when processing a block or processing a devp2p message.",
+      "createdAt": "2020-09-06T12:09:39.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "My belief is that overall, client complexity will decrease slightly with this change as clients can move all of the EIP-155 and decode/encode complexity out to the edges (e.g., JSON-RPC layer).",
+      "createdAt": "2020-09-06T12:10:53.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I don't remember, is the tx RLP serialised prior to signing with r/v/s set to 0 or those fields are skipped?",
+      "createdAt": "2020-09-06T12:12:43.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I think overall the transaction size on the wire and on-disk (assuming it is stored on disk in wire encoded form) may decrease slightly as well, but I haven't actually run the numbers (it also may be slightly larger).",
+      "createdAt": "2020-09-06T12:12:44.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Signing today goes like:\n```js\nto_be_signed = rlp(nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0)\n// or: to_be_signed = rlp(nonce, gasPrice, gasLimit, to, value, data)\nyParity, r, s = secp256k1(to_be_signed)\nv = yParity + chainId * 2 + 32\n// or: v = yParity + 27\nraw_transaction = rlp(nonce, gasPrice, gasLimit, to, value, data, v, r, s)\n```",
+      "createdAt": "2020-09-06T12:14:46.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I think the fields are included as 0, so your \"type = 0\" above should have `rlp(..., 0, 0, 0)`",
+      "createdAt": "2020-09-06T12:15:57.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "If the goal is to accommodate extremely old hardware wallets, which I think we have to to avoid loss of funds.",
+      "createdAt": "2020-09-06T12:16:23.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Only for EIP-155.  Pre-155 transactions are still valid (only 6 fields).",
+      "createdAt": "2020-09-06T12:16:31.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Pre-155 transactions have 6 fields in the signed data, post-155 transactions have 9 fields in the signed data.",
+      "createdAt": "2020-09-06T12:17:19.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "In order to tell which type a transaction is, you have to extract `v` and then look to see if it is 27 or 28 (if so then it is a pre-155 transaction).  Once you have that information you then need to rebuild the signed data from the extracted raw transaction and then validate the signature against it.",
+      "createdAt": "2020-09-06T12:18:57.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "The whole thing is quite the PITA for both validators and signers IMO.",
+      "createdAt": "2020-09-06T12:19:08.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I know, dealt with this myself, but luckily excluded myself from this part for at least 2 years now.",
+      "createdAt": "2020-09-06T12:19:38.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Oh man, you get weekends *and* you haven't had to deal with ETH1 signing/validation for 2 years?!  I envy your life so much....",
+      "createdAt": "2020-09-06T12:20:11.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Apparently my weekends are screwed 😬",
+      "createdAt": "2020-09-06T12:20:31.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Well, you still have the second part at least... until today.",
+      "createdAt": "2020-09-06T12:20:46.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I guess I have destroyed your life today huh.  My bad.",
+      "createdAt": "2020-09-06T12:20:53.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "I can tell you that working on instruction sets comes with their own problems 🙂",
+      "createdAt": "2020-09-06T12:21:18.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Back to the original question, if I call the value `yParity`, will people naturally think that means \"y is even\" when the value is `0` and \"y is odd\" when the value is `1`?",
+      "createdAt": "2020-09-06T12:22:09.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "And if so, is it natural enough that I can skip defining that explicitly, or is it uncertain enough that I should probably define `yParity` in the spec?",
+      "createdAt": "2020-09-06T12:22:36.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "In any case defining it has no downsides.",
+      "createdAt": "2020-09-06T12:38:13.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "poojaranjan",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Adding Nethermind - <@!489256758989029405>",
+      "createdAt": "2020-09-06T14:14:32.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "poojaranjan",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "EIP-2718: Break out-room discussion is scheduled on Monday, Sep 07 at 1400 UTC.",
+      "createdAt": "2020-09-06T14:15:07.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "poojaranjan",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Agenda: https://github.com/ethereum/pm/issues/204",
+      "createdAt": "2020-09-06T14:15:14.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "poojaranjan",
+      "category": "Execution Layer",
+      "parent": "",
+      "content": "Zoom details will be shared in this channel.",
+      "createdAt": "2020-09-06T14:15:25.474000+00:00",
+      "attachments": []
+    }
+  ]
+}

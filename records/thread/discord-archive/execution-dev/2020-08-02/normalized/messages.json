@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "execution-dev",
+  "date": "2020-08-02",
+  "messageCount": 242,
+  "sourceHash": "ee7bd22cb3fedecdcffa4ad27c297a5be21648253907002b7c90d2fec49d4a00",
+  "searchText": "Repasting this here https://twitter.com/VitalikButerin/status/1289817511945355267 Also Rick is claiming a largely-finished solution https://twitter.com/AFDudley0/status/1289820627713499137 ; anyone know more about this? <@!332923501079953409> may know more about it. 😉 Good point 😛 Hi. Yeah, I'm happy to chat about it here. <@!376568077950910466> is the implementer at this point. So I guess my main questions are: (i) what functionality does it provide, and (ii) what p2p networking is it using? it's a fairly abstract framework, so right now, we take all ethereum data, Blocks, Transactions, Events, Receipts, StateDiffs, (and to some extent pending transactions) and store them in postgres as RLP/IPLD objects. From postgres we build whatever tables we need for a given application, Mustekala, uniswap, whatever. This is a client-side piece of software that talks to an ethereum full node? we then serve those IPLD objects over GraphQL, websockets, or JSON-RPC. It's a side-car process written in Go at the moment and it talks to our statediffing fork of go-ethereum. it also exposes the JSON-RPC, so we can build an overlay network. Ah okay, so this isn't doing much in the direction of making these responses trustless, it's doing the work of aggregating the info in the first place it is trustless, we use block witnesses and LES to allow clients to verify responses. Ah, I see the problem with that is the block witnesses are impractically large, which is where L2 PoS would come in. wait, what do you mean by block witnesses? we generate a materialized state object every some number of blocks. i think it's around 2000... we can then apply staate diffs to that instead of needing to go back to genesis. wait I'm confused So going into a specific example, say I care about logs A witness to prove a single receipt was actually included in a single block is going to be ~1 kB I would estimate ~2 layers of hexary patricia-tree what does that witness reference? you mean what is it rooted in? yes. the leaf is the receipt, the root would be the historical block hash? how would a user verify that hash? don't they need intermediate nodes? hmm, I guess ideally we would have already had EIP 96 or any of these history merkling EIPs included 3 years ago (right now we worry about contract state almost exclusively, I've forgotten exactly how we do logs, but I think it's very similar bad news.) but while we don't have that One option is to require clients to have historical headers; it's only a couple of gigabytes Yes. that's part of it. but if we want to verify arbitrary contract slots, we need more than that. wait, isn't contract slots basically the same problem The prover can make a merkle proof rooted in the historical block Like for receipts And then you need to have one common mechanism for proving historical blocks Yes, but they need the intermediate nodes You mean the prover needs the intermediate nodes that make up the merkle branch? Don't they already have that if they are an archive node? > Don't they already have that if they are an archive node? <@!273808422753796097> It's not guaranteed, that's 90% of what we are solving. wait why not? Archive nodes have all historical state tree nodes, so they should be able to make a merkle proof for any historical state entry if your archive node is down for 4 hours it has a gap that will never be filled with the existing geth software. modern geth prunes agressively. huh? why is that? Aaah I see I guess I mean non-pruning archive but ok with the addition of freezer there really isn't such a thing. I mean, we're having to write our own. I see how you need much more space to store historical state than historical txs/logs So why not concentrate on historical txs and logs? We did that already, no one cared. I mean, the code is there, it's done. hmm, I think that's because the other work needed to make this truly useful hasn't been done yet That's part of it, yes. another part of it is simply what people want to pay for. As in what people want to pay vulcanize to develop? Yes. removing the cost of events was more important to Maker than the \"half measure\" you're talking about. but then management changed and things went down hill. It's pretty difficult to explain to people the trade off between supporting just events, like TheGraph does vs supporting contract slots. Overall, supporting statediffs/contract slots is the better solution, it's more scalable and more gas efficient, but far less obvious. So *my* goal is that I want eth1 clients to be able to mostly stop storing history older than eg. 4 months. Many dapps require access to historical txs and logs, so we need to provide that functionality through a trustless layer-2 network. And do so with much higher efficiency than today Yes, the roadmap of vDB has this on it. There is no reason for light clients to be redoing the work of personally scanning through millions of bloom filters I completely agree. Oh, IPLD wrote one of the things we were going to write, which will save us a bunch of trouble. https://github.com/ipld/specs/blob/master/block-layer/content-addressable-archives.md we can use this to basically repack the data a dapp needs so that we can write proofs just for that set of contracts, while still proving it came from the ethereum mainnet. The plan is to line up our state snapshots with the canonical hash tries, which should make syncing a lot easier, I think Alexey and Peter have both suggested different but similar things in that regard and would create a new type of client that I think does what you're asking for, <@!273808422753796097> is there a public spec for the canonical hash trees anywhere? > Many dapps require access to historical txs and logs, so we need to provide that functionality through a trustless layer-2 network <@!273808422753796097> I think we should just cut these people off (give them some warning, but cut them off none the less). Logs being ephemeral has been a thing since day 1, it just so happens that current clients don't bother pruning them. If they need low-cost storage so badly, they'll figure it out. 🙂 And this is coming from someone who has invested a lot of time and effort into Augur, which totally exploits the low-cost storage provided by events. and I think the \"figuring it out\" is an ecosystem-wide public good that we should just get together and resolve Another reason I care about this is that in eth2 these kinds of layer 2 access mechanisms are going to become mandatory So might as well use eth1 history as training wheels From a \"business\" standpoint, I think collectively dapps have access to more capital than Core Developers do, and Core Developers have *plenty* of stuff to work on. By cutting off dapps, they'll be forced to use that capital to solve their problems, and I *suspect* the best solutions will percolate up to the top. right but I worry that we'll see application-specific solutions (especially with application-specific incentive models) instead of a proper ecosystem-wide public good Would be nice to coordinate it at least. Doesn’t need to be the core devs. A core initiative with participating dapps. I agree, there is value in coordination. And to be clear I'm not suggesting that we don't brainstorm about it here or suggest ideas. I just think we *also* should be talking about cutting off dapps in parallel. If someone can coordinate a solution before the cutoff, then great, if not, we still cut them off eventually. The reason I bring this up is because I have been harping on Augur for probably a couple years now about their heavy reliance on events never being pruned for Augur to work. The problem is that they just respond with, \"meh, clients have been threatening to prune events forever and they never do it, so they probably won't ever do it\". In essence, dapp developers currently have no incentive to help out or look for solutions, which I think is part of why progress on alternatives has been historically slow. btw semi-related question: gas station network is fully decentralized now, right? I think so? Anyone can run a relayer if that is what you mean. right but I also mean relayer discovery etc I'm not sure what the distribution network is for *finding* a relayer (e.g., centralized vs gossip). it's at least precedent that layer 2 economic infrastructure is possible In that case, core devs weren't providing a solution to a problem, so dapps \"figured it out\" on their own eventually, and in a way that is somewhat ecosystem wide. Ironically, we are now talking about having a core-dev provided solution (sponsored transactions), so we are kind of punishing them a bit which is unfortunate. 😢 This is probably weird to say, but it would only work to get the dapp community together if the EF didn’t fund any of it. well, what does \"core dev\" mean? Is it a pointer to a social cluster, or is it the set of all people making ecosystem-wide public infrastructure? Are the gas station network people core devs? I would argue no. I *very vaguely* call core dev \"everything talked about in this server\". 😄 (terrible delineator, I know) I personally would be totally happen with a GSN-like effort; that's probably what I even had in mind Just asking this whole topic in this channel because this is a social cluster densely populated with informed opinions on issues like this 😛 That is fair, I suppose perhaps the issue is just that my delineator for \"core dev\" and \"dapp\" is terrible and I am bad for using it. 😄 Hmm, maybe we should create an explicit social cluster for higher-level ecosystem-wide tool development? This could include GSN people, anyone trying to develop an incentivized history access network, etc There are definitely people that are in that group that I don't believe hang out around here. I propose the name \"Chapter -7.389\" (= e^2 i^2 = ethereum ecosystem infrastructure initiative) 😆 😖 You are such a nerd. 😛 I wonder if you named it that, whether anyone would *ever* get the reference? Let’s say Geth decided to stop the logs thing. What would practically happen next? Other consequences of that decision for other ecosystem members? Circling back, to my original statement, I think my argument is generally that if core devs make a credible threat that clients will stop storing events permanently, then dapps will be forced to look for solutions from third parties which will create an incentive to build those third party tools. As <@!332923501079953409> alluded to, they built an event retrieval solution and no one cared because they get it \"for free\" from clients and client hosts (like Infura and Alchemy and CloudFlare). If those things didn't have it for free, then there would be a demand for a solution like they built. > Let’s say Geth decided to stop the logs thing. What would practically happen next? <@!187490121698770945> Assuming there was ample notice given, or just on one random hardfork all clients stop storing events? there clearly is demand for \"fully serverless dapps\" (eg. augur, uniswap and many more are) At the moment, \"serverless\" in the Ethereum ecosystem means \"you have access to an Ethereum client running somewhere\" that stores all blocks and events forever. right It would be totally cool if that paradigm could change to \"serverless means your users are connected to a gossip network where they can buy access to data on demand via micro-payment channels\". And anyone could be such a provider (make money by storing and serving stuff like logs and state). Possibly unrelated, but could you do an interactive proof with someone that provides a reasonable level of confidence (perhaps backed by a bond the provider has in escrow) that there exists a chain of blocks from hash `0xbaadf00d` to `0xcafebeef`? Meaning, that 0xbaadf00d is the nth ancestor of 0xcafebeef, potentially for large n? Yeah. well, ideally, we would have implemented https://github.com/ethereum/EIPs/pull/210 years ago But without that...... The provider would assert, \"here are",
+  "excerpts": [
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Repasting this here",
+      "createdAt": "2020-08-02T07:18:21.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "https://twitter.com/VitalikButerin/status/1289817511945355267",
+      "createdAt": "2020-08-02T07:18:22.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Also Rick is claiming a largely-finished solution https://twitter.com/AFDudley0/status/1289820627713499137 ; anyone know more about this?",
+      "createdAt": "2020-08-02T07:18:49.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!332923501079953409> may know more about it.  😉",
+      "createdAt": "2020-08-02T07:42:54.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Good point 😛",
+      "createdAt": "2020-08-02T07:46:06.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Hi.",
+      "createdAt": "2020-08-02T08:20:44.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Yeah, I'm happy to chat about it here.",
+      "createdAt": "2020-08-02T08:20:51.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "<@!376568077950910466> is the implementer at this point.",
+      "createdAt": "2020-08-02T08:21:08.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "So I guess my main questions are: (i) what functionality does it provide, and (ii) what p2p networking is it using?",
+      "createdAt": "2020-08-02T08:21:43.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "it's a fairly abstract framework, so right now, we take all ethereum data, Blocks, Transactions, Events, Receipts, StateDiffs, (and to some extent pending transactions) and store them in postgres as RLP/IPLD objects. From postgres we build whatever tables we need for a given application, Mustekala, uniswap, whatever.",
+      "createdAt": "2020-08-02T08:23:40.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "This is a client-side piece of software that talks to an ethereum full node?",
+      "createdAt": "2020-08-02T08:24:11.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "we then serve those IPLD objects over GraphQL, websockets, or JSON-RPC.",
+      "createdAt": "2020-08-02T08:24:24.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "It's a side-car process written in Go at the moment and it talks to our statediffing fork of go-ethereum.",
+      "createdAt": "2020-08-02T08:24:50.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "it also exposes the JSON-RPC, so we can build an overlay network.",
+      "createdAt": "2020-08-02T08:25:12.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Ah okay, so this isn't doing much in the direction of making these responses trustless, it's doing the work of aggregating the info in the first place",
+      "createdAt": "2020-08-02T08:25:18.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "it is trustless, we use block witnesses and LES to allow clients to verify responses.",
+      "createdAt": "2020-08-02T08:25:59.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Ah, I see",
+      "createdAt": "2020-08-02T08:26:17.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "the problem with that is the block witnesses are impractically large, which is where L2 PoS would come in.",
+      "createdAt": "2020-08-02T08:26:23.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "wait, what do you mean by block witnesses?",
+      "createdAt": "2020-08-02T08:26:34.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "we generate a materialized state object every some number of blocks.",
+      "createdAt": "2020-08-02T08:26:58.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "i think it's around 2000...",
+      "createdAt": "2020-08-02T08:27:03.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "we can then apply staate diffs to that instead of needing to go back to genesis.",
+      "createdAt": "2020-08-02T08:27:23.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "wait I'm confused",
+      "createdAt": "2020-08-02T08:27:31.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "So going into a specific example, say I care about logs",
+      "createdAt": "2020-08-02T08:27:40.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "A witness to prove a single receipt was actually included in a single block is going to be ~1 kB I would estimate",
+      "createdAt": "2020-08-02T08:27:58.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "~2 layers of hexary patricia-tree",
+      "createdAt": "2020-08-02T08:28:09.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "what does that witness reference?",
+      "createdAt": "2020-08-02T08:28:24.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "you mean what is it rooted in?",
+      "createdAt": "2020-08-02T08:28:30.766000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "yes.",
+      "createdAt": "2020-08-02T08:28:35.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "the leaf is the receipt, the root would be the historical block hash?",
+      "createdAt": "2020-08-02T08:28:46.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "how would a user verify that hash? don't they need intermediate nodes?",
+      "createdAt": "2020-08-02T08:29:03.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "hmm, I guess ideally we would have already had EIP 96 or any of these history merkling EIPs included 3 years ago",
+      "createdAt": "2020-08-02T08:29:42.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "(right now we worry about contract state almost exclusively, I've forgotten exactly how we do logs, but I think it's very similar bad news.)",
+      "createdAt": "2020-08-02T08:30:12.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "but while we don't have that",
+      "createdAt": "2020-08-02T08:30:22.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "One option is to require clients to have historical headers; it's only a couple of gigabytes",
+      "createdAt": "2020-08-02T08:31:07.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Yes. that's part of it.",
+      "createdAt": "2020-08-02T08:31:23.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "but if we want to verify arbitrary contract slots, we need more than that.",
+      "createdAt": "2020-08-02T08:31:38.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "wait, isn't contract slots basically the same problem",
+      "createdAt": "2020-08-02T08:31:50.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "The prover can make a merkle proof rooted in the historical block",
+      "createdAt": "2020-08-02T08:32:00.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Like for receipts",
+      "createdAt": "2020-08-02T08:32:04.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "And then you need to have one common mechanism for proving historical blocks",
+      "createdAt": "2020-08-02T08:32:14.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Yes, but they need the intermediate nodes",
+      "createdAt": "2020-08-02T08:32:17.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "You mean the prover needs the intermediate nodes that make up the merkle branch?",
+      "createdAt": "2020-08-02T08:32:34.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Don't they already have that if they are an archive node?",
+      "createdAt": "2020-08-02T08:32:40.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "> Don't they already have that if they are an archive node?\n<@!273808422753796097> It's not guaranteed, that's 90% of what we are solving.",
+      "createdAt": "2020-08-02T08:33:08.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "wait why not?",
+      "createdAt": "2020-08-02T08:33:14.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Archive nodes have all historical state tree nodes, so they should be able to make a merkle proof for any historical state entry",
+      "createdAt": "2020-08-02T08:33:35.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "if your archive node is down for 4 hours it has a gap that will never be filled with the existing geth software.",
+      "createdAt": "2020-08-02T08:33:38.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "modern geth prunes agressively.",
+      "createdAt": "2020-08-02T08:33:46.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "huh? why is that?",
+      "createdAt": "2020-08-02T08:33:46.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Aaah I see",
+      "createdAt": "2020-08-02T08:33:50.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "I guess I mean non-pruning archive",
+      "createdAt": "2020-08-02T08:33:55.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "but ok",
+      "createdAt": "2020-08-02T08:34:03.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "with the addition of freezer there really isn't such a thing.",
+      "createdAt": "2020-08-02T08:34:09.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "I mean, we're having to write our own.",
+      "createdAt": "2020-08-02T08:34:24.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "I see how you need much more space to store historical state than historical txs/logs",
+      "createdAt": "2020-08-02T08:34:29.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "So why not concentrate on historical txs and logs?",
+      "createdAt": "2020-08-02T08:34:35.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "We did that already, no one cared.",
+      "createdAt": "2020-08-02T08:34:44.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "I mean, the code is there, it's done.",
+      "createdAt": "2020-08-02T08:34:49.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "hmm, I think that's because the other work needed to make this truly useful hasn't been done yet",
+      "createdAt": "2020-08-02T08:35:10.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "That's part of it, yes. another part of it is simply what people want to pay for.",
+      "createdAt": "2020-08-02T08:35:30.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "As in what people want to pay vulcanize to develop?",
+      "createdAt": "2020-08-02T08:35:47.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Yes.",
+      "createdAt": "2020-08-02T08:35:52.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "removing the cost of events was more important to Maker than the \"half measure\" you're talking about.",
+      "createdAt": "2020-08-02T08:36:20.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "but then management changed and things went down hill.",
+      "createdAt": "2020-08-02T08:36:29.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "It's pretty difficult to explain to people the trade off between supporting just events, like TheGraph does vs supporting contract slots. Overall, supporting statediffs/contract slots is the better solution, it's more scalable and more gas efficient, but far less obvious.",
+      "createdAt": "2020-08-02T08:38:52.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "So *my* goal is that I want eth1 clients to be able to mostly stop storing history older than eg. 4 months. Many dapps require access to historical txs and logs, so we need to provide that functionality through a trustless layer-2 network.",
+      "createdAt": "2020-08-02T08:40:25.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "And do so with much higher efficiency than today",
+      "createdAt": "2020-08-02T08:40:32.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Yes, the roadmap of vDB has this on it.",
+      "createdAt": "2020-08-02T08:40:48.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "There is no reason for light clients to be redoing the work of personally scanning through millions of bloom filters",
+      "createdAt": "2020-08-02T08:40:49.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "I completely agree.",
+      "createdAt": "2020-08-02T08:40:59.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "Oh, IPLD wrote one of the things we were going to write, which will save us a bunch of trouble.\nhttps://github.com/ipld/specs/blob/master/block-layer/content-addressable-archives.md",
+      "createdAt": "2020-08-02T08:44:08.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "we can use this to basically repack the data a dapp needs so that we can write proofs just for that set of contracts, while still proving it came from the ethereum mainnet.",
+      "createdAt": "2020-08-02T08:45:06.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "afdudley",
+      "category": "general",
+      "parent": "",
+      "content": "The plan is to line up our state snapshots with the canonical hash tries, which should make syncing a lot easier, I think Alexey and Peter have both suggested different but similar things in that regard and would create a new type of client that I think does what you're asking for, <@!273808422753796097>",
+      "createdAt": "2020-08-02T08:49:19.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "is  there a public spec for the canonical hash trees anywhere?",
+      "createdAt": "2020-08-02T10:05:31.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "> Many dapps require access to historical txs and logs, so we need to provide that functionality through a trustless layer-2 network\n<@!273808422753796097> I think we should just cut these people off (give them some warning, but cut them off none the less).  Logs being ephemeral has been a thing since day 1, it just so happens that current clients don't bother pruning them.  If they need low-cost storage so badly, they'll figure it out.  🙂",
+      "createdAt": "2020-08-02T10:21:07.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "And this is coming from someone who has invested a lot of time and effort into Augur, which totally exploits the low-cost storage provided by events.",
+      "createdAt": "2020-08-02T10:21:31.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "and I think the \"figuring it out\" is an ecosystem-wide public good that we should just get together and resolve",
+      "createdAt": "2020-08-02T10:21:53.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Another reason I care about this is that in eth2 these kinds of layer 2 access mechanisms are going to become mandatory",
+      "createdAt": "2020-08-02T10:22:14.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "So might as well use eth1 history as training wheels",
+      "createdAt": "2020-08-02T10:22:21.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "From a \"business\" standpoint, I think collectively dapps have access to more capital than Core Developers do, and Core Developers have *plenty* of stuff to work on.  By cutting off dapps, they'll be forced to use that capital to solve their problems, and I *suspect* the best solutions will percolate up to the top.",
+      "createdAt": "2020-08-02T10:23:32.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "right but I worry that we'll see application-specific solutions (especially with application-specific incentive models) instead of a proper ecosystem-wide public good",
+      "createdAt": "2020-08-02T10:24:05.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "madeof_tin7509",
+      "category": "general",
+      "parent": "",
+      "content": "Would be nice to coordinate it at least. Doesn’t need to be the core devs.",
+      "createdAt": "2020-08-02T10:24:06.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "madeof_tin7509",
+      "category": "general",
+      "parent": "",
+      "content": "A core initiative with participating dapps.",
+      "createdAt": "2020-08-02T10:24:47.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I agree, there is value in coordination.  And to be clear I'm not suggesting that we don't brainstorm about it here or suggest ideas.  I just think we *also* should be talking about cutting off dapps in parallel.",
+      "createdAt": "2020-08-02T10:25:01.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If someone can coordinate a solution before the cutoff, then great, if not, we still cut them off eventually.",
+      "createdAt": "2020-08-02T10:25:36.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The reason I bring this up is because I have been harping on Augur for probably a couple years now about their heavy reliance on events never being pruned for Augur to work.  The problem is that they just respond with, \"meh, clients have been threatening to prune events forever and they never do it, so they probably won't ever do it\".",
+      "createdAt": "2020-08-02T10:26:45.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "In essence, dapp developers currently have no incentive to help out or look for solutions, which I think is part of why progress on alternatives has been historically slow.",
+      "createdAt": "2020-08-02T10:27:35.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "btw semi-related question: gas station network is fully decentralized now, right?",
+      "createdAt": "2020-08-02T10:27:47.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think so?",
+      "createdAt": "2020-08-02T10:27:57.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Anyone can run a relayer if that is what you mean.",
+      "createdAt": "2020-08-02T10:28:06.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-08-02T10:28:09.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "but I also mean relayer discovery etc",
+      "createdAt": "2020-08-02T10:28:17.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I'm not sure what the distribution network is for *finding* a relayer (e.g., centralized vs gossip).",
+      "createdAt": "2020-08-02T10:28:21.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "it's at least precedent that layer 2 economic infrastructure is possible",
+      "createdAt": "2020-08-02T10:28:25.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "In that case, core devs weren't providing a solution to a problem, so dapps \"figured it out\" on their own eventually, and in a way that is somewhat ecosystem wide.",
+      "createdAt": "2020-08-02T10:29:28.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Ironically, we are now talking about having a core-dev provided solution (sponsored transactions), so we are kind of punishing them a bit which is unfortunate.  😢",
+      "createdAt": "2020-08-02T10:29:50.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "madeof_tin7509",
+      "category": "general",
+      "parent": "",
+      "content": "This is probably weird to say, but it would only work to get the dapp community together if the EF didn’t fund any of it.",
+      "createdAt": "2020-08-02T10:30:07.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "well, what does \"core dev\" mean? Is it a pointer to a social cluster, or is it the set of all people making ecosystem-wide public infrastructure?",
+      "createdAt": "2020-08-02T10:30:31.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Are the gas station network people core devs?",
+      "createdAt": "2020-08-02T10:30:42.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I would argue no.",
+      "createdAt": "2020-08-02T10:30:51.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I *very vaguely* call core dev \"everything talked about in this server\".  😄 (terrible delineator, I know)",
+      "createdAt": "2020-08-02T10:31:01.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "I personally would be totally happen with a GSN-like effort; that's probably what I even had in mind",
+      "createdAt": "2020-08-02T10:31:02.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Just asking this whole topic in this channel because this is a social cluster densely populated with informed opinions on issues like this 😛",
+      "createdAt": "2020-08-02T10:31:49.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "That is fair, I suppose perhaps the issue is just that my delineator for \"core dev\" and \"dapp\" is terrible and I am bad for using it.  😄",
+      "createdAt": "2020-08-02T10:32:15.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "Hmm, maybe we should create an explicit social cluster for higher-level ecosystem-wide tool development?",
+      "createdAt": "2020-08-02T10:32:30.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "This could include GSN people, anyone trying to develop an incentivized history access network, etc",
+      "createdAt": "2020-08-02T10:32:49.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "There are definitely people that are in that group that I don't believe hang out around here.",
+      "createdAt": "2020-08-02T10:32:52.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "I propose the name \"Chapter -7.389\" (= e^2 i^2 = ethereum ecosystem infrastructure initiative) 😆",
+      "createdAt": "2020-08-02T10:34:26.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "😖",
+      "createdAt": "2020-08-02T10:34:47.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "You are such a nerd.  😛",
+      "createdAt": "2020-08-02T10:34:52.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I wonder if you named it that, whether anyone would *ever* get the reference?",
+      "createdAt": "2020-08-02T10:35:32.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "madeof_tin7509",
+      "category": "general",
+      "parent": "",
+      "content": "Let’s say Geth decided to stop the logs thing. What would practically happen next?",
+      "createdAt": "2020-08-02T10:39:01.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "madeof_tin7509",
+      "category": "general",
+      "parent": "",
+      "content": "Other consequences of that decision for other ecosystem members?",
+      "createdAt": "2020-08-02T10:39:57.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Circling back, to my original statement, I think my argument is generally that if core devs make a credible threat that clients will stop storing events permanently, then dapps will be forced to look for solutions from third parties which will create an incentive to build those third party tools.  As <@!332923501079953409> alluded to, they built an event retrieval solution and no one cared because they get it \"for free\" from clients and client hosts (like Infura and Alchemy and CloudFlare).  If those things didn't have it for free, then there would be a demand for a solution like they built.",
+      "createdAt": "2020-08-02T10:40:57.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "> Let’s say Geth decided to stop the logs thing. What would practically happen next?\n<@!187490121698770945> Assuming there was ample notice given, or just on one random hardfork all clients stop storing events?",
+      "createdAt": "2020-08-02T10:41:38.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "there clearly is demand for \"fully serverless dapps\" (eg. augur, uniswap and many more are)",
+      "createdAt": "2020-08-02T10:41:42.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "At the moment, \"serverless\" in the Ethereum ecosystem means \"you have access to an Ethereum client running somewhere\" that stores all blocks and events forever.",
+      "createdAt": "2020-08-02T10:42:42.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "general",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-08-02T10:42:57.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It would be totally cool if that paradigm could change to \"serverless means your users are connected to a gossip network where they can buy access to data on demand via micro-payment channels\".",
+      "createdAt": "2020-08-02T10:43:58.741000+00:00",
+      "attachments": []
+    }
+  ]
+}

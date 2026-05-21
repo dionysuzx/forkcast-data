@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2021-10-05",
+  "messageCount": 164,
+  "sourceHash": "22c7dd761a009e893aa5e7ae3806fb15da1d67918cc23f877b44360d5559a60f",
+  "searchText": "<nashatyrev_a> Yep, we had also hit that. For ‘forkchoice_updated()’ it seems to be implicitly clear, but for ‘consensus_validated()’ I think it’s worth adding to the spec explicitly (re @terencechain: These slides are great. Thanks for sharing! In the consensus spec, the CL nodes shouldnt call notify_consensus_validated and notify_forkchoice_updated until is_execution_enabled returns true right? Perhaps it's worth adding that condition into the spec) <sigpaul> After @ethzed pointed it out to me, I've added a constraint to our BN HTTP API that we won't serve any requests for duties or publish any consensus messages after the merge-fork-epoch if we don't have a synced and reachable execution engine. I think all CL clients might want to consider doing something like this, if they aren't already. If we don't have this for our testnets, if an EL/CL pair goes out-of-sync then those CL nodes are most likely going to start producing attestations for old heads. This generally means lots of skip slots, heavy resource usage and general network chaos. <terencechain> Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload() (re @sigpaul: After @ethzed pointed it out to me, I've added a constraint to our BN HTTP API that we won't serve any requests for duties or publish any consensus messages after the merge-fork-epoch if we don't have a synced and reachable execution engine. I think all CL clients might want to consider doing something like this, if they aren't already. If we don't have this for our testnets, if an EL/CL pair goes out-of-sync then those CL nodes are most likely going to start producing attestations for old heads. This generally means lots of skip slots, heavy resource usage and general network chaos.) <sigpaul> I don't think we can produce blocks with ExecutionPayload() since process_execution_payload runs assert payload.parent_hash == state.latest_execution_payload_header.block_hash <sigpaul> I recall some talk about the ability to produce a kind of \"skip block\" ExecutionPayload by duplicating the state root, but I'm not sure of the status on that. I think from the strict CL spec perspective, if the EL is offline then you can't publish or verify blocks. <sigpaul> In theory, you can still process blocks *after* the merge-fork-epoch but *before* the terminal block. But I think that's a bit dangerous since you're on borrowed time. I haven't allowed that scenario in Lighthouse because if you don't have an EL then you can't actually tell if you're inside that safe period or not. <dannyryan> This is absolutely not intended behavior (re @terencechain: Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload()) <dannyryan> And for attestations could put you attesting on an invalid chain <dannyryan> That in the worst case is an invalid, finalized chain that is at odds with the canonical chain <dannyryan> Which could prevent you from rejoining the canonical chain due to slashing protections <dannyryan> Beyond that, eagerly producing messages is precisely a version of the lazy validator problem which we intend to fix in the next 12 months with an execution proof of custody <dannyryan> And as paul says, it can be a fully empty payload. It would need a hash and other things to be correct <dannyryan> It is certainly good for bn to build its block tree as el is syncing but it cant really make firm decisions about it We need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so I personally think that might just be a critical error that would require manual intervention from rhe node operator because thats a huge error and not clear how to auto recover (i.e. needs a super majority and bad execution blocks and could only target those syncing) <dannyryan> Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started We might need to extend this method to say a depth in the chain To be discussed today <dannyryan> Agree that *how* CL handles SYNCING decisions is under specified. High priority next couple of days <n0ble> CL could produce a payload with empty tx list but it can’t be sure that this proposal contributes to a valid chain. CL could attest to a payload with no txes that you have produced as you know it’s valid. But CL *can’t* attest to any block received from the wire until it gets a proof from EL that this block has a valid payload, attesting to any block while EL is syncing must be considered as dishonest behaviour (re @terencechain: Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload()) <n0ble> > We need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so I really don’t think there are options in this case. If an *invalid* chain has been finalized then it definitely require manual intervention and a node should stop operating and firing a message to all possible channels that very bad thing has happened <dannyryan> If empty tx block was built on a chain that you dont know validity of, its dangerous (and dishonest) to attest even in that case (re @n0ble: CL could produce a payload with empty tx list but it can’t be sure that this proposal contributes to a valid chain. CL could attest to a payload with no txes that you have produced as you know it’s valid. But CL *can’t* attest to any block received from the wire until it gets a proof from EL that this block has a valid payload, attesting to any block while EL is syncing must be considered as dishonest behaviour) <n0ble> > Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started Another edge case, what if there a block with a payload from completely odd fork is received. It could turn EL into SYNCING that would never succeed due to data availability issue. It means that the sync can be safely run with finalized data only, this is definitely worth discussion! <dannyryan> Youd also need eth1 hashing function in the CL or some way to compute the new blockhash without EL synced <dannyryan> I agree (re @n0ble: > We need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so I really don’t think there are options in this case. If an *invalid* chain has been finalized then it definitely require manual intervention and a node should stop operating and firing a message to all possible channels that very bad thing has happened) <dannyryan> Right. A bad block could just point to an unavailable execution payload parent and never be able to be resolved (re @n0ble: > Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started Another edge case, what if there a block with a payload from completely odd fork is received. It could turn EL into SYNCING that would never succeed due to data availability issue. It means that the sync can be safely run with finalized data only, this is definitely worth discussion!) <n0ble> Completely agree. My intuition that it is dishonest but not as harmful as attesting before execution — not sure if it’s correct. But we should not explore flavours of harmfulness here 😀 This is dishonest too and MUST NOT happen (re @dannyryan: If empty tx block was built on a chain that you dont know validity of, its dangerous (and dishonest) to attest even in that case) <dannyryan> Attesting to your own bad block on an invalid but finalized chain could put you on a fork in a bad place <ajsutton> It’s easy to fall into the trap of thinking “Syncing” is a simple boolean flag but it’s usually more complicated than that. One example is having a block that you can’t find the parent for which may just mean that block is invalid, not that you’re out of sync. But it can also be because a peer is advertising a higher block number than they really have, making it look like you need to sync but you don’t actually etc. <dannyryan> v1.1.1 CL vectors are up btw <n0ble> In the interop spec now (re @dannyryan: v1.1.1 CL vectors are up btw) <arnetheduck> Nimbus updated, passes (re @dannyryan: v1.1.1 CL vectors are up btw) <n0ble> Just realized that this scenario should not appear as CL verifies the block tree consistency between layers (i.e. `assert payload.parent_hash == state.latest_execution_payload_header.block_hash`) before executing a payload (re @dannyryan: Right. A bad block could just point to an unavailable execution payload parent and never be able to be resolved) <dannyryan> right. the CL knows the data exists <n0ble> I agree. We should bring more clarity to the communication between the layers during the transition (re @terencechain: These slides are great. Thanks for sharing! In the consensus spec, the CL nodes shouldnt call notify_consensus_validated and notify_forkchoice_updated until is_execution_enabled returns true right? Perhaps it's worth adding that condition into the spec) <sigpaul> Regarding the --terminal-total-difficulty-override flag, it might be prudent to standardise hex/decimal for it. We ended up accepting hex unintentionally, since that's the default format for our Uint256 type. I'm open to changing it to decimal though. Here's the latest eth block total difficulty in both formats: - Decimal: 31841035257753085493511 - Hex: 0x6BE1B2181E435214107 Any preferences? Perhaps execution nodes already have some precedent for displaying this number? Etherscan does decimal, FWIW. <timbeiko> Given this is something we’ll want users to override, I think decimal is safer? <timbeiko> They can check on etherscan that TTD > current difficulty <dannyryan> Decimal would allow more transparency to standard user <sigpaul> here's a suggestion PR: https://github.com/ethereum/consensus-specs/pull/2645 not sure if we want to go down the route of comma separations or not <Justin> /me lets be honest, we would prefer gm <kristofgazso> /me <Jared_wasinger> lol <Jared_wasinger> (i did the same and then deleted) <nonveumann> /me <trent_vanepps> /me <ajsutton> I think teku supports both decimal and hex (with 0x prefix) currently. Decimal makes sense to me though. (re @sigpaul: here's a suggestion PR: https://github.com/ethereum/consensus-specs/pull/2645 not sure if we want to go down the route of comma separations or not) <hwwang> /gm (re @Justin: /me lets be honest, we would prefer gm) <dannyryan> /gm <kristofgazso> /gm <sigpaul> /do_not_click <ralexstokes> /gm <caymannan> /gm <kristofgazso> /do <Jared_wasinger> /gm <protolambda> /gm <benjaminion> /gm <vbuterin> /gm <vbuterin> /do_not_click <parithoshj> /gm <Justin> yaassssss /gm ☕️ <arnetheduck> /gm <vdWijden> /gm <nonveumann> /gm <justindrake> /gm <timbeiko> /gm <dankrad> /gm <dankrad> /do_not_click <dankrad> /do_not_click <vbuterin> /send_2_eth_to_me_and_get_4_eth_back <timbeiko> /send_2_eth_to_me_and_get_4_eth_back ok guys can you stop gming /j <kt2am> /me <lightclient> /gm gigadevs For those who aren't aware, these messages are all bridged to Discord and they come across the bridge as incredibly spammy. I have no idea how they are rendered over in whatever client you all are using. <sigpaul> FWIW, in Telegram if you send a forward slash-prefixed word, it becomes a link which will post the same thing in a new message when clicked. So, people see a link and they click it to see what happens. It posts the link again. New people see the link, etc. Ah, I didn't realize Telegram had a \"bait unwitting people into spamming the channel\" feature. A reminder of ",
+  "excerpts": [
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<nashatyrev_a> Yep, we had also hit that. For  ‘forkchoice_updated()’ it seems to be implicitly clear, but for ‘consensus_validated()’ I think it’s worth adding to the spec explicitly (re @terencechain: These slides are great. Thanks for sharing!\nIn the consensus spec, the CL nodes shouldnt call notify_consensus_validated and notify_forkchoice_updated until is_execution_enabled returns true right? Perhaps it's worth adding that condition into the spec)",
+      "createdAt": "2021-10-05T00:58:51.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> After @ethzed pointed it out to me, I've added a constraint to our BN HTTP API that we won't serve any requests for duties or publish any consensus messages after the merge-fork-epoch if we don't have a synced and reachable execution engine.\nI think all CL clients might want to consider doing something like this, if they aren't already. If we don't have this for our testnets, if an EL/CL pair goes out-of-sync then those CL nodes are most likely going to start producing attestations for old heads. This generally means lots of skip slots, heavy resource usage and general network chaos.",
+      "createdAt": "2021-10-05T00:58:51.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<terencechain> Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload() (re @sigpaul: After @ethzed pointed it out to me, I've added a constraint to our BN HTTP API that we won't serve any requests for duties or publish any consensus messages after the merge-fork-epoch if we don't have a synced and reachable execution engine.\nI think all CL clients might want to consider doing something like this, if they aren't already. If we don't have this for our testnets, if an EL/CL pair goes out-of-sync then those CL nodes are most likely going to start producing attestations for old heads. This generally means lots of skip slots, heavy resource usage and general network chaos.)",
+      "createdAt": "2021-10-05T01:12:58.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> I don't think we can produce blocks with ExecutionPayload() since process_execution_payload runs assert payload.parent_hash == state.latest_execution_payload_header.block_hash",
+      "createdAt": "2021-10-05T01:14:58.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> I recall some talk about the ability to produce a kind of \"skip block\" ExecutionPayload by duplicating the state root, but I'm not sure of the status on that.\nI think from the strict CL spec perspective, if the EL is offline then you can't publish or verify blocks.",
+      "createdAt": "2021-10-05T01:17:39.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> In theory, you can still process blocks *after* the merge-fork-epoch but *before* the terminal block. But I think that's a bit dangerous since you're on borrowed time. I haven't allowed that scenario in Lighthouse because if you don't have an EL then you can't actually tell if you're inside that safe period or not.",
+      "createdAt": "2021-10-05T01:21:49.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> This is absolutely not intended behavior (re @terencechain: Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload())",
+      "createdAt": "2021-10-05T03:15:53.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> And for attestations could put you attesting on an invalid chain",
+      "createdAt": "2021-10-05T03:16:09.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> That in the worst case is an invalid, finalized chain that is at odds with the canonical chain",
+      "createdAt": "2021-10-05T03:16:29.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Which could prevent you from rejoining the canonical chain due to slashing protections",
+      "createdAt": "2021-10-05T03:16:57.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Beyond that, eagerly producing messages is precisely a version of the lazy validator problem which we intend to fix in the next 12 months with an execution proof of custody",
+      "createdAt": "2021-10-05T03:17:59.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> And as paul says, it can be a fully empty payload. It would need a hash and other things to be correct",
+      "createdAt": "2021-10-05T03:18:31.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> It is certainly good for bn to build its block tree as el is syncing but it cant really make firm decisions about it\nWe need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so\nI personally think that might just be a critical error that would require manual intervention from rhe node operator because thats a huge error and not clear how to auto recover (i.e. needs a super majority and bad execution blocks and could only target those syncing)",
+      "createdAt": "2021-10-05T03:21:45.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started \nWe might need to extend this method to say a depth in the chain\nTo be discussed today",
+      "createdAt": "2021-10-05T03:23:00.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Agree that *how* CL handles SYNCING decisions is under specified. High priority next couple of days",
+      "createdAt": "2021-10-05T03:23:38.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> CL could produce a payload with empty tx list but it can’t be sure that this proposal contributes to a valid chain. CL could attest to a payload with no txes that you have produced as you know it’s valid. But CL *can’t* attest to any block received from the wire until it gets a proof from EL that this block has a valid payload, attesting to any block while EL is syncing must be considered as dishonest behaviour (re @terencechain: Good point for testnets, but this is not the intended behavior for mainnet right? Im under the impression if EL node is syncing / not reachable then CL node will just pack in ExecutionPayload())",
+      "createdAt": "2021-10-05T05:09:44.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> > We need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so\nI really don’t think there are options in this case. If an *invalid* chain has been finalized then it definitely require manual intervention and a node should stop operating and firing a message to all possible channels that very bad thing has happened",
+      "createdAt": "2021-10-05T05:11:27.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> If empty tx block was built on a chain that you dont know validity of, its dangerous (and dishonest) to attest even in that case (re @n0ble: CL could produce a payload with empty tx list but it can’t be sure that this proposal contributes to a valid chain. CL could attest to a payload with no txes that you have produced as you know it’s valid. But CL *can’t* attest to any block received from the wire until it gets a proof from EL that this block has a valid payload, attesting to any block while EL is syncing must be considered as dishonest behaviour)",
+      "createdAt": "2021-10-05T05:13:36.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> > Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started \nAnother edge case, what if there a block with a payload from completely odd fork is received. It could turn EL into SYNCING that would never succeed due to data availability issue. It means that the sync can be safely run with finalized data only, this is definitely worth discussion!",
+      "createdAt": "2021-10-05T05:13:38.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Youd also need eth1 hashing function in the CL or some way to compute the new blockhash without EL synced",
+      "createdAt": "2021-10-05T05:14:13.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I agree (re @n0ble: > We need to discuss if it still \"finalizes\" and what to do if it learns invalid after doing so\nI really don’t think there are options in this case. If an *invalid* chain has been finalized then it definitely require manual intervention and a node should stop operating and firing a message to all possible channels that very bad thing has happened)",
+      "createdAt": "2021-10-05T05:14:27.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Right. A bad block could just point to an unavailable execution payload parent and never be able to be resolved (re @n0ble: > Additionally, we identified that getting INVALID on executepayload after getting a series of SYNCING does not adequately convey where in the execution chain, INVALID started \nAnother edge case, what if there a block with a payload from completely odd fork is received. It could turn EL into SYNCING that would never succeed due to data availability issue. It means that the sync can be safely run with finalized data only, this is definitely worth discussion!)",
+      "createdAt": "2021-10-05T05:15:43.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> Completely agree. My intuition that it is dishonest but not as harmful as attesting before execution — not sure if it’s correct. But we should not explore flavours of harmfulness here 😀 This is dishonest too and MUST NOT happen (re @dannyryan: If empty tx block was built on a chain that you dont know validity of, its dangerous (and dishonest) to attest even in that case)",
+      "createdAt": "2021-10-05T05:16:41.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Attesting to your own bad block on an invalid but finalized chain could put you on a fork in a bad place",
+      "createdAt": "2021-10-05T05:17:31.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ajsutton> It’s easy to fall into the trap of thinking “Syncing” is a simple boolean flag but it’s usually more complicated than that.  One example is having a block that you can’t find the parent for which may just mean that block is invalid, not that you’re out of sync.  But it can also be because a peer is advertising a higher block number than they really have, making it look like you need to sync but you don’t actually etc.",
+      "createdAt": "2021-10-05T05:17:33.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> v1.1.1 CL vectors are up btw",
+      "createdAt": "2021-10-05T06:23:11.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> In the interop spec now (re @dannyryan: v1.1.1 CL vectors are up btw)",
+      "createdAt": "2021-10-05T06:25:19.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<arnetheduck> Nimbus updated, passes (re @dannyryan: v1.1.1 CL vectors are up btw)",
+      "createdAt": "2021-10-05T06:26:57.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> Just realized that this scenario should not appear as CL verifies the block tree consistency between layers (i.e. `assert payload.parent_hash == state.latest_execution_payload_header.block_hash`) before executing a payload (re @dannyryan: Right. A bad block could just point to an unavailable execution payload parent and never be able to be resolved)",
+      "createdAt": "2021-10-05T06:28:37.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> right. the CL knows the data exists",
+      "createdAt": "2021-10-05T06:34:24.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<n0ble> I agree. We should bring more clarity to the communication between the layers during the transition (re @terencechain: These slides are great. Thanks for sharing!\nIn the consensus spec, the CL nodes shouldnt call notify_consensus_validated and notify_forkchoice_updated until is_execution_enabled returns true right? Perhaps it's worth adding that condition into the spec)",
+      "createdAt": "2021-10-05T06:52:32.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> Regarding the --terminal-total-difficulty-override  flag, it might be prudent to standardise hex/decimal for it.\nWe ended up accepting hex unintentionally, since that's the default format for our Uint256 type. I'm open to changing it to decimal though.\nHere's the latest eth block total difficulty in both formats:\n- Decimal: 31841035257753085493511\n- Hex: 0x6BE1B2181E435214107\nAny preferences? Perhaps execution nodes already have some precedent for displaying this number? Etherscan does decimal, FWIW.",
+      "createdAt": "2021-10-05T08:51:08.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> Given this is something we’ll want users to override, I think decimal is safer?",
+      "createdAt": "2021-10-05T08:52:19.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> They can check on etherscan that TTD > current difficulty",
+      "createdAt": "2021-10-05T08:52:33.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Decimal would allow more transparency to standard user",
+      "createdAt": "2021-10-05T08:59:29.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> here's a suggestion PR: https://github.com/ethereum/consensus-specs/pull/2645\nnot sure if we want to go down the route of comma separations or not",
+      "createdAt": "2021-10-05T09:05:10.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<Justin> /me lets be honest, we would prefer gm",
+      "createdAt": "2021-10-05T09:06:27.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kristofgazso> /me",
+      "createdAt": "2021-10-05T09:06:32.995000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<Jared_wasinger> lol",
+      "createdAt": "2021-10-05T09:06:40.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<Jared_wasinger> (i did the same and then deleted)",
+      "createdAt": "2021-10-05T09:06:49.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<nonveumann> /me",
+      "createdAt": "2021-10-05T09:07:53.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<trent_vanepps> /me",
+      "createdAt": "2021-10-05T09:11:07.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ajsutton> I think teku supports both decimal and hex (with 0x prefix) currently. Decimal makes sense to me though. (re @sigpaul: here's a suggestion PR: https://github.com/ethereum/consensus-specs/pull/2645\nnot sure if we want to go down the route of comma separations or not)",
+      "createdAt": "2021-10-05T09:15:49.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<hwwang> /gm (re @Justin: /me lets be honest, we would prefer gm)",
+      "createdAt": "2021-10-05T09:16:59.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> /gm",
+      "createdAt": "2021-10-05T09:17:05.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kristofgazso> /gm",
+      "createdAt": "2021-10-05T09:17:13.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> /do_not_click",
+      "createdAt": "2021-10-05T09:17:33.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ralexstokes> /gm",
+      "createdAt": "2021-10-05T09:17:37.277000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<caymannan> /gm",
+      "createdAt": "2021-10-05T09:17:43.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kristofgazso> /do",
+      "createdAt": "2021-10-05T09:17:46.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<Jared_wasinger> /gm",
+      "createdAt": "2021-10-05T09:17:50.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<protolambda> /gm",
+      "createdAt": "2021-10-05T09:17:54.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<benjaminion> /gm",
+      "createdAt": "2021-10-05T09:17:57.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vbuterin> /gm",
+      "createdAt": "2021-10-05T09:18:02.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vbuterin> /do_not_click",
+      "createdAt": "2021-10-05T09:18:08.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<parithoshj> /gm",
+      "createdAt": "2021-10-05T09:18:30.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<Justin> yaassssss /gm ☕️",
+      "createdAt": "2021-10-05T09:18:59.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<arnetheduck> /gm",
+      "createdAt": "2021-10-05T09:19:16.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vdWijden> /gm",
+      "createdAt": "2021-10-05T09:27:19.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<nonveumann> /gm",
+      "createdAt": "2021-10-05T09:27:27.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<justindrake> /gm",
+      "createdAt": "2021-10-05T09:27:35.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> /gm",
+      "createdAt": "2021-10-05T09:27:53.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dankrad> /gm",
+      "createdAt": "2021-10-05T09:28:11.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dankrad> /do_not_click",
+      "createdAt": "2021-10-05T09:28:22.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dankrad> /do_not_click",
+      "createdAt": "2021-10-05T09:28:25.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<vbuterin> /send_2_eth_to_me_and_get_4_eth_back",
+      "createdAt": "2021-10-05T09:32:53.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<timbeiko> /send_2_eth_to_me_and_get_4_eth_back",
+      "createdAt": "2021-10-05T09:33:20.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "trent_vanepps",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok guys can you stop gming /j",
+      "createdAt": "2021-10-05T09:34:17.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<kt2am> /me",
+      "createdAt": "2021-10-05T09:50:06.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<lightclient> /gm gigadevs",
+      "createdAt": "2021-10-05T09:51:12.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "For those who aren't aware, these messages are all bridged to Discord and they come across the bridge as incredibly spammy.  I have no idea how they are rendered over in whatever client you all are using.",
+      "createdAt": "2021-10-05T09:57:23.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> FWIW, in Telegram if you send a forward slash-prefixed word, it becomes a link which will post the same thing in a new message when clicked.\nSo, people see a link and they click it to see what happens. It posts the link again. New people see the link, etc.",
+      "createdAt": "2021-10-05T10:02:50.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, I didn't realize Telegram had a \"bait unwitting people into spamming the channel\" feature.  A reminder of why I use Discord.  😜",
+      "createdAt": "2021-10-05T10:04:23.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<lightclient> /gm",
+      "createdAt": "2021-10-05T10:32:58.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Testing",
+      "parent": "",
+      "content": "my b had to test it for myself",
+      "createdAt": "2021-10-05T10:33:21.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Testing",
+      "parent": "",
+      "content": "would be cool if there wasn’t a bridge tho",
+      "createdAt": "2021-10-05T10:33:36.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> With v1.1.0, it seems that the definition of ExecutionPayloadHeader for a genesis-transition-complete network is presently undefined, is that correct?\nI guess that's just something arbitrarily defined by whoever defines the genesis state?",
+      "createdAt": "2021-10-05T11:08:13.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> it is defined in getbeaconstatefrometh1",
+      "createdAt": "2021-10-05T11:09:48.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> But defined poorly",
+      "createdAt": "2021-10-05T11:09:52.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> In v1.1.1, we make it such that it is passed into that function",
+      "createdAt": "2021-10-05T11:10:08.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> And would be naturally a function of the EL genesis block for consistency",
+      "createdAt": "2021-10-05T11:10:19.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> Do you mean initialize_beacon_state_from_eth1? (re @dannyryan: it is defined in getbeaconstatefrometh1)",
+      "createdAt": "2021-10-05T11:10:47.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Yes",
+      "createdAt": "2021-10-05T11:11:21.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Thats the canonical function for creating a genesis state starting at some fork",
+      "createdAt": "2021-10-05T11:11:57.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> I guess for our local testnets I'll just define it in roughly the same way as before.",
+      "createdAt": "2021-10-05T11:12:23.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<protolambda> the eth1 config defines the genesis execution payload (based on genesis execution block). Or just full zeroed execution payload if not transitioned at genesis",
+      "createdAt": "2021-10-05T11:12:26.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> In v1.1.1, If you pass in an execpayloadheader, the netowkr starts post-transition\nIf empty, it is waiting to transition",
+      "createdAt": "2021-10-05T11:12:43.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> > the eth1 config defines the genesis execution payload\nbut that definition is not provided by the spec, right?",
+      "createdAt": "2021-10-05T11:12:58.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> It is network specific",
+      "createdAt": "2021-10-05T11:13:16.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> The hardcoded, e.g., initial gas limit was incorrect in v1.1.0\nAs it should be defined based on the actual eth1/el genesis block",
+      "createdAt": "2021-10-05T11:13:58.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> Got it, thanks. BYO, you-do-you ExecutionPayloadHeader.",
+      "createdAt": "2021-10-05T11:14:59.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> And this quirk still exists, right? (re @sigpaul: Hmm, it seems that the spec is a little unclear here.\nOn the one hand, the genesis block should have an all-zeros execution payload since we define the genesis block as:\ngenesis_block = BeaconBlock(state_root=hash_tree_root(genesis_state))\nOn the other hand, the BeaconState has the latest_execution_payload_header set to some initial values.\nSince LH is loading the genesis block from the DB to obtain the latest block hash, it's returning all-zeros. However, if it loaded the BeaconState and read the latest header it'd get a different value.\nI'm really starting to feel that the merge initialize_beacon_state_from_eth1 is a waste of time and we should just do the fork transition. There's less edge-cases and we get to test the fork more.)",
+      "createdAt": "2021-10-05T11:17:29.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Im not sure I understand the quirk\nThe genesis state should have the init latest exec payload header embedded in it\nAnd the genesis beacon block should reference such a state",
+      "createdAt": "2021-10-05T11:19:54.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> But the genesis block has a different execution_payload to the state's latest_execution_payload_header.",
+      "createdAt": "2021-10-05T11:20:26.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I see",
+      "createdAt": "2021-10-05T11:20:35.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> This is probably correct behaviour as the genesis block is not applied as a transition to anything, nor does it end up embedded in state (avoiding a circular ref)",
+      "createdAt": "2021-10-05T11:22:38.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> I'll think about it when get to computer now that I know the actual issue referenced!",
+      "createdAt": "2021-10-05T11:23:01.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<sigpaul> cool!\nIt would be a shame that we can't say \"the block.body.execution_payload.block_hash always corresponds to the corresponding execution block hash\".\nIt becomes an issue in implementation because you can't just read the (small) block from the DB, you need the (big) state. It wouldn't be too hard to work around it, since it's a rare special-case. But we all know what happens with \"rare special-cases\" in implementations 😬",
+      "createdAt": "2021-10-05T11:26:02.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> Yeah I see that. And no circular reference or anything",
+      "createdAt": "2021-10-05T11:31:41.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "How does CL get the TERMINAL_TOTAL_DIFFICULTY defined in `is_valid_terminal_pow_block`.\nI know there is a talk about  --terminal-total-difficulty-override  flag, but i am talking about the normal scenario.",
+      "createdAt": "2021-10-05T12:24:38.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<dannyryan> normally it’s a config param",
+      "createdAt": "2021-10-05T12:27:49.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "config in EL or in CL?",
+      "createdAt": "2021-10-05T12:30:15.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "I hope it is not a config in CL as there is override flag already.\nif it is a config param in EL, then how does the CL know whats the TTD?",
+      "createdAt": "2021-10-05T12:36:57.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ralxz> would anyone from teku be available to try M3 with EthereumJS?",
+      "createdAt": "2021-10-05T13:00:21.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ralxz> i tried to follow your m3 instructions but i am on mac m1 and got a blst error 😕 doesn't look like there's support yet",
+      "createdAt": "2021-10-05T13:00:50.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<ralxz> i am sitting with holger at the back table by the open door",
+      "createdAt": "2021-10-05T13:01:28.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "Here's a public interop testnet endpoint. I'll probably deploy v2 in maybe a few hours / tonight to ix up some genesis issues, but until then if anyone wants to check if they can connect and/or send me details on how to link up other exec/cons clients, pr's are welcome https://github.com/karalabe/hacknet/tree/main/v1",
+      "createdAt": "2021-10-05T13:01:55.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "whats the blockHash of the genesis block? this is to run test vectors of the API",
+      "createdAt": "2021-10-05T13:21:43.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<parithoshj> ping me if you need an ephemeral server to test stuff on the week to get around the m1 error :D (re @ralxz: i tried to follow your m3 instructions but i am on mac m1 and got a blst error 😕 doesn't look like there's support yet)",
+      "createdAt": "2021-10-05T13:25:47.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@!306415870010327041> `0xc31c2318b5d8969be1180fe1a8411c45e2f0a311588b4d038f2178426ccd8ff4`",
+      "createdAt": "2021-10-05T13:41:55.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "karalabe",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's an M3 network, first block is ethash ,then it transitions into pos",
+      "createdAt": "2021-10-05T13:42:12.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "aah ok. ty",
+      "createdAt": "2021-10-05T13:59:03.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@306415870010327041> are you running a public branch of prysm?",
+      "createdAt": "2021-10-05T14:04:22.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Testing",
+      "parent": "",
+      "content": "<terencechain> Prysm is not ready yet, we'll ping once it's ready. We are still working on passing m1 (re @amphora_interop_bot: <potuz><@306415870010327041> are you running a public branch of prysm?)",
+      "createdAt": "2021-10-05T14:05:19.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sure just wanted to see what's the code you're looking so that I peek as well",
+      "createdAt": "2021-10-05T14:07:07.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "Np. The branch is merge-oct",
+      "createdAt": "2021-10-05T14:07:39.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah perfect, thanks",
+      "createdAt": "2021-10-05T14:07:53.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "Feel free to ping me if you see anything interesting",
+      "createdAt": "2021-10-05T14:08:17.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jmozah",
+      "category": "Testing",
+      "parent": "",
+      "content": "not running prysm yet. Trying to run EE and some test vectors defined here https://notes.ethereum.org/@9AeMAlpyQYaAAyuj47BzRw/rkwW3ceVY#\nThe genesis block hash is outdated though.",
+      "createdAt": "2021-10-05T14:08:55.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Working on the pending attestations queue today, when that's done will move to this",
+      "createdAt": "2021-10-05T14:09:01.394000+00:00",
+      "attachments": []
+    }
+  ]
+}

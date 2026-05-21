@@ -45,6 +45,7 @@ export interface Artifact {
 export interface SourceRef {
   type:
     | "forkcast"
+    | "eips"
     | "pm"
     | "pm-lean"
     | "fixture-live"
@@ -107,8 +108,12 @@ export interface EipReadModel {
   id: number;
   title: string;
   status: string;
+  type?: string | undefined;
+  category?: string | undefined;
   summary: string;
   impacts: string[];
+  discussion_url?: string | undefined;
+  source_markdown_url?: string | undefined;
   canonical_url: string;
   markdown_url: string;
   citations: Citation[];

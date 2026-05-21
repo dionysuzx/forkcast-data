@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2023-01-20",
+  "messageCount": 224,
+  "sourceHash": "37e64ac2778c6ce835648ef437fa2cfe40639fb45d105977b2f38e5e8f6e0c1f",
+  "searchText": "<@412614104222531604> BLS to execution pool PR merged Is it bounded? I'm just curious what other clients are doing cause I worry if we're outliers we may be doing something wrong yeah, though I made it bigger, I think 16384 or 32768 (Nim's deque likes powers of 2) Lighthouse’s is unbounded I foud the Teku commit referencing the boundedness decisions there we had a small queue, it's not small now yes, it was one of your commits decided 300k would be sufficient whcih is almost enoguh for every validator to rush it I was wondering about the flood publishing. It seems like it might be better to publish gradually at the fork, rather than every node pumping out ~200K messages. Thoughts? I fundamentally disagree with incentivizing flood-publish-at-capella-boundary im not clearing submitting early as i think it will make the process problematic so I'm not that bothered if it doesn't work well so if you're early i'll reject and other than that, flooding will mostly be from prysm as far as i understand so we'll just honour gossip s it arrives yes, this seems probably better And Nimbus's approach will incentivize this i think its realistic to expect that capella wall time will be a mess if everyone tries to flood just from a network message propagation perspective it's awful it's a global topic I'd prefer more clients basically signaled that, no, you're not getting \"in line\" by sniping 2 milliseconds before the next node manages to get theirs in after `CAPELLA_FORK_EPOCH` That's a relief 😂 300k should be functionally unbounded I thought the same too and I don't have any strong opinions against it. Only big pools participating in the program to whitelist will be affected by this I suppose What's Nimbus approach? prefer more recent. while it's not quite a stack, it's closer to a stack than a queue, as a whole so it kind of rewards whoever happened to send within a window of time recent to a Nimbus node proposing Ah, interesting, but this is obviously against the spec oh im not sure about that, we don't enqueue duplicates Oh you mean single messages You don't take duplicates Just use a stack is it? honest question, not intentionally violating spec, but there's nothing I saw in this regard int he spec are you saying that you'll replace an older message with a newer one if its for hte same key? I mean, it's literally a `deque`. but, because of how it's used, it's a recency-preferring structure it recognizes duplicates, and does the gossip validation but yes, in general, it replaces older messages with newer ones probably if I were to refine this I'd have it replace-random so if im a bad actor i just make sure i send messages if it changes I like this, it's a probably trivial change on Prysm to implement. so there's a diversity among Nimbus nodes check queue, if the nice address is in there, replace it with my dodgy one which is easy because i just have to send a new message well, the messages need to be BLS-verified I truly like nimbus idea, it's still a race but only for hackers to get the message. Users that are not worried are encouraged to wait yeh so a bad actor that has the key can just keep monitoring their compromised key and easily update sure. I just regard that as basically orthogonal and that expecting users to race the bad guys is ... not likely a winning tactic guess it depends who builds the block ultimately as to what happens, so from that perspective i like the difference to be honest Well, honest users will still race bad guys if they got their keys stolen Cause you can't take a message from a validator that you saw before I don't see a principled reason to think the honest users by default will win any form of these races (or, necessarily, lose) honest actors with safe keys should just hold off 3 days imo once the dust settles it'll be an empty queue and no chaos Well, if you lost hundreds of validators and are in contact with kraken as some banned people in this server are , you may win a race. But I like the idea of a stack cause then users that are not racing are encouraged to wait Instead of asking Tim to post in a blog what does posting in a blog accomplish? That pools don't flood at the boundary This attempts to accomplish something like that without expecting people to behave altruistically well i think a blog for 'hey, dont stress, you dont win if you're early' is still the right message Yeah but with Nimbus strategy you literally win if you're late this is practically a topic that requires a quiet ale a the end of a day Which is a good thing Cc <@308223150725005322> WDYT about changing this in our list, it's probably a two liner since it's doubly linked if its clearly defined across everywhere, thats where dishonest actors can win, just saying heh it it's roll the dice and you may just get lucky, that's a lot more complicated Yeah, that's why I still think the idea of moderate (hundreds-to-low-thousands) sized set, with replace-random strategy has value enough so that even with 5k validators, say, it's not likely to run out all i'd say is remember the KISS principle (keep-it-simple-stupid) Wait <@654267572107083777> by replaces older messages with newer ones you mean you will take a conflicting message for a validator index that you already had in the pool? That's definitely against the spec (or the spec is not rightly worded) yes, that's why I did the stack-like approach. simpler. no, if it's already in queue, it won't be gossip-accepted per usual gossip conditions ah ok, so i mis-understood, its a race still Ah ok we're in the right page then, just use a Lifo structure to propose blocks I like this idea the honest validator spec, I'd note, says nothing about even putting nonzero number of these changes in a proposed block Ooo I also like the LIFO a really selfish client, consistent with honest validator + other specs, might have some pool, might not, but would just ignore it Yeah this is an omission IMO except for its own validators had considered a private queue and a gossip queue and read gossip second btu its more complicated than required given it's a 3 day window to be clean there's no rewards, no slashing condition, no check like for deposits of, there are outstanding changes to include, you must include them, etc Yeah I mentioned this to Misha before, if you want to have a smooth fork probably we shouldn't even gossip 🙂 i wouldnt be gossiping the private pre-fork changes until like an epoch in, maybe longer especially if you want them actually accepted amongst the chaos but time will tell well, there's some real issue here, and there's DOS potential. because of the BLS verification ddos, flooding global topic, yeh Yeah I'll be advocating for the Lifo structure at prysm. Definitely no con that I can see and there are obvious pros con is you disadvantage your own stuff thats at the back of the stack because it went in pre-capella i guess worth disincentivizing IMO just dont allow it 😉 simples the queue-up-before-capella idea our bls api will pass it to gossip, gossip will say 'bugger off you're early' is that spec-legal? I after the previous discussion about that here, I read the spec closely while implementing it and it's not obvious to me i mean it wont get pushed, it'll result in failure messages to users and not gossiped wall clock is start time either way -- it's written as if the acceptance and broadcast conditions are more or less the same so if its not valid, i dont accept on teh bls api for the 200 response yeh so i can only respond 200 once i can gossip which isn't consistent with pre-capella before that, failing validation is perfectly reasonable mmmm..... its close That disadvantage is minimal: users want to be safe, not early, 3 days difference doesn't matter to anyone okay, but it does pass the `process_bls_to_execution_change` conditions? they can be safe - once the channel is open because it's only the gossip conditions which require capella definteily open to discuss this next wek and it's not clear that the REST API specifies one or the other to me mm i thought the rest api was relatively clear 200 if you can gossip ... and pre wall-clock you cant absoutely, likewise okay, but should that go in the queue (or stack)? i cant gossip it... i dont want to cache it, try again later the REST HTTP code refers only to the validation + broadcast aggregate failure but what if it can be validated? one of the validation rules is on wlal clock which will fail gossip only not `process_foo` we use the gossip rules to determine validity regardless of source so it fails gossip is clock + `process_foo` I think with LIFO the compromised key users are slightly more likely to get screwed. If they distribute their address changes to some stakers before Capella they'll be at the back of the queue to be included as <@680234424037670912> points out. This gives an attacker a better chance of getting a conflicting message included by just gossiping it to validators that haven't pre-loaded the approved address changes for compromised keys although, i dont think we allowed the skew in the wall clock calc i think gossip calc for when to accept should allow for clock skew potentially will have to ponder that skew would mean things get rejected for being early and may not be but then allowing it will allow ppl to jump early I don't see the issue here, this is a race for inclusion in pools not inclusion in blocks Or rather the former is more important than the latter ok i should go find a small bag for some clothes or something and revisit this after some pondering im keen on this to minimise chaos so if we need to figure out a way, its a good topic to continue later The explicit phrasing: \"Submits a list of SignedBLSToExecutionChange objects to the node's pool. ANy that pass validation MUST be broadcast to the network.\" I agree with this statement, we are dissincentivizing safe users to post early, and still the winning strategy for hackers and hacked users is to flood it's reasonable to read this as saying broadcast now, not broadcast a decade from now but it describes two actions: submitting to a node's pool and broadcasting. They're logically separate and it does not explicitly describe the kind of validation required this is useless cause whatever limit we imposse, obviously at that boundary you'll start seeing the flooding Inclusion in blocks is _far more important_! Once that happens it doesn't matter if 50-60% of the network already had the better address change in their pool ok so maybe not apply skew and let queue jumpers get rejections earlier My point is the LIFO partly undoes the protection provided by the flood-published pre-loaded list you do not get included in blocks if you are not included in the pool before, and if all clients do not replace messages, you want to flood as early as possible pools will be filled in seconds, blocks in days if mean we can just randomly select from the queue and noone wins so the race for the pool is the **only** one that matters but does become expensive to remove entries yeah I guess maybe I'm overestimating the time it might take to flood publish all the queued changes blocks will be inside 3 days 310k is less than 3 days of blocks but processing 310K messages is milliseconds so the only race here is to get your messages to pools yeh sure, but all of those will be done inside 3 days not to blocks into blocks one metric I'm keeping in mind regarding the flooding. say it takes a client 1ms to process one of these requests, mostly the BLS verification probably. if even 10k requests flood that first slot, that risks DOSing clients so if every validator asks on start of capella, assuming we dont crash horribly, the queue size is 0 inside 3 days yeah I am keen to see devnet-4 tests because of this. Our approach is brutally naive, and we can be DOSed we have a queue metric if they're being logged on devnet will show the length of the queue over time and at some point I'm wondering if Nimbus will have to just sort of blin",
+  "excerpts": [
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> BLS to execution pool PR merged",
+      "createdAt": "2023-01-20T01:45:32.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is it bounded? I'm just curious what other clients are doing cause I worry if we're outliers we may be doing something wrong",
+      "createdAt": "2023-01-20T02:10:05.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah, though I made it bigger, I think 16384 or 32768 (Nim's deque likes powers of 2)",
+      "createdAt": "2023-01-20T02:10:35.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "Lighthouse’s is unbounded",
+      "createdAt": "2023-01-20T02:10:54.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I foud the Teku commit referencing the boundedness decisions there",
+      "createdAt": "2023-01-20T02:11:10.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "we had a small queue, it's not small now",
+      "createdAt": "2023-01-20T02:11:22.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, it was one of your commits",
+      "createdAt": "2023-01-20T02:11:34.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "decided 300k would be sufficient",
+      "createdAt": "2023-01-20T02:11:38.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "whcih is almost enoguh for every validator to rush it",
+      "createdAt": "2023-01-20T02:11:56.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "I was wondering about the flood publishing. It seems like it might be better to publish gradually at the fork, rather than every node pumping out ~200K messages. Thoughts?",
+      "createdAt": "2023-01-20T02:12:00.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I fundamentally disagree with incentivizing flood-publish-at-capella-boundary",
+      "createdAt": "2023-01-20T02:12:19.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "im not clearing submitting early as i think it will make the process problematic",
+      "createdAt": "2023-01-20T02:12:28.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "so I'm not that bothered if it doesn't work well",
+      "createdAt": "2023-01-20T02:12:32.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "so if you're early i'll reject",
+      "createdAt": "2023-01-20T02:12:37.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "and other than that, flooding will mostly be from prysm as far as i understand",
+      "createdAt": "2023-01-20T02:12:53.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "so we'll just honour gossip s it arrives",
+      "createdAt": "2023-01-20T02:13:09.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, this seems probably better",
+      "createdAt": "2023-01-20T02:13:20.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "And Nimbus's approach will incentivize this",
+      "createdAt": "2023-01-20T02:13:52.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think its realistic to expect that capella wall time will be a mess if everyone tries to flood",
+      "createdAt": "2023-01-20T02:14:13.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "just from a network message propagation perspective it's awful",
+      "createdAt": "2023-01-20T02:14:23.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's a global topic",
+      "createdAt": "2023-01-20T02:14:32.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'd prefer more clients basically signaled that, no, you're not getting \"in line\" by sniping 2 milliseconds before the next node manages to get theirs in after `CAPELLA_FORK_EPOCH`",
+      "createdAt": "2023-01-20T02:15:38.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "That's a relief 😂",
+      "createdAt": "2023-01-20T02:19:01.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "300k should be functionally unbounded",
+      "createdAt": "2023-01-20T02:19:24.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I thought the same too and I don't have any strong opinions against it. Only big pools participating in the program to whitelist will be affected by this I suppose",
+      "createdAt": "2023-01-20T02:21:11.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "What's Nimbus approach?",
+      "createdAt": "2023-01-20T02:22:20.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "prefer more recent. while it's not quite a stack, it's closer to a stack than a queue, as a whole",
+      "createdAt": "2023-01-20T02:22:53.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "so it kind of rewards whoever happened to send within a window of time recent to a Nimbus node proposing",
+      "createdAt": "2023-01-20T02:23:16.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah, interesting, but this is obviously against the spec",
+      "createdAt": "2023-01-20T02:23:25.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh im not sure about that, we don't enqueue duplicates",
+      "createdAt": "2023-01-20T02:23:26.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh you mean single messages",
+      "createdAt": "2023-01-20T02:23:53.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "You don't take duplicates",
+      "createdAt": "2023-01-20T02:23:59.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Just use a stack",
+      "createdAt": "2023-01-20T02:24:04.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "is it? honest question, not intentionally violating spec, but there's nothing I saw in this regard int he spec",
+      "createdAt": "2023-01-20T02:24:06.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "are you saying that you'll replace an older message with a newer one if its for hte same key?",
+      "createdAt": "2023-01-20T02:24:34.959000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I mean, it's literally a `deque`. but, because of how it's used, it's a recency-preferring structure",
+      "createdAt": "2023-01-20T02:24:35.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "it recognizes duplicates, and does the gossip validation",
+      "createdAt": "2023-01-20T02:24:48.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "but yes, in general, it replaces older messages with newer ones",
+      "createdAt": "2023-01-20T02:25:00.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "probably if I were to refine this I'd have it replace-random",
+      "createdAt": "2023-01-20T02:25:18.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "so if im a bad actor i just make sure i send messages if it changes",
+      "createdAt": "2023-01-20T02:25:25.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I like this, it's a probably trivial change on Prysm to implement.",
+      "createdAt": "2023-01-20T02:25:26.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "so there's a diversity among Nimbus nodes",
+      "createdAt": "2023-01-20T02:25:27.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "check queue, if the nice address is in there, replace it with my dodgy one",
+      "createdAt": "2023-01-20T02:25:43.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "which is easy because i just have to send a new message",
+      "createdAt": "2023-01-20T02:26:05.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "well, the messages need to be BLS-verified",
+      "createdAt": "2023-01-20T02:26:06.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I truly like nimbus idea, it's still a race but only for hackers to get the message. Users that are not worried are encouraged to wait",
+      "createdAt": "2023-01-20T02:26:06.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeh so a bad actor that has the key can just keep monitoring their compromised key and easily update",
+      "createdAt": "2023-01-20T02:26:35.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "sure. I just regard that as basically orthogonal and that expecting users to race the bad guys is ... not likely a winning tactic",
+      "createdAt": "2023-01-20T02:27:09.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "guess it depends who builds the block ultimately as to what happens, so from that perspective i like the difference to be honest",
+      "createdAt": "2023-01-20T02:27:54.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Well, honest users will still race bad guys if they got their keys stolen",
+      "createdAt": "2023-01-20T02:27:58.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Cause you can't take a message from a validator that you saw before",
+      "createdAt": "2023-01-20T02:28:22.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't see a principled reason to think the honest users by default will win any form of these races",
+      "createdAt": "2023-01-20T02:28:38.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "(or, necessarily, lose)",
+      "createdAt": "2023-01-20T02:28:43.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "honest actors with safe keys should just hold off 3 days",
+      "createdAt": "2023-01-20T02:29:00.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "imo",
+      "createdAt": "2023-01-20T02:29:06.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "once the dust settles it'll be an empty queue and no chaos",
+      "createdAt": "2023-01-20T02:29:23.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Well, if you lost hundreds of validators and are in contact with kraken as some banned people in this server are , you may win a race. But I like the idea of a stack cause then users that are not racing are encouraged to wait",
+      "createdAt": "2023-01-20T02:30:14.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Instead of asking Tim to post in a blog",
+      "createdAt": "2023-01-20T02:30:31.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "what does posting in a blog accomplish?",
+      "createdAt": "2023-01-20T02:30:57.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "That pools don't flood at the boundary",
+      "createdAt": "2023-01-20T02:31:25.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "This attempts to accomplish something like that without expecting people to behave altruistically",
+      "createdAt": "2023-01-20T02:31:46.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "well i think a blog for 'hey, dont stress, you dont win if you're early' is still the right message",
+      "createdAt": "2023-01-20T02:31:51.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah but with Nimbus strategy you literally win if you're late",
+      "createdAt": "2023-01-20T02:32:29.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is practically a topic that requires a quiet ale a the end of a day",
+      "createdAt": "2023-01-20T02:32:38.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Which is a good thing",
+      "createdAt": "2023-01-20T02:32:39.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Cc <@308223150725005322> WDYT about changing this in our list, it's probably a two liner since it's doubly linked",
+      "createdAt": "2023-01-20T02:33:45.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "if its clearly defined across everywhere, thats where dishonest actors can win, just saying heh",
+      "createdAt": "2023-01-20T02:35:03.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "it it's roll the dice and you may just get lucky, that's a lot more complicated",
+      "createdAt": "2023-01-20T02:35:52.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah, that's why I still think the idea of moderate (hundreds-to-low-thousands) sized set, with replace-random strategy has value",
+      "createdAt": "2023-01-20T02:35:58.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "enough so that even with 5k validators, say, it's not likely to run out",
+      "createdAt": "2023-01-20T02:36:25.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "all i'd say is remember the KISS principle",
+      "createdAt": "2023-01-20T02:36:27.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "(keep-it-simple-stupid)",
+      "createdAt": "2023-01-20T02:36:40.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Wait <@654267572107083777> by replaces older messages with newer ones you mean you will take a conflicting message for a validator index that you already had in the pool? That's definitely against the spec (or the spec is not rightly worded)",
+      "createdAt": "2023-01-20T02:36:55.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, that's why I did the stack-like approach. simpler.",
+      "createdAt": "2023-01-20T02:36:57.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "no, if it's already in queue, it won't be gossip-accepted",
+      "createdAt": "2023-01-20T02:37:20.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "per usual gossip conditions",
+      "createdAt": "2023-01-20T02:37:30.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah ok, so i mis-understood, its a race still",
+      "createdAt": "2023-01-20T02:37:38.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah ok we're in the right page then, just use a Lifo structure to propose blocks",
+      "createdAt": "2023-01-20T02:38:07.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I like this idea",
+      "createdAt": "2023-01-20T02:38:14.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "the honest validator spec, I'd note, says nothing about even putting nonzero number of these changes in a proposed block",
+      "createdAt": "2023-01-20T02:38:26.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ooo I also like the LIFO",
+      "createdAt": "2023-01-20T02:38:49.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "a really selfish client, consistent with honest validator + other specs, might have some pool, might not, but would just ignore it",
+      "createdAt": "2023-01-20T02:39:17.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah this is an omission IMO",
+      "createdAt": "2023-01-20T02:39:17.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "except for its own validators",
+      "createdAt": "2023-01-20T02:39:25.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "had considered a private queue and a gossip queue and read gossip second",
+      "createdAt": "2023-01-20T02:39:40.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "btu its more complicated than required given it's a 3 day window to be clean",
+      "createdAt": "2023-01-20T02:39:54.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "there's no rewards, no slashing condition, no check like for deposits of, there are outstanding changes to include, you must include them, etc",
+      "createdAt": "2023-01-20T02:40:17.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah I mentioned this to Misha before, if you want to have a smooth fork probably we shouldn't even gossip 🙂",
+      "createdAt": "2023-01-20T02:40:17.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "i wouldnt be gossiping the private pre-fork changes until like an epoch in, maybe longer",
+      "createdAt": "2023-01-20T02:40:46.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "especially if you want them actually accepted amongst the chaos",
+      "createdAt": "2023-01-20T02:41:00.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "but time will tell",
+      "createdAt": "2023-01-20T02:41:05.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "well, there's some real issue here, and there's DOS potential. because of the BLS verification",
+      "createdAt": "2023-01-20T02:42:07.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "ddos, flooding global topic, yeh",
+      "createdAt": "2023-01-20T02:42:29.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah I'll be advocating for the Lifo structure at prysm. Definitely no con that I can see and there are obvious pros",
+      "createdAt": "2023-01-20T02:42:33.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "con is you disadvantage your own stuff thats at the back of the stack because it went in pre-capella i guess",
+      "createdAt": "2023-01-20T02:43:05.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "worth disincentivizing IMO",
+      "createdAt": "2023-01-20T02:43:41.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "just dont allow it 😉",
+      "createdAt": "2023-01-20T02:43:49.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "simples",
+      "createdAt": "2023-01-20T02:43:51.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "the queue-up-before-capella idea",
+      "createdAt": "2023-01-20T02:43:55.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "our bls api will pass it to gossip, gossip will say 'bugger off you're early'",
+      "createdAt": "2023-01-20T02:44:19.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "is that spec-legal? I after the previous discussion about that here, I read the spec closely while implementing it and it's not obvious to me",
+      "createdAt": "2023-01-20T02:44:45.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "i mean it wont get pushed, it'll result in failure messages to users and not gossiped",
+      "createdAt": "2023-01-20T02:44:46.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "wall clock is start time",
+      "createdAt": "2023-01-20T02:44:55.913000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "either way -- it's written as if the acceptance and broadcast conditions are more or less the same",
+      "createdAt": "2023-01-20T02:45:05.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "so if its not valid, i dont accept on teh bls api",
+      "createdAt": "2023-01-20T02:45:07.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "for the 200 response",
+      "createdAt": "2023-01-20T02:45:11.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeh so i can only respond 200 once i can gossip",
+      "createdAt": "2023-01-20T02:45:21.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "which isn't consistent with pre-capella",
+      "createdAt": "2023-01-20T02:45:29.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "before that, failing validation is perfectly reasonable",
+      "createdAt": "2023-01-20T02:45:33.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "mmmm..... its close",
+      "createdAt": "2023-01-20T02:45:43.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "That disadvantage is minimal: users want to be safe, not early, 3 days difference doesn't matter to anyone",
+      "createdAt": "2023-01-20T02:45:54.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, but it does pass the `process_bls_to_execution_change` conditions?",
+      "createdAt": "2023-01-20T02:45:55.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "they can be safe - once the channel is open",
+      "createdAt": "2023-01-20T02:46:06.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "because it's only the gossip conditions which require capella",
+      "createdAt": "2023-01-20T02:46:09.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "definteily open to discuss this next wek",
+      "createdAt": "2023-01-20T02:46:15.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "and it's not clear that the REST API specifies one or the other to me",
+      "createdAt": "2023-01-20T02:46:24.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "mm i thought the rest api was relatively clear",
+      "createdAt": "2023-01-20T02:46:36.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "200 if you can gossip",
+      "createdAt": "2023-01-20T02:46:49.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "... and pre wall-clock you cant",
+      "createdAt": "2023-01-20T02:47:00.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "",
+      "content": "absoutely, likewise",
+      "createdAt": "2023-01-20T02:47:02.988000+00:00",
+      "attachments": []
+    }
+  ]
+}

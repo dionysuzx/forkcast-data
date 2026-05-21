@@ -1,0 +1,490 @@
+{
+  "schemaVersion": 1,
+  "channel": "witti",
+  "date": "2020-06-04",
+  "messageCount": 60,
+  "sourceHash": "9076e7477db6650df5c67d7f9b62be0958d8d41c8e6448759f852defe6832842",
+  "searchText": "A short question out of curiosity (I kind of just started to dig into Eth2.0 😉): Did I get it right that beside Witti or the Prysm testnet, there will be an \"official\" eth2-testnet soon (based on spec 0.12.1)? wohoo, my nimbus is synced up to head 🥳 <@!710132892197453824> https://github.com/goerli/witti/issues/17 <@203220829473996800> do you know the metrics url for nimbus for the eth2stats client? There's no docu yet for this in the repo.. I'll look, 1 sec Hmm, I don't have the metrics configured for my previous schlesi nimbus node But nimbus should support it, although with less metrics gauges than prysm/teku/lighthouse quick search in their source says `BASE_METRICS_PORT=8008` and configurable with: ``` --metrics \\ --metrics-address=\"127.0.0.1\" \\ --metrics-port=\"some port here\" \\ ``` <@!645357884300853258> Hope that helps. It's awesome that you're pushing nimbus onto witti. I currently don't have time for that, but will join with a nimbus node later again for sure 🙂 help message says the same, but even with all those options set the port doesn't show up in `netstat -nlp`. <@449019668296892420> bug? the metrics sit behind an insecure http server, so they need to be enabled with an extra `make NIMFLAGS=\"-d:insecure\" witti` during build (https://github.com/status-im/nim-beacon-chain#visualising-simulation-metrics) <@449019668296892420> <@!386151184869752834> getting there, but it still fails because process_resident_memory_bytes is not explicitly declared as `TYPE gauge`. Better fix this in nimbus or in eth2stats? eth2stats doesn't realize that the whole section is marked as `gauge` I'm not sure tbh - that would largely depend on what the prometheus specification says is correct - let me summon our metrics wizard <@456226577798135808>talpalaru It appears like this, on http://127.0.0.1:8008/metrics: ```text # HELP process_info CPU and memory usage # TYPE process_info gauge process_virtual_memory_bytes 471379968.0 process_resident_memory_bytes 253702144.0 process_start_time_seconds 1591283054.55 process_cpu_seconds_total 22.41 process_max_fds 1024.0 process_open_fds 19.0 ``` \"All lines for a given metric must be provided as one single group, with the optional HELP and TYPE lines first (in no particular order).\" - https://prometheus.io/docs/instrumenting/exposition_formats/#grouping-and-sorting Are you assuming that those HELP and TYPE lines are mandatory? For the other clients each of the metric fields has its own `HELP` and `TYPE` line. I wouldn't say those are mandatory, but they are expected by the current eth2stats client OK. It would make my code more verbose, but it's doable on my side. https://github.com/Alethio/eth2stats-client/blob/9ebd46e2415c0e50b54c9eab504ec1bb31f33235/watcher/metrics/metrics.go#L85 This is what eth2stats client currently does for metrics extraction Do you have the exact error produced by that for our metrics? Found `TextToMetricFamilies()`: https://github.com/prometheus/common/blob/df021da9b3f7560c0f38880d5817e9db13f63fdd/expfmt/text_parse.go#L100 The error I'm getting is this one: https://github.com/Alethio/eth2stats-client/blob/9ebd46e2415c0e50b54c9eab504ec1bb31f33235/watcher/metrics/metrics.go#L101 Any idea where `GetGauge()` is coming from? The default type for a sample that doesn't match a \"# TYPE\" comment in a metric family seems to be `dto.MetricType_UNTYPED` so looking at the prom docs, it looks like putting multiple metrics without a type line each is valid: https://github.com/prometheus/docs/blob/master/content/docs/instrumenting/exposition_formats.md#text-format-example it may be the prometheus library that we are using to extract the data , it s quite picky, and a gauge type is expected will try and look at it later tonight as well > The default type for a sample that doesn't match a \"# TYPE\" comment in a metric family seems to be `dto.MetricType_UNTYPED` <@519657611394547732> GetGauge is from a prometheus parsing lib So is `GetUntyped()` ;-) yeah, which would then make it fail for prysm and teku :))) i could make it try untyped if it fails gauge but sooo fugly 🙂 Yes, making it typed identically for all clients sounds cleaner imo just by looking at that example from spec, I'd assume it's stateful and uses whatever type it last saw? Should next_fork_version on Witti be 113? If so, I'm seeing a node with the correct fork_digest and next_fork_epoch, but the wrong next_fork_version. Does anyone recognize this node? I am omitting your ip, but this is the info i have ```json [ { \"node_id\": \"9262472bf7063668ac1fc20dc3db9027abbddba4bb0f6fb29d1588e24954ecf4\", \"next_fork_version\": 0, \"next_fork_epoch\": 18446744073709552000, \"fork_digest\": \"f6775d07\", \"tcp4\": 13000, \"udp4\": 12000, \"subnet_ids\": [14], \"seq_no\": 2140, \"city\": \"Madrid\", \"country\": \"Spain\" } ] ``` Witti is small, the only user in spain on eth2stats is \"Agusx1211 🐙\" running Prysm hmm ... is it tracking the head? Client version says: \"Prysm/Git commit: {STABLE_GIT_COMMIT}. Built at: 2020-06-03T16:47:23Z\" - looks like git was not available during the build. But at least we've the build time Yes, it's tracking the head Question really is, do we have another user from spain? Eth2stats says it's running in madrid. Does that match your info? Nvm, can't read, yes it matches I can also tell you that this node is subscribed to subnet_id 14 so it *seems* like a validating node with one validator attached Sounds right, Agus is likely validating, he has attestations in his attestation pool showing on eth2stats I tagged you in prysm discord, we can find just talk with Agus and see what prysm version is affected. I think it's an older bug ok thanks...i'll dbl check and see if i see other Madrid nodes. BTW, it would make sense bc i see quite a few fork_id mismatches on topaz update eth2stats client to try extracting mem from untyped as well, did not have a chance to test it yet with lighthouse <https://goerli.etherscan.io/tx/0xa2784acaf5fdcf8cb1e9fe4d416d84a23aa5ff37677846f2a4bf1ce7f9bb1dd4> <@!203220829473996800> :^) *waiting* <@!386151184869752834> looks like it's working, at least for prysm, lighthouse, nimbus & teku Cool, was about to make one for Topaz <@!97774605351010304> Do we know who owns that validator? It would be nice if we can learn how they ended up making the bad deposit, and fix whatever tool they used *not make a deposit, but sign other operations For witti, before we get the bad validator slashed, it would be fun to try and make an attestation using it Also, not to take away the fun, but Milagro BLS, through the python bindings at least, accepts the signature So what's left is: checking teku BLS, and possibly Nimbus. And there is always a chance that a client has an edge case for this special BLS point, and splits off not due to BLS > Do we know who owns that validator? It would be nice if we can learn how they ended up making the bad deposit, and fix whatever tool they used <@203220829473996800> i wish, maybe if this gets public 🙉 I have a malicious proposer branch. Let me know If anyone is keen to slash my validators. https://github.com/prysmaticlabs/prysm/pull/6056",
+  "excerpts": [
+    {
+      "author": "tobiwo",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "A short question out of curiosity (I kind of just started to dig into Eth2.0 😉): Did I get it right that beside Witti or the Prysm testnet, there will be an \"official\" eth2-testnet soon (based on spec 0.12.1)?",
+      "createdAt": "2020-06-04T07:38:09.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "wohoo, my nimbus is synced up to head 🥳",
+      "createdAt": "2020-06-04T08:28:50.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!710132892197453824> https://github.com/goerli/witti/issues/17",
+      "createdAt": "2020-06-04T08:47:45.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@203220829473996800> do you know the metrics url for nimbus for the eth2stats client? There's no docu yet for this in the repo..",
+      "createdAt": "2020-06-04T13:49:20.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll look, 1 sec",
+      "createdAt": "2020-06-04T13:53:55.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hmm, I don't have the metrics configured for my previous schlesi nimbus node",
+      "createdAt": "2020-06-04T13:54:51.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But nimbus should support it, although with less metrics gauges than prysm/teku/lighthouse",
+      "createdAt": "2020-06-04T13:55:20.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "quick search in their source says `BASE_METRICS_PORT=8008` and configurable with:\n```\n  --metrics \\\n  --metrics-address=\"127.0.0.1\" \\\n  --metrics-port=\"some port here\" \\\n```",
+      "createdAt": "2020-06-04T13:56:51.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!645357884300853258> Hope that helps. It's awesome that you're pushing nimbus onto witti. I currently don't have time for that, but will join with a nimbus node later again for sure 🙂",
+      "createdAt": "2020-06-04T13:57:44.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "help message says the same, but even with all those options set the port doesn't show up in `netstat -nlp`. <@449019668296892420> bug?",
+      "createdAt": "2020-06-04T14:12:26.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the metrics sit behind an insecure http server, so they need to be enabled with an extra `make NIMFLAGS=\"-d:insecure\" witti` during build (https://github.com/status-im/nim-beacon-chain#visualising-simulation-metrics)",
+      "createdAt": "2020-06-04T14:15:34.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@449019668296892420> <@!386151184869752834> getting there, but it still fails because process_resident_memory_bytes is not explicitly declared as `TYPE gauge`. Better fix this in nimbus or in eth2stats?",
+      "createdAt": "2020-06-04T14:54:16.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "eth2stats doesn't realize that the whole section is marked as `gauge`",
+      "createdAt": "2020-06-04T14:55:45.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm not sure tbh - that would largely depend on what the prometheus specification says is correct - let me summon our metrics wizard <@456226577798135808>talpalaru",
+      "createdAt": "2020-06-04T14:59:59.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It appears like this, on http://127.0.0.1:8008/metrics:\n```text\n# HELP process_info CPU and memory usage\n# TYPE process_info gauge\nprocess_virtual_memory_bytes 471379968.0\nprocess_resident_memory_bytes 253702144.0\nprocess_start_time_seconds 1591283054.55\nprocess_cpu_seconds_total 22.41\nprocess_max_fds 1024.0\nprocess_open_fds 19.0\n```",
+      "createdAt": "2020-06-04T15:05:58.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "\"All lines for a given metric must be provided as one single group, with the optional HELP and TYPE lines first (in no particular order).\" - https://prometheus.io/docs/instrumenting/exposition_formats/#grouping-and-sorting",
+      "createdAt": "2020-06-04T15:08:17.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Are you assuming that those HELP and TYPE lines are mandatory?",
+      "createdAt": "2020-06-04T15:08:34.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For the other clients each of the metric fields has its own `HELP` and `TYPE` line.\nI wouldn't say those are mandatory, but they are expected by the current eth2stats client",
+      "createdAt": "2020-06-04T15:09:42.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "OK.",
+      "createdAt": "2020-06-04T15:10:08.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It would make my code more verbose, but it's doable on my side.",
+      "createdAt": "2020-06-04T15:11:47.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/Alethio/eth2stats-client/blob/9ebd46e2415c0e50b54c9eab504ec1bb31f33235/watcher/metrics/metrics.go#L85\n\nThis is what eth2stats client currently does for metrics extraction",
+      "createdAt": "2020-06-04T15:11:53.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you have the exact error produced by that for our metrics?",
+      "createdAt": "2020-06-04T15:16:46.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Found `TextToMetricFamilies()`: https://github.com/prometheus/common/blob/df021da9b3f7560c0f38880d5817e9db13f63fdd/expfmt/text_parse.go#L100",
+      "createdAt": "2020-06-04T15:21:14.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The error I'm getting is this one:\nhttps://github.com/Alethio/eth2stats-client/blob/9ebd46e2415c0e50b54c9eab504ec1bb31f33235/watcher/metrics/metrics.go#L101",
+      "createdAt": "2020-06-04T15:24:18.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Any idea where `GetGauge()` is coming from?",
+      "createdAt": "2020-06-04T15:27:23.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The default type for a sample that doesn't match a \"# TYPE\" comment in a metric family seems to be `dto.MetricType_UNTYPED`",
+      "createdAt": "2020-06-04T15:34:07.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so looking at the prom docs, it looks like putting multiple metrics without a type line each is valid: https://github.com/prometheus/docs/blob/master/content/docs/instrumenting/exposition_formats.md#text-format-example",
+      "createdAt": "2020-06-04T16:53:16.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it may be the prometheus library that we are using to extract the data , it s quite picky, and a gauge type is expected",
+      "createdAt": "2020-06-04T17:19:19.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "will try and look at it later tonight as well",
+      "createdAt": "2020-06-04T17:19:32.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> The default type for a sample that doesn't match a \"# TYPE\" comment in a metric family seems to be `dto.MetricType_UNTYPED`\n<@519657611394547732>  GetGauge is from a prometheus parsing lib",
+      "createdAt": "2020-06-04T17:20:58.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefantalpalaru",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So is `GetUntyped()` ;-)",
+      "createdAt": "2020-06-04T17:22:40.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, which would then make it fail for prysm and teku :)))",
+      "createdAt": "2020-06-04T17:27:00.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i could make it try untyped if it fails gauge",
+      "createdAt": "2020-06-04T17:27:20.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but sooo fugly 🙂",
+      "createdAt": "2020-06-04T17:27:29.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, making it typed identically for all clients sounds cleaner imo",
+      "createdAt": "2020-06-04T18:32:18.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "just by looking at that example from spec, I'd assume it's stateful and uses whatever type it last saw?",
+      "createdAt": "2020-06-04T18:56:14.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Should next_fork_version on Witti be 113?  If so, I'm  seeing a node with the correct fork_digest and next_fork_epoch, but the wrong next_fork_version.  Does anyone recognize this node? \n\nI am omitting your ip, but this is the info i have\n\n```json\n[\n    {\n        \"node_id\": \"9262472bf7063668ac1fc20dc3db9027abbddba4bb0f6fb29d1588e24954ecf4\",\n        \"next_fork_version\": 0,\n        \"next_fork_epoch\": 18446744073709552000,\n        \"fork_digest\": \"f6775d07\",\n        \"tcp4\": 13000,\n        \"udp4\": 12000,\n        \"subnet_ids\": [14],\n        \"seq_no\": 2140,\n        \"city\": \"Madrid\",\n        \"country\": \"Spain\"\n    }\n]\n```",
+      "createdAt": "2020-06-04T19:22:50.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Witti is small, the only user in spain on eth2stats is \"Agusx1211 🐙\" running Prysm",
+      "createdAt": "2020-06-04T19:25:01.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hmm ... is it tracking the head?",
+      "createdAt": "2020-06-04T19:26:40.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Client version says: \"Prysm/Git commit: {STABLE_GIT_COMMIT}. Built at: 2020-06-03T16:47:23Z\"  - looks like git was not available during the build. But at least we've the build time",
+      "createdAt": "2020-06-04T19:26:55.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, it's tracking the head",
+      "createdAt": "2020-06-04T19:27:02.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Question really is, do we have another user from spain? Eth2stats says it's running in madrid. Does that match your info?",
+      "createdAt": "2020-06-04T19:28:04.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Nvm, can't read, yes it matches",
+      "createdAt": "2020-06-04T19:28:28.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I can also tell you that this node is subscribed to subnet_id 14",
+      "createdAt": "2020-06-04T19:28:57.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so it *seems* like a validating node with one validator attached",
+      "createdAt": "2020-06-04T19:29:15.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sounds right, Agus is likely validating, he has attestations in his attestation pool showing on eth2stats",
+      "createdAt": "2020-06-04T19:30:06.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I tagged you in prysm discord, we can find just talk with Agus and see what prysm version is affected. I think it's an older bug",
+      "createdAt": "2020-06-04T19:30:39.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jonny.derp",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok thanks...i'll dbl check and see if i see other Madrid nodes.  BTW, it would make sense bc i see quite a few fork_id mismatches on topaz",
+      "createdAt": "2020-06-04T19:34:29.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "alex.g.t",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "update eth2stats client to try extracting mem from untyped as well, did not have a chance to test it yet with lighthouse",
+      "createdAt": "2020-06-04T20:46:32.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "butta",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<https://goerli.etherscan.io/tx/0xa2784acaf5fdcf8cb1e9fe4d416d84a23aa5ff37677846f2a4bf1ce7f9bb1dd4>\n<@!203220829473996800>  :^)",
+      "createdAt": "2020-06-04T21:21:19.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "butta",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "*waiting*",
+      "createdAt": "2020-06-04T21:21:28.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "torfbolt",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!386151184869752834> looks like it's working, at least for prysm, lighthouse, nimbus & teku",
+      "createdAt": "2020-06-04T21:28:34.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Cool, was about to make one for Topaz <@!97774605351010304>",
+      "createdAt": "2020-06-04T21:32:01.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do we know who owns that validator? It would be nice if we can learn how they ended up making the bad deposit, and fix whatever tool they used",
+      "createdAt": "2020-06-04T21:32:38.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "*not make a deposit, but sign other operations",
+      "createdAt": "2020-06-04T21:33:02.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For witti, before we get the bad validator slashed, it would be fun to try and make an attestation using it",
+      "createdAt": "2020-06-04T21:33:31.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Also, not to take away the fun, but Milagro BLS, through the python bindings at least, accepts the signature",
+      "createdAt": "2020-06-04T21:35:54.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So what's left is: checking teku BLS, and possibly Nimbus. And there is always a chance that a client has an edge case for this special BLS point, and splits off not due to BLS",
+      "createdAt": "2020-06-04T21:36:58.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "butta",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Do we know who owns that validator? It would be nice if we can learn how they ended up making the bad deposit, and fix whatever tool they used\n<@203220829473996800>  i wish, maybe if this gets public 🙉",
+      "createdAt": "2020-06-04T21:38:43.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terence0083",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have a malicious proposer branch. Let me know If anyone is keen to slash my validators. https://github.com/prysmaticlabs/prysm/pull/6056",
+      "createdAt": "2020-06-04T21:53:50.401000+00:00",
+      "attachments": []
+    }
+  ]
+}

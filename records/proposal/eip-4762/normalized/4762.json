@@ -1,0 +1,53 @@
+{
+  "id": 4762,
+  "title": "EIP-4762: Statelessness gas cost changes",
+  "status": "Draft",
+  "description": "Changes the gas schedule to reflect the costs of creating a witness by requiring clients update their database layout to match.",
+  "laymanDescription": "This restructures how gas costs work to prepare for stateless clients - nodes that can validate blocks without storing the entire blockchain state. The changes ensure gas costs accurately reflect the new computational model.",
+  "author": "Guillaume Ballet (@gballet), Vitalik Buterin (@vbuterin), Dankrad Feist (@dankrad), Ignacio Hagopian (@jsign), Tanishq Jasoria (@tanishqjasoria), Gajinder Singh (@g11tech)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2022-02-03",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-4762-statelessness-gas-cost-changes/8714",
+  "requires": [],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Indirect benefits through improved network decentralization and faster node syncing, but gas cost changes may affect some transaction patterns."
+    },
+    "appDevs": {
+      "description": "Some operations may have different gas costs, requiring optimization of smart contracts for the new stateless execution model."
+    },
+    "walletDevs": {
+      "description": "Need to update gas estimation for transactions affected by the new cost model, but most operations remain similar."
+    },
+    "toolingInfra": {
+      "description": "Major updates needed for gas estimation, transaction simulation, and stateless proof generation. Block explorers need stateless verification capabilities."
+    },
+    "layer2s": {
+      "description": "May need to adjust for new gas costs in settlement transactions and state access patterns."
+    },
+    "stakersNodes": {
+      "description": "Can run much lighter nodes using stateless validation, dramatically reducing storage and syncing requirements while maintaining security."
+    },
+    "clClients": {
+      "description": "Minimal impact as this primarily affects execution layer gas metering and state access patterns."
+    },
+    "elClients": {
+      "description": "Major implementation work required for new gas metering model, stateless execution environment, and witness data handling."
+    }
+  },
+  "benefits": [
+    "Enables stateless client operation with dramatically faster sync",
+    "Reduces storage requirements for node operators",
+    "Improves network decentralization through lower barriers",
+    "Foundation for Verkle tree state transition"
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP introduces changes in the gas schedule to reflect the costs of creating a witness. It requires clients to update their database layout to match this, so as to avoid potential DoS attacks. ## Motivation The introduction of Verkle trees into Ethereum requires fundamental changes and as a preparation, this EIP is targeting the fork coming right before the verkle tree fork, in order to incentivize Dapp developers to adopt the new storage model, and ample time to adjust to it. It also incentivizes client developers to migrate their database format ahead of the verkle fork. ## Specification ### Helper functions ```python def get_storage_slot_tree_keys(storage_key: int) -> [int, int]: if storage_key < (CODE_OFFSET - HEADER_STORAGE_OFFSET): pos = HEADER_STORAGE_OFFSET + storage_key else: pos = MAIN_STORAGE_OFFSET + storage_key return ( pos // 256, pos % 256 ) ``` ### Access events Whenever the state is read, one or more of the access events of the form `(address, sub_key, leaf_key)` take place, determining what data is being accessed. We define access events as follows: #### Access events for account headers When: 1. a non-precompile which is also not a system contract is the target of a `*CALL`, `CALLCODE`, `SELFDESTRUCT`, `EXTCODESIZE`, or `EXTCODECOPY` opcode, 2. a non-precompile which is also not a system contract is the target address of a contract creation whose initcode starts execution, 3. any address is the target of the `BALANCE` opcode 4. a _deployed_ contract calls `CODECOPY` process this access event: ``` (address, 0, BASIC_DATA_LEAF_KEY) ``` Note: a non-value-bearing `SELFDESTRUCT`, `*CALL` or `CALLCODE`, targeting a precompile or a system contract, will not cause the `BASIC_DATA_LEAF_KEY` to be added to the witness. If a `*CALL`, `CALLCODE` or `SELFDESTRUCT` is value-bearing (ie. it transfers nonzero wei), whether or not the `callee` is a precompile or a system contract, process this additional access event: ``` (caller, 0, BASIC_DATA_LEAF_KEY) ``` Note: when checking for the existence of the `callee`, the existence check is done by validating that there is an extension-and-suffix tree at the corresponding stem, and does not rely on `CODEHASH_LEAF_KEY`. When calling `EXTCODEHASH`, process the access event: ``` (address, 0, CODEHASH_LEAF_KEY) ``` Note that precompiles and system contracts are excluded, as their hashes are known to the client. When a contract is created, process these access events: ``` (contract_address, 0, BASIC_DATA_LEAF_KEY) (contract_address, 0, CODEHASH_LEAF_KEY) ``` #### Access events for storage `SLOAD` and `SSTORE` opcodes with a given address and key process an access event of the form ``` (address, tree_key, sub_key) ``` Where `tree_key` and `sub_key` are computed as `tree_key, sub_key = get_storage_slot_tree_keys(key)` #### Access events for code In the conditions below, “chunk `chunk_id` is accessed” is understood to mean an access event of the form ``` (address, (chunk_id + 128) // 256, (chunk_id + 128) % 256) ``` * At each step of EVM execution, if and only if `PC < len(code)`, chunk `PC // CHUNK_SIZE` (where `PC` is the current program counter) of the callee is accessed. In particular, note the following corner cases: * The destination of a `JUMP` (or positively evaluated `JUMPI`) is considered to be accessed, even if the destination is not a jumpdest or is inside pushdata * The destination of a `JUMPI` is not considered to be accessed if the jump conditional is `false`. * The destination of a jump is not considered to be accessed if the execution gets to the jump opcode but does not have enough gas to pay for the gas cost of executing the `JUMP` opcode (including chunk access cost if the `JUMP` is the first opcode in a not-yet-accessed chunk) * The destination of a jump is not considered to be accessed if it is beyond the code (`destination >= len(code)`) * If code stops execution by walking past the end of the code, `PC = len(code)` is not considered to be accessed * If the current step of EVM execution is a `PUSH{n}`, all chunks `(PC // CHUNK_SIZE) <= chunk_index <= ((PC + n) // CHUNK_SIZE)` of the callee are accessed. * If a nonzero-read-size `CODECOPY` or `EXTCODECOPY` read bytes `x...y` inclusive, all chunks `(x // CHUNK_SIZE) <= chunk_index <= (min(y, code_size - 1) // CHUNK_SIZE)` of the accessed contract are accessed. * Example 1: for a `CODECOPY` with start position 100, read size 50, `code_size = 200`, `x = 100` and `y = 149` * Example 2: for a `CODECOPY` with start position 600, read size 0, no chunks are accessed * Example 3: for a `CODECOPY` with start position 1500, read size 2000, `code_size = 3100`, `x = 1500` and `y = 3099` * `CODESIZE`, `EXTCODESIZE` and `EXTCODEHASH` do NOT access any chunks. When a contract is created, access chunks `0 ... (len(code)+30)//31` ### Write Events We define **write events** as follows. Note that when a write takes place, an access event also takes place (so the definition below should be a subset of the definition of access events). A write event is of the form `(address, sub_key, leaf_key)`, determining what data is being written to. #### Write events for account headers When a nonzero-balance-sending `CALL`, `CALLCODE` or `SELFDESTRUCT` with a given sender and recipient takes place, process these write events: ``` (caller, 0, BASIC_DATA_LEAF_KEY) (callee, 0, BASIC_DATA_LEAF_KEY) ``` if no account exists at `callee_address`, also process: ``` (callee, 0, CODEHASH_LEAF_KEY) ``` When a contract creation is initialized, process these write events: ``` (contract_address, 0, BASIC_DATA_LEAF_KEY) (contract_address, 0, CODEHASH_LEAF_KEY) ``` #### Write events for storage `SSTORE` opcodes with a given `address` and `key` process a write event of the form ``` (address, tree_key, sub_key) ``` Where `tree_key` and `sub_key` are computed as `tree_key, sub_key = get_storage_slot_tree_keys(key)` #### Write events for code When a contract is created, process the write events: ```python ( addres"
+}

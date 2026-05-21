@@ -1,0 +1,786 @@
+{
+  "schemaVersion": 1,
+  "channel": "light-clients",
+  "date": "2021-05-26",
+  "messageCount": 97,
+  "sourceHash": "71f17adb55f29135ea3e2cec8b24a07351a320a1eb703f66218964acf4d24aeb",
+  "searchText": "cc. <@273808422753796097> here cause it's your reform. The concern we are seeing with <@144468805697929216> is that rewards for being in a sync committee will happen very sporadically and concentrate on very few validators. This will create a large disparity of earnings between those validators that happen to be more often in committees than those that don't. This is already notorious with block proposals, and now that blocks are not worth that much. With sync committees this becomes more so because participation is expected to be about once a year. My proposal is simply to have the weights add up to more than the denominator for example as so: ``` TIMELY_SOURCE_WEIGHT uint64(14) TIMELY_TARGET_WEIGHT uint64(28) TIMELY_HEAD_WEIGHT uint64(14) SYNC_PENALTY_WEIGHT uint64(8) PROPOSER_WEIGHT uint64(8) WEIGHT_DENOMINATOR uint64(64) ``` And instead of applying a reward in process_sync_committee apply a penalty weighted by SYNC_PENALTY_WEIGHT. In the long run validators will earn the same, and well performing validators will not be penalized if their hardware allows them to check signatures each slot. > With sync committees this becomes more so because participation is expected to be about once a year wait wait how is this true Sync committee rewards should be 512 times smaller than proposer rewards Aaah the idea is that because you get into a sync committee for a long duration hmm, the problem with switching to penalties is that now you have an anti-lottery for anyone who's offline And imo anti-lotteries are worse than lotteries honestly, not in this case 1) Participation rate is over 99% so this anti-lottery will be with probability of about `3*10^{-5}` 2) The current scheme has committee members earning more than 30 times the regular amount for 2 days If they're offline then the penalty should be the full reward, so no additional impact over where things are today. I think the sync penalty will be greater than the full reward if we do penalty-based yes it will be a lot more, but again, this affects very very few validators with 3*10^{-5} probability vs the current scheme that affects essentially everyone with my proposal they'll get essentially a full base reward of penalty per slot, instead of epoch Any reason we can't divide the penalty by SLOTS_PER_EPOCH to fix that? btw I do think there's a big risk that any change that's not just a parameter tweak is too late for Altair lowering the impact of the reward/penalty is fine by me, I assume that the constants were decided analyzing possible attacks. But just changing the denominator to 256 and assigning the numerator to be 2 that´s fine by me too (namely assigning very little weight to the reward) Either changing the weight to be much less should be trivial. My proposal is also very simple since there is no logic change in client implementations, it's simply changing a sign in one of the functions I'd be ok with decreasing the weight and/or cutting committee duration to 1 day as shorter-term fixes I think reverting to penalty is trivial both in the specs and in the implementations and I could submit PRs both to the specs and to prysm quickly It is really important to understand that this is a serious issue for individual stakers. If a single validator earns 7% on their 32 Ether this is ~2.24ETH per year. With the proposed system a validator that isn't selected to be in a sync committee will have that reduced to ~1.96ETH. If they are selected to be in a single sync committee that goes up to ~2.5ETH. The difference is significant, and will induce validators to move towards pools so as to avoid being unlucky, in the same way that miners go to pools to have a regular payout. (As an aside, there needs to be some time between the 10 PRs-a-day phase of an upgrade and the \"it's all fixed we can't change anything\" phase of an upgrade for those who aren't doing the day-to-day work of building the spec to have their say.) Definitely look forward to seeing what the spec diff would be like. My default instinct is that it's not that simple, but we'll see It's definitely not JUST \"flipping signs\", because you also need to make sure that expected rewards for participating validators add up to a base reward \"No reward for participation but a penalty for non-participation\" is a fundamentally new mechanic that does not yet exist in the beacon chain protocol Modulo tests, the diff should be trivial. Will give it a shot later today The adding up to base reward is already contemplated in my choice of weights above <@!273808422753796097> It seems to me that on the `specs/altair` directory of the specs these would be the only necessary changes. Additional care perhaps needs to be taken if we do not want to penalize missed participants at the fork. Regardless I will open an issue on the specs about this. For a single staker in current mainnet, the probability of not being in a sync committee on a month, 6 months, 1 year, and 2 years are : 95,65%, 76,33%, 57,86% and 33,37% respectively. So we will very likely see thousands of single stakers forfeiting 1/8 of their rewards in the current scheme. https://github.com/ethereum/eth2.0-specs/compare/dev...potuz:penalize-sync-comiittee?expand=1 I haven't submitted a PR cause I haven't checked the invariant of one `base_reward` per epoch, and indeed it may be currently wrong. Need to check this. I did submit the issue One thing to note is that with sync committees if you get a different head root to the next block producer (ie a block received after attestation time) your contribution cannot be included at all. So if we switch to a penalty based system committee members will be penalised even when performing their duties the best they possibly could. oh interesting ok yeah I see how this is not too terrible Which is something already happens for attesters. One slot penalty is not so bad for sync committee members. Offline for 2 days will be bad Not quite the same as attesters. They can still be included so typically still get some reward. For sync committees they’d be guaranteed to receive a full penalty. If they can only receive penalties and never rewards that’s likely to prove unpopular. I’m not saying that’s a blocker but I think it’s important to factor into our considerations. The penalty for a slot will be of the order of 33KGwei, a bad head vote is of the order of 14KGwei, I'd say they are both small and comparable Are you saying you _would_ get rewarded in this case if it's a reward and not a penalty? No you’d miss the reward too. But missing rewards is less concerning for people than getting penalised. A bad head vote anywhere except the first slot of the epoch (which would also be a bad target vote) would wind up earning rewards for the attestation. As I said, the penalty is about 14KGWei regardless on when it's included Well, to some extent. But I agree with the sentiment of <@!755590043632140352> that it depends on how regular the rewards/penalties are. If it's a rare reward, it's probably better to already slowly reward someone in pieces expecting good future behavior. Not earning something is a penalty The point of my proposal is that you have already earned the sync committee rewards by increasing the weights of the other rewards. So when you get a penalty is really exactly the same as not participating for it in the first place so even for participants that are actually offline, the final result is exactly the same as if they were offline in a rewards based system I can see the mathematical argument for that, but from experience people freak out when their balance goes down and don't notice much if their balance doesn't go up by as much as it could. So I don't think absence of reward is actually the same as a penalty. The social impact of having +50K validators not getting 1/8 of their rewards for over 2 years I'd say that it's much worse I don't know... I think people get even more upset if they see someone else is getting \"consistently\" lucky we're really talking about more than 1/3 chances of forfeiting 12,5% of your rewards in two years this is not trivial at all, not comparable to a \"I saw some red GWei on beaconcha.in\" Moreover, with all these \"large number law\" assumptions in ETH2: it is not even true that things even out on a per-validator basis. Supposing that your current validator actually gets to propose the average expected proposals late, you would have earned more than if you proposed regularly the average, since blocks are more valid now. The opposite will be for sync committee members: members at earlier stages will earn more than members later. So even if included after 2 years, single stakers will be loosing money Like I said, I don't mean this to be a blocker, but I think it is worth considering. It is not within a validators control to perform sync committee duties perfectly and it's significantly harder to perform perfectly than for attestations. So now being in a sync committee will be unlucky. If we're happy with the way that works out then that's fine, but we shouldn't go in thinking that if the validator is online they won't be penalised or that it's just like attestations - the miss rate is going to be significantly higher. With this I completely agree: we will be screwing 512 guys all the time but I claim that it is much less evil than screwing every single staker and forcing them to go to pools However, as I pointed above: the \"screwing\" is only psicological: they will earn exactly the same as in the rewards system Moderate proposal: * Put sync committee rewards into the same mechanism as attestations in that \"if you participate you get +X, if you don't participate you get -X\" * Reduce reward from 8 to 2 * Reduce committee duration from 2 days to 1 day while the second \"scrwing\" is much worse This avoids the worst aspects of other proposals: * We don't need to do weird things with proposer rewards, because they can still be proportional to the rewards of what they include * Incentive to participate only drops by 2x * Light client minimal overhead only increases by 2x (and we add a bit of security due to faster switching) * The size of the lottery drops from ~3 months of income to ~10 days of income * Being in a sync committee is still net-good as long as you get included >=50% of the time I thought about it, this actually moves from earning 32 times the regular reward to earning 4 times the regular reward for members. Still the biggest issue is the 512/150000 quotient Right, but at least it cuts the lottery size down by 8x Another problem with being *purely* penalty-only is that you would need special-case rewards for proposers, which ruins the way that incentives become much easier to reason about in altair I didn't get that last part: proposers would get the same as they do now, for each \"participant\"... But I am not against a proposal that reduces the weight for sync-committee and ends up being not too sporadic. Will have to do the math, thought that dividing by two the epochs but keeping the committee size would still make it highly not-trivial to be non-included in 2 years. Right now there's a hard rule in Altair that proposer rewards are computed *entirely* by taking the rewards of what the proposer includes and multiplying by 8/56 That stays the same in my proposal I think. I may have gotten that wrong though That's really nice because it makes the incentive alignment clear and makes it easy to adjust constants and other rules without risking accidentally making rewards not add up to a base reward But how is that possible if you don't have rewards for participants? I kept the same rewards for proposals, but changed the rewards for inclusion right but then the proposer rewards are no longer a clear function of inclusion rewards So there's two loops in `process_sync_commitee` now, one for inclusions, and one for the complement It can of course be one loop with an if statement 🙂 So in your proposal, as written, let's say everyone performs perfectly Then the rew",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "cc. <@273808422753796097> here cause it's your reform. The concern we are seeing with <@144468805697929216> is that rewards for being in a sync committee will happen very sporadically and concentrate on very few validators.  This will create a large disparity of earnings between those validators that happen to be more often in committees than those that don't. This is already notorious with block proposals, and now that blocks are not worth that much. With sync committees this becomes more so because participation is expected to be about once a year. My proposal is simply to have the weights add up to more than the denominator for example as so:\n```\nTIMELY_SOURCE_WEIGHT    uint64(14)\nTIMELY_TARGET_WEIGHT    uint64(28)\nTIMELY_HEAD_WEIGHT    uint64(14)\nSYNC_PENALTY_WEIGHT    uint64(8)\nPROPOSER_WEIGHT    uint64(8)\nWEIGHT_DENOMINATOR    uint64(64)\n```\nAnd instead of applying a reward in process_sync_committee apply a penalty weighted by SYNC_PENALTY_WEIGHT. In the long run validators will earn the same, and well performing validators will not be penalized if their hardware allows them to check signatures each slot.",
+      "createdAt": "2021-05-26T10:46:37.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "> With sync committees this becomes more so because participation is expected to be about once a year",
+      "createdAt": "2021-05-26T15:15:51.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "wait wait how is this true",
+      "createdAt": "2021-05-26T15:15:55.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Sync committee rewards should be 512 times smaller than proposer rewards",
+      "createdAt": "2021-05-26T15:16:06.222000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Aaah the idea is that because you get into a sync committee for a long duration",
+      "createdAt": "2021-05-26T15:16:21.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "hmm, the problem with switching to penalties is that now you have an anti-lottery for anyone who's offline",
+      "createdAt": "2021-05-26T15:16:43.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "And imo anti-lotteries are worse than lotteries",
+      "createdAt": "2021-05-26T15:16:59.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "honestly, not in this case\n1) Participation rate is over 99% so this anti-lottery will be with probability of about `3*10^{-5}` \n2) The current scheme has committee members earning more than 30 times the regular amount for 2 days",
+      "createdAt": "2021-05-26T15:19:48.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "If they're offline then the penalty should be the full reward, so no additional impact over where things are today.",
+      "createdAt": "2021-05-26T15:20:15.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I think the sync penalty will be greater than the full reward if we do penalty-based",
+      "createdAt": "2021-05-26T15:20:38.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes it will be a lot more, but again, this affects very very few validators with 3*10^{-5} probability vs the current scheme that affects essentially everyone",
+      "createdAt": "2021-05-26T15:21:25.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "with my proposal they'll get essentially a full base reward of penalty per slot, instead of epoch",
+      "createdAt": "2021-05-26T15:22:07.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Any reason we can't divide the penalty by SLOTS_PER_EPOCH to fix that?",
+      "createdAt": "2021-05-26T15:24:13.258000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "btw I do think there's a big risk that any change that's not just a parameter tweak is too late for Altair",
+      "createdAt": "2021-05-26T15:25:16.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "lowering the impact of the reward/penalty is fine by me, I assume that the constants were decided analyzing possible attacks. But just changing the denominator to 256 and assigning the numerator to be 2 that´s fine by me too (namely assigning very little weight to the reward)",
+      "createdAt": "2021-05-26T15:25:58.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Either changing the weight to be much less should be trivial. My proposal is also very simple since there is no logic change in client implementations, it's simply changing a sign in one of the functions",
+      "createdAt": "2021-05-26T15:27:00.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'd be ok with decreasing the weight and/or cutting committee duration to 1 day as shorter-term fixes",
+      "createdAt": "2021-05-26T15:27:26.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I think reverting to penalty is trivial both in the specs and in the implementations and I could submit PRs both to the specs and to prysm quickly",
+      "createdAt": "2021-05-26T15:27:34.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It is really important to understand that this is a serious issue for individual stakers.\n\nIf a single validator earns 7% on their 32 Ether this is ~2.24ETH per year.  With the proposed system a validator that isn't selected to be in a sync committee will have that reduced to ~1.96ETH.  If they are selected to be in a single sync committee that goes up to ~2.5ETH.  The difference is significant, and will induce validators to move towards pools so as to avoid being unlucky, in the same way that miners go to pools to have a regular payout.\n\n(As an aside, there needs to be some time between the 10 PRs-a-day phase of an upgrade and the \"it's all fixed we can't change anything\" phase of an upgrade for those who aren't doing the day-to-day work of building the spec to have their say.)",
+      "createdAt": "2021-05-26T15:29:08.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Definitely look forward to seeing what the spec diff would be like. My default instinct is that it's not that simple, but we'll see",
+      "createdAt": "2021-05-26T15:32:43.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It's definitely not JUST \"flipping signs\", because you also need to make sure that expected rewards for participating validators add up to a base reward",
+      "createdAt": "2021-05-26T15:33:02.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "\"No reward for participation but a penalty for non-participation\" is a fundamentally new mechanic that does not yet exist in the beacon chain protocol",
+      "createdAt": "2021-05-26T15:38:22.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Modulo tests, the diff should be trivial. Will give it a shot later today",
+      "createdAt": "2021-05-26T15:41:06.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The adding up to base reward is already contemplated in my choice of weights above",
+      "createdAt": "2021-05-26T15:41:39.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "<@!273808422753796097> It seems to me that on the `specs/altair` directory of the specs these would be the only necessary changes. Additional care perhaps needs to be taken if we do not want to penalize missed participants at the fork. Regardless I will open an issue on the specs about this. For a single staker in current mainnet, the probability of not being in a sync committee on a month, 6 months, 1 year, and 2 years are : 95,65%,  76,33%, 57,86% and 33,37%  respectively. So we will very likely see thousands of single stakers forfeiting 1/8 of their rewards in the current scheme.",
+      "createdAt": "2021-05-26T19:17:41.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "https://github.com/ethereum/eth2.0-specs/compare/dev...potuz:penalize-sync-comiittee?expand=1",
+      "createdAt": "2021-05-26T19:17:49.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I haven't submitted a PR cause I haven't checked the invariant of one `base_reward` per epoch, and indeed it may be currently wrong. Need to check this.  I did submit the issue",
+      "createdAt": "2021-05-26T19:48:17.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "One thing to note is that with sync committees if you get a different head root to the next block producer (ie a block received after attestation time) your contribution cannot be included at all. So if we switch to a penalty based system committee members will be penalised even when performing their duties the best they possibly could.",
+      "createdAt": "2021-05-26T20:25:17.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "oh interesting",
+      "createdAt": "2021-05-26T20:29:43.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "ok yeah I see how this is not too terrible",
+      "createdAt": "2021-05-26T20:29:49.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Which is something already happens for attesters. One slot penalty is not so bad for sync committee members. Offline for 2 days will be bad",
+      "createdAt": "2021-05-26T20:41:49.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Not quite the same as attesters. They can still be included so typically still get some reward. For sync committees they’d be guaranteed to receive a full penalty. \nIf they can only receive penalties and never rewards that’s likely to prove unpopular. \nI’m not saying that’s a blocker but I think it’s important to factor into our considerations.",
+      "createdAt": "2021-05-26T20:44:22.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The penalty for a slot will be of the order of 33KGwei, a bad head vote is of the order of 14KGwei, I'd say they are both small and comparable",
+      "createdAt": "2021-05-26T20:45:36.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Are you saying you _would_ get rewarded in this case if it's a reward and not a penalty?",
+      "createdAt": "2021-05-26T20:46:26.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "No you’d miss the reward too. But missing rewards is less concerning for people than getting penalised.",
+      "createdAt": "2021-05-26T20:47:32.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "A bad head vote anywhere except the first slot of the epoch (which would also be a bad target vote) would wind up earning rewards for the attestation.",
+      "createdAt": "2021-05-26T20:48:12.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "As I said, the penalty is about 14KGWei regardless on when it's included",
+      "createdAt": "2021-05-26T20:49:01.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Well, to some extent. But I agree with the sentiment of <@!755590043632140352>  that it depends on how regular the rewards/penalties are. If it's a rare reward, it's probably better to already slowly reward someone in pieces expecting good future behavior.",
+      "createdAt": "2021-05-26T20:49:31.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Not earning something is a penalty",
+      "createdAt": "2021-05-26T20:49:32.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The point of my proposal is that you have already earned the sync committee rewards by increasing the weights of the other rewards. So when you get a penalty is really exactly the same as not participating for it in the first place",
+      "createdAt": "2021-05-26T20:51:09.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so even for participants that are actually offline, the final result is exactly the same",
+      "createdAt": "2021-05-26T20:51:23.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "as if they were offline in a rewards based system",
+      "createdAt": "2021-05-26T20:51:32.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I can see the mathematical argument for that, but from experience people freak out when their balance goes down and don't notice much if their balance doesn't go up by as much as it could.  So I don't think absence of reward is actually the same as a penalty.",
+      "createdAt": "2021-05-26T20:53:09.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The social impact of having +50K validators not getting 1/8 of their rewards for over 2 years I'd say that it's much worse",
+      "createdAt": "2021-05-26T20:53:43.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I don't know... I think people get even more upset if they see someone else is getting \"consistently\" lucky",
+      "createdAt": "2021-05-26T20:53:46.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "we're really talking about more than 1/3 chances of forfeiting 12,5% of your rewards",
+      "createdAt": "2021-05-26T20:54:14.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "in two years",
+      "createdAt": "2021-05-26T20:54:16.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "this is not trivial at all, not comparable to a \"I saw some red GWei on beaconcha.in\"",
+      "createdAt": "2021-05-26T20:54:34.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Moreover, with all these \"large number law\"  assumptions in ETH2: it is not even true that things even out on a per-validator basis. Supposing that your current validator actually gets to propose the average expected proposals late, you would have earned more than if you proposed regularly the average, since blocks are more valid now. The opposite will  be for sync committee members: members at earlier stages will earn more than members later. So even if included after 2 years, single stakers will be loosing money",
+      "createdAt": "2021-05-26T20:56:50.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Like I said, I don't mean this to be a blocker, but I think it is worth considering.  It is not within a validators control to perform sync committee duties perfectly and it's significantly harder to perform perfectly than for attestations.  So now being in a sync committee will be unlucky.\nIf we're happy with the way that works out then that's fine, but we shouldn't go in thinking that if the validator is online they won't be penalised or that it's just like attestations - the miss rate is going to be significantly higher.",
+      "createdAt": "2021-05-26T20:56:53.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "With this I completely agree: we will be screwing 512 guys all the time",
+      "createdAt": "2021-05-26T20:57:44.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "but I claim that it is much less evil than screwing every single staker and forcing them to go to pools",
+      "createdAt": "2021-05-26T20:58:01.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "However, as I pointed above: the \"screwing\"  is only psicological: they will earn exactly the same as in the rewards system",
+      "createdAt": "2021-05-26T20:58:40.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Moderate proposal:\n\n* Put sync committee rewards into the same mechanism as attestations in that \"if you participate you get +X, if you don't participate you get -X\"\n* Reduce reward from 8 to 2\n* Reduce committee duration from 2 days to 1 day",
+      "createdAt": "2021-05-26T20:58:50.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "while the second \"scrwing\"  is much worse",
+      "createdAt": "2021-05-26T20:58:57.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "This avoids the worst aspects of other proposals:\n\n* We don't need to do weird things with proposer rewards, because they can still be proportional to the rewards of what they include\n* Incentive to participate only drops by 2x\n* Light client minimal overhead only increases by 2x (and we add a bit of security due to faster switching)\n* The size of the lottery drops from ~3 months of income to ~10 days of income\n* Being in a sync committee is still net-good as long as you get included >=50% of the time",
+      "createdAt": "2021-05-26T21:00:12.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I thought about it, this actually moves from earning 32 times the regular reward to earning 4 times the regular reward for members. Still the biggest issue is the 512/150000 quotient",
+      "createdAt": "2021-05-26T21:00:29.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Right, but at least it cuts the lottery size down by 8x",
+      "createdAt": "2021-05-26T21:00:52.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Another problem with being *purely* penalty-only is that you would need special-case rewards for proposers, which ruins the way that incentives become much easier to reason about in altair",
+      "createdAt": "2021-05-26T21:02:33.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I didn't get that last part: proposers would get the same as they do now, for each \"participant\"... But I am not against a proposal that reduces the weight for sync-committee and ends up being not too sporadic. Will have to do the math, thought that dividing by two the epochs but keeping the committee size would still make it highly not-trivial to be non-included in 2 years.",
+      "createdAt": "2021-05-26T21:04:18.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Right now there's a hard rule in Altair that proposer rewards are computed *entirely* by taking the rewards of what the proposer includes and multiplying by 8/56",
+      "createdAt": "2021-05-26T21:05:02.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "That stays the same in my proposal I think. I may have gotten that wrong though",
+      "createdAt": "2021-05-26T21:05:37.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "That's really nice because it makes the incentive alignment clear and makes it easy to adjust constants and other rules without risking accidentally making rewards not add up to a base reward",
+      "createdAt": "2021-05-26T21:05:40.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "But how is that possible if you don't have rewards for participants?",
+      "createdAt": "2021-05-26T21:05:51.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I kept the same rewards for proposals, but changed the rewards for inclusion",
+      "createdAt": "2021-05-26T21:06:17.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right but then the proposer rewards are no longer a clear function of inclusion rewards",
+      "createdAt": "2021-05-26T21:06:34.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So there's two loops in `process_sync_commitee` now, one for inclusions, and one for the complement",
+      "createdAt": "2021-05-26T21:06:56.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "It can of course be one loop with an if statement 🙂",
+      "createdAt": "2021-05-26T21:07:15.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So in your proposal, as written, let's say everyone performs perfectly",
+      "createdAt": "2021-05-26T21:07:21.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Then the rewards for everything _except_ syncing and the proposer add up to 56/64",
+      "createdAt": "2021-05-26T21:07:32.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Then the proposer gets exactly the same as above",
+      "createdAt": "2021-05-26T21:07:43.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes exactly",
+      "createdAt": "2021-05-26T21:07:46.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Sorry fixed line above",
+      "createdAt": "2021-05-26T21:07:55.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Because your weights are 28 + 14 + 14 for attesting",
+      "createdAt": "2021-05-26T21:08:05.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "oh you say that the computation for proposals I made was 8/56",
+      "createdAt": "2021-05-26T21:08:27.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "The proposer's rewards for everything _except_ including sync committee signatures are (28 + 14 + 14)/64 * 8/56",
+      "createdAt": "2021-05-26T21:08:31.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "instead of 8/64",
+      "createdAt": "2021-05-26T21:08:32.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-05-26T21:08:39.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "which is true indeed",
+      "createdAt": "2021-05-26T21:08:40.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, that would require a change in that denominator",
+      "createdAt": "2021-05-26T21:08:51.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I see your point",
+      "createdAt": "2021-05-26T21:09:00.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "So this is the kind of bug that really easily happens if we get away from proposer rewards being ONLY 8/56 of inclusion rewards",
+      "createdAt": "2021-05-26T21:09:06.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "yes, this is indeed a bad thing cause any change in the specs requires careful computation instead of just simply maintaining that invariant",
+      "createdAt": "2021-05-26T21:09:34.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I agree",
+      "createdAt": "2021-05-26T21:09:36.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2021-05-26T21:09:58.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Hence why I think having both rewards and penalties (and proposer rewards are proportional to rewards) may be the best approach",
+      "createdAt": "2021-05-26T21:10:24.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I agree, I pushed that change just in case, but I agree that this is bug prone",
+      "createdAt": "2021-05-26T21:11:39.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I'll run the numbers with 2 instead of 8 and 256 epochs instead of 512 after cooking here",
+      "createdAt": "2021-05-26T21:12:42.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pietjepuk",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "I would say that anything that gets us closer to smooth rewards/penalties without being tricky is good. Of course the \"smoothest\" rewarding would indeed be something like <@!755590043632140352> approach if we assume all duties are performed perfectly. And the current approach makes sort of sense if we assume the opposite. 50/50 is probably not the right trade-off (at least I _hope_ that light sync duties are performed more than 50% of the time) , but still better than assuming the worst imo.",
+      "createdAt": "2021-05-26T21:12:45.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Sounds good!",
+      "createdAt": "2021-05-26T21:13:05.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Alright, the probabilities shift to 91.5%, 58%, 33,5% and 11% for not inclusion in 1 month, 6 months, 1 year and 2 years. Earnings will be now 3% that we are forfeiting though so this is much lighter: namely we expect to see at least 15K validators forfeiting 3% of their earnings in 2 years with this method.",
+      "createdAt": "2021-05-26T21:46:40.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Forfeiting 3% of earnings is within range of what would happen to you if you just have a somewhat bad hardware/internet setup",
+      "createdAt": "2021-05-26T21:47:22.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "so.... not too bad?",
+      "createdAt": "2021-05-26T21:47:36.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "Yeah I had computed 3% of rewards for running geth before client optimization. And Anyway I expect that timely head will cost us more. I need to sleep on this to put my vote on something: the way you explained it, it becomes an issue of having code that may require mathematical maintenance (It is still wrong the proposer_rewards in my proposal) vs something that will mostly make small stakers lose money silently.",
+      "createdAt": "2021-05-26T21:50:32.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "albeit little this time",
+      "createdAt": "2021-05-26T21:50:41.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "If we're tweaking constants I'd prefer to see the numerator for sync committee rewards go to 1 rather than 2, as anything that reduces the benefits of centralization has to be a Good Thing.\n\nWith sync committee rewards being 1/64 and 256 epochs per committee that moves to a model that gives ~10K validators a loss of 1.5% over 2 years.  Note, however, that these figures will increase as the total number of validators increases so although the punishment for beign unlucky is being reduced, it is still present.",
+      "createdAt": "2021-05-26T22:15:47.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Consensus R&D",
+      "parent": "",
+      "content": "While we are here I'd like to reinforce two points that this whole discussion brought: 1) it would be very good to know the rationale for some of these constants, I made the proposal of penalties under the assumption that 8/64 was chosen for security considerations and now I see that 1/32 would be acceptable. \n2) Jim raised an important issue: in the last couple of calls it was said that we have almost a spec freeze. For anyone that has any job besides implementing ethereum PoS, following the repo these last few weeks was impossible. This restricts the window of possible collaborators to just the few guys from the EF in charge of this sub area plus the even less from each client team working out the implementation",
+      "createdAt": "2021-05-26T22:20:20.236000+00:00",
+      "attachments": []
+    }
+  ]
+}

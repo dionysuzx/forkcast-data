@@ -1,0 +1,232 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2022-05-14",
+  "messageCount": 27,
+  "sourceHash": "89670c65a99cad6ae2f3426d8e43e1ff5e85a9a70b1a46d06f65f466d83a89fc",
+  "searchText": "> {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"payloadStatus\":{\"status\":\"VALID\",\"latestValidHash\":\"0xa0513a503d5bd6e89a144c3268e5b7e9da9dbf63df125a360e3950a7d0d67131\",\"validationError\":\"\"},\"payloadId\":[0,0,0,0,0,0,0,4]}} from the engine API part of the relay in response to fcU (per discussion previously here). But the `payloadId` field isn't encoded the same way as ELs are doing it. https://github.com/ethereum/execution-apis/blob/v1.0.0-alpha.8/src/engine/specification.md#response-1 notes it's a `DATA|null`, and this isn't `null`, so it should be a `DATA`. But > Values of a field of `DATA` type MUST be encoded as a hexadecimal string with a `0x` prefix matching the regular expression ^0x(?:[a-fA-F0-9]{2})*$. commit `2c53d67eb01327cdacb23b592a6ccf9a36f9895f` ummm getting issue submiting the signed blinded beacon block: ```bash INFO [2022-05-14T13:21:32+05:30] getHeader parentHash=\"0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f\" pubkey=\"0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" slot=\"1\" INFO [2022-05-14T13:21:32+05:30] Consensus client retrieved prepared payload header parentHash=\"0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f\" pubkey=\"0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" slot=\"1\" 2022/05/14 13:21:32 http: superfluous response.WriteHeader call from main.(*responseWriter).WriteHeader (utils.go:34) INFO [2022-05-14T13:21:32+05:30] http: GET /eth/v1/builder/header/1/0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f/0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d 200 durationMs=\"0\" method=\"GET\" path=\"/eth/v1/builder/header/1/0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f/0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" status=\"200\" INFO [2022-05-14T13:24:45+05:30] http: POST /eth/v1/builder/blinded_blocks 400 durationMs=\"0\" method=\"POST\" path=\"/eth/v1/builder/blinded_blocks\" status=\"400\" ``` error: `incorrect byte length` tested posting the json with `curl --header 'Content-Type: application/json' --request POST 'http://127.0.0.1:8661/eth/v1/builder/blinded_blocks' --data-raw` but same error even posted the json which is given in example, assuming it should give some other error, since this looks like relay couldn't parse the request body but that also gave the same error maybe post the payload somewhere and link it here, seems on of the fields has an incorrect size https://github.com/protolambda/mergemock/issues/31 ok i got it, size of sync_committee_bits is not matching merge mock seems to be accepting mainnet preset , while i was using minimal for testing ok, now getting invalid signature ``` ERROR [2022-05-14T14:22:53+05:30] error verifying signature error=\"<nil>\" method=\"getPayload\" INFO [2022-05-14T14:22:53+05:30] http: POST /eth/v1/builder/blinded_blocks 400 durationMs=\"1\" method=\"POST\" path=\"/eth/v1/builder/blinded_blocks\" status=\"400\" ``` <@388610194608750595> is the signature being calculated on the beacon block domain or just hash tree root of signed blinded beacon block? Currently just tree hash root, domain is todo (see also <https://github.com/protolambda/mergemock/issues/29> / I think <@543900561460822016> wanted to take a stab at adding this) there is some value in having minimal preset support for local testnets -- Nimbus's `launch_local_testnet.sh` operates by default in minimal mode, because it's much faster to determine success/failure that way, a few minutes rather than a half hour or more. It's not quite as realistic, but for protocol aspects which carry over, the efficiency outweighs the tradeoffs. (need 4 or 5 epochs to reliably gauge finalization, for example) yes our merge tests/sims also run in minimal <@388610194608750595> , i am having trouble in the the signature verification so for debugging, i tried comparing the hashtree roots, which were again not matching so i just tried comparing transactions root with the computed hashtree root of transactions object i got back( by disabling the verification in relay code) This is what i got while fetching header ``` transactionsRoot: Uint8Array(32) [ 86, 232, 31, 23, 27, 204, 85, 166, 255, 131, 69, 230, 146, 192, 248, 110, 91, 72, 224, 27, 153, 108, 173, 192, 1, 98, 47, 181, 227, 99, 180, 33 ] ``` This represents an empty transaction array, but if i do this locally this happens: ``` ssz.bellatrix.Transactions.hashTreeRoot([]) Uint8Array(32) [ 127, 254, 36, 30, 166, 1, 135, 253, 176, 24, 123, 250, 34, 222, 53, 209, 249, 190, 215, 171, 6, 29, 148, 1, 253, 71, 227, 74, 84, 251, 237, 225 ] ``` they don't seem to be matching, not sure what is going on 🤔 by the way, we will need atleast the `BlindedBeaconBlock` 's signature over the normal block signature domain, else if it won't be become a valid `SignedBeaconBlock` if we swipe out the `executionPayloadHeader` with the `executionPayload` one obtained after `submitSignedBlinded` > In-protocol messages, e.g. `BlindedBeaconBlock`, which should compute the signing root using `compute_signing_root` and use the domain specified for beacon block proposals. https://github.com/ethereum/builder-specs/blob/v0.0.0/specs/README.md#signing specifies this, no? yes, was taking about integration with mergemock in present form (currently it uses hashTreeRoot to get signing root)",
+  "excerpts": [
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"payloadStatus\":{\"status\":\"VALID\",\"latestValidHash\":\"0xa0513a503d5bd6e89a144c3268e5b7e9da9dbf63df125a360e3950a7d0d67131\",\"validationError\":\"\"},\"payloadId\":[0,0,0,0,0,0,0,4]}}\nfrom the engine API part of the relay in response to fcU (per discussion previously here). But the `payloadId` field isn't encoded the same way as ELs are doing it.\n\nhttps://github.com/ethereum/execution-apis/blob/v1.0.0-alpha.8/src/engine/specification.md#response-1 notes it's a `DATA|null`, and this isn't `null`, so it should be a `DATA`. But\n> Values of a field of `DATA` type MUST be encoded as a hexadecimal string with a `0x` prefix matching the regular expression ^0x(?:[a-fA-F0-9]{2})*$.",
+      "createdAt": "2022-05-14T07:29:07.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "commit `2c53d67eb01327cdacb23b592a6ccf9a36f9895f`",
+      "createdAt": "2022-05-14T07:31:15.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ummm getting issue submiting the signed blinded beacon block: ```bash\nINFO   [2022-05-14T13:21:32+05:30] getHeader                                     parentHash=\"0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f\" pubkey=\"0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" slot=\"1\"\nINFO   [2022-05-14T13:21:32+05:30] Consensus client retrieved prepared payload header  parentHash=\"0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f\" pubkey=\"0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" slot=\"1\"\n2022/05/14 13:21:32 http: superfluous response.WriteHeader call from main.(*responseWriter).WriteHeader (utils.go:34)\nINFO   [2022-05-14T13:21:32+05:30] http: GET /eth/v1/builder/header/1/0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f/0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d 200  durationMs=\"0\" method=\"GET\" path=\"/eth/v1/builder/header/1/0xccaf66b50e791f95d4b50bae4de28af9396824e7c29f99aeba19414fdf72673f/0xaec922bd7a9b7b1dc21993133b586b0c3041c1e2e04b513e862227b9d7aecaf9444222f7e78282a449622ffc6278915d\" status=\"200\"\nINFO   [2022-05-14T13:24:45+05:30] http: POST /eth/v1/builder/blinded_blocks 400  durationMs=\"0\" method=\"POST\" path=\"/eth/v1/builder/blinded_blocks\" status=\"400\"\n```",
+      "createdAt": "2022-05-14T08:05:17.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "error: `incorrect byte length`",
+      "createdAt": "2022-05-14T08:05:49.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "tested posting the json with `curl --header 'Content-Type: application/json' --request POST 'http://127.0.0.1:8661/eth/v1/builder/blinded_blocks' --data-raw` but same error",
+      "createdAt": "2022-05-14T08:06:56.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "even posted the json which is given in example, assuming it should give some other error, since this looks like relay couldn't parse the request body",
+      "createdAt": "2022-05-14T08:08:19.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but that also gave the same error",
+      "createdAt": "2022-05-14T08:08:39.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "metachris_",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "maybe post the payload somewhere and link it here, seems on of the fields has an incorrect size",
+      "createdAt": "2022-05-14T08:08:47.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-05-14T08:09:47.231000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "541b24be66b8d9e7a3385b953c8a86c75eab0159ac90c8c088a4c6a77795554a"
+        }
+      ]
+    },
+    {
+      "author": "metachris_",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/protolambda/mergemock/issues/31",
+      "createdAt": "2022-05-14T08:12:29.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok i got it, size of sync_committee_bits is not matching",
+      "createdAt": "2022-05-14T08:46:19.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "merge mock seems to be accepting mainnet preset , while i was using minimal for testing",
+      "createdAt": "2022-05-14T08:50:07.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, now getting invalid signature ```\nERROR  [2022-05-14T14:22:53+05:30] error verifying signature                     error=\"<nil>\" method=\"getPayload\"\nINFO   [2022-05-14T14:22:53+05:30] http: POST /eth/v1/builder/blinded_blocks 400  durationMs=\"1\" method=\"POST\" path=\"/eth/v1/builder/blinded_blocks\" status=\"400\"\n```",
+      "createdAt": "2022-05-14T08:55:07.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@388610194608750595> is the signature being calculated on the beacon block domain or just hash tree root of signed blinded beacon block?",
+      "createdAt": "2022-05-14T08:55:54.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "metachris_",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Currently just tree hash root, domain is todo (see also <https://github.com/protolambda/mergemock/issues/29> / I think <@543900561460822016> wanted to take a stab at adding this)",
+      "createdAt": "2022-05-14T09:11:26.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there is some value in having minimal preset support for local testnets -- Nimbus's `launch_local_testnet.sh` operates by default in minimal mode, because it's much faster to determine success/failure that way, a few minutes rather than a half hour or more. It's not quite as realistic, but for protocol aspects which carry over, the efficiency outweighs the tradeoffs.",
+      "createdAt": "2022-05-14T09:34:51.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(need 4 or 5 epochs to reliably gauge finalization, for example)",
+      "createdAt": "2022-05-14T09:36:00.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes our merge tests/sims also run in minimal",
+      "createdAt": "2022-05-14T09:37:33.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@388610194608750595> , i am having trouble in the the signature verification",
+      "createdAt": "2022-05-14T11:07:13.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so for debugging, i tried comparing the hashtree roots, which were again not matching",
+      "createdAt": "2022-05-14T11:07:45.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so i just tried comparing transactions root with the computed hashtree root of transactions object i got back( by disabling the verification in relay code)",
+      "createdAt": "2022-05-14T11:08:44.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is what i got while fetching header ```\ntransactionsRoot: Uint8Array(32) [\n     86, 232,  31,  23,  27, 204,  85, 166,\n    255, 131,  69, 230, 146, 192, 248, 110,\n     91,  72, 224,  27, 153, 108, 173, 192,\n      1,  98,  47, 181, 227,  99, 180,  33\n  ]\n```",
+      "createdAt": "2022-05-14T11:09:04.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This represents an empty transaction array, but if i do this locally this happens: ```\nssz.bellatrix.Transactions.hashTreeRoot([])\nUint8Array(32) [\n  127, 254,  36,  30, 166,   1, 135, 253,\n  176,  24, 123, 250,  34, 222,  53, 209,\n  249, 190, 215, 171,   6,  29, 148,   1,\n  253,  71, 227,  74,  84, 251, 237, 225\n]\n```",
+      "createdAt": "2022-05-14T11:09:58.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "they don't seem to be matching, not sure what is going on 🤔",
+      "createdAt": "2022-05-14T11:10:22.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "by the way, we will need atleast the `BlindedBeaconBlock` 's signature over the normal block signature domain, else if it won't be become a valid `SignedBeaconBlock` if we swipe out the `executionPayloadHeader` with the `executionPayload` one obtained after `submitSignedBlinded`",
+      "createdAt": "2022-05-14T11:14:40.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> In-protocol messages, e.g. `BlindedBeaconBlock`, which should compute the signing root using `compute_signing_root` and use the domain specified for beacon block proposals.\n\nhttps://github.com/ethereum/builder-specs/blob/v0.0.0/specs/README.md#signing specifies this, no?",
+      "createdAt": "2022-05-14T11:16:31.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, was taking about integration with mergemock in present form (currently it uses hashTreeRoot to get signing root)",
+      "createdAt": "2022-05-14T11:17:47.731000+00:00",
+      "attachments": []
+    }
+  ]
+}

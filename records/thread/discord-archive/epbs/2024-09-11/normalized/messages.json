@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2024-09-11",
+  "messageCount": 42,
+  "sourceHash": "59f590df51792ad8070fc9fd7a736aec5d0924fe7049e11bc2483fc9ef975030",
+  "searchText": "I started thinking about block production in ePBS and specifically local bid building. (both when proposer and not a proposer) I guess we may end up requiring a beacon api to expose the `engine_getPayloadV4` call and return a header? And then we will have an additional optional builder duty in VC. I may do a hackmd with my thoughts on it. Are there are any published notes already out there with some designs/thoughts? Yes we'll need a new beacon API for validator to produce signed header. (CL can cache the payload and use it when broadcasting signed execution payload.) AFAIK <@363800010518822915> is working on it Yeah, makes sense also I guess another beacon API for the builder to get `ExecutionPayloadEnvelope` from the BN when the broadcasting time comes to sign it. It can return 204 if the local bid wasn't selected. In any case, will jot down some thoughts myself. Yes indeed. New beacon APIs were not mentioned in the spec so having some write up would be good I've written down some high-level thoughts for the [optimized](https://hackmd.io/@ttsao/epbs-block-proposal) version, but for the solo proposer \"naive\" version, which we want to aim for in the first devnet, I currently have the following steps. This will require new `getHeader`, `submitHeader`, `getPayloadEnvelope`, and `submitPayloadEnvelope` calls. 1. VC calls GetHeader 2. BN caches Payload and Blob_sidecar (used in step 10) 3. VC signs Header 4. VC calls SubmitSignedHeader 5. BN caches SignedHeader (used in step 7) 6. VC calls GetBlock 7. BN inserts cached SignedHeader in the block 8. VC signs Block 9. VC calls SubmitSignedBlock 10. VC calls GetExecutionPayloadEnvelope 11. VC signs ExecutionPayloadEnvelope 12. VC calls SubmitExecutionPayloadEnvelope Will love to get everyone's feedback here Sounds good for a devnet, I guess it's very trivial to also involve the P2P, aka if at 7. BN inserts different SignedHeader, VC wouldn't do 10-12. ePBS the markdown, will be changed with https://github.com/ethereum/consensus-specs/pull/3875, this is no small change, I'll rebase also the full tests PR https://github.com/ethereum/consensus-specs/pull/3854 which will take me a bit of time I suspect. <@641548687813902336> your PR hasn't merged unfortunately so you'll probably will get conflicts after Lucas's PR merges I don't mind, mine is a tiny PR, will rebase after the merge I'm still wrapping my head around everything so forgive if this is a n00b question but.. the following is correct right? Okay.. I'm fairly certain this IS correct which means there's a major bug in the spec ``` state_transition(..) process_block(..) process_withdrawals(..) ``` we call `process_withdrawals()` when processing the **beacon_block** which means we iterate over the withdrawals queue and decrement balances. Thus we take care of the accounting on the *beacon chain*. But if the execution payload is missing or otherwise not processed, the accounting on the *execution layer* never happens and ether is just lost We should instead just completely move `process_withdrawals()` to `process_execution_payload()` As per my understanding, 1. `process_withdrawals()` function in the Beacon layer updates the validator balances and withdrawal queue within the Beacon state and It doesn't directly interact with or modify the Execution layer state. 2. EL doesn't directly rely from processed Beacon State, instead it receives withdrawal information as part of the Beacon Block data that's passed to it. correct me if I'm wrong I believe you are correct on both points.. but that doesn't negate what I said? The EL processes the withdrawals stored in the `ExecutionPayload` right? ```python class ExecutionPayload(Container): ... withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD] ... ``` The EL will only process withdrawals when it receives a new payload. But we can only send it a new payload when we've received an `ExecutionPayloadEnvelope` that's been attested as timely by the PTC: ```python def process_execution_payload(state, signed_envelope, execution_engine): ... payload = envelope.payload ... assert execution_engine.verify_and_notify_new_payload( NewPayloadRequest( execution_payload=payload, versioned_hashes=versioned_hashes, parent_beacon_block_root=state.latest_block_header.parent_root, ) ) ... ``` as noted above, when the `ExecutionPayloadEnvelope` is not revealed in a timely manner/withheld/invalid, the resulting `state` will never have `process_execution_payload()` called to finish the accounting for `process_withdrawals()` okay, yea, what you said makes sense, If `ExecutionPayloadEnvelope` isn't revealed/attested timely, `process_execution_payload()` isn't called for that slot and EL doesn't process withdrawals for that slot. This does seem like an issue but maybe it is an intentional tradeoff? I'm not exactly sure maybe <@755590043632140352> or <@363800010518822915> can clarify on this? I've created a PR to fix https://github.com/ethereum/consensus-specs/pull/3917 wouldn't there be changes to forkchoice as well? since now it would need to consider the state of withdrawals in the EL No payload is valid unless it commits to the right withdrawals That's why we commit the withdrawals root to the state every time you call `process_withdrawals()` you are (for lack of a better word) *dequeing* a certain number of withdrawals. No you dequeue some from a literal queue, and for the others you're moving the index that loops over validators yea? You return early if the parent wasn't full The withdrawal queue stops until the EL unlocks this By the way no question is a noob question. I thought a lot about these issues but I'm certain there must be deep bugs and I appreciate the skepticism cause it's the only way to find them And this is a tricky path what do you mean you return early if the parent wasn't full? Look at process withdrawals is this not what get's called when a `beacon_block` becomes the head? Sorry on a cell but the first check in process withdrawals returns early in the case you mention <@554799849288105986> https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#modified-process_withdrawals ``` # return early if the parent block was empty if not is_parent_block_full(state): return ``` oh derp how did it miss that line i think i had the wrong tab open because i was comparing electra and others okay so.. any reason not to just do the accounting in the second half though? then you wouldn't need any modifications to `process_withdrawals()` and you wouldn't need to store the root No, and I'm leaning to do that, but didn't want to continue changing the spec I believe the change is minimal it affects maximum 16 vals In case of a run and no Liveness",
+  "excerpts": [
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I started thinking about block production in ePBS and specifically local bid building. (both when proposer and not a proposer) I guess we may end up requiring a beacon api to expose the `engine_getPayloadV4` call and return a header? And then we will have an additional optional builder duty in VC. I may do a hackmd with my thoughts on it. Are there are any published notes already out there with some designs/thoughts?",
+      "createdAt": "2024-09-11T06:35:12.671000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jih2nn",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes we'll need a new beacon API for validator to produce signed header. (CL can cache the payload and use it when broadcasting signed execution payload.) AFAIK <@363800010518822915> is working on it",
+      "createdAt": "2024-09-11T10:16:10.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, makes sense also I guess another beacon API for the builder to get `ExecutionPayloadEnvelope` from the BN when the broadcasting time comes to sign it. It can return 204 if the local bid wasn't selected. In any case, will jot down some thoughts myself.",
+      "createdAt": "2024-09-11T10:27:21.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jih2nn",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes indeed. New beacon APIs were not mentioned in the spec so having some write up would be good",
+      "createdAt": "2024-09-11T10:30:30.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I've written down some high-level thoughts for the [optimized](https://hackmd.io/@ttsao/epbs-block-proposal) version, but for the solo proposer \"naive\" version, which we want to aim for in the first devnet, I currently have the following steps. This will require new `getHeader`, `submitHeader`, `getPayloadEnvelope`, and `submitPayloadEnvelope` calls.\n\n1. VC calls GetHeader\n2. BN caches Payload and Blob_sidecar (used in step 10)\n3. VC signs Header\n4. VC calls SubmitSignedHeader\n5. BN caches SignedHeader (used in step 7)\n6. VC calls GetBlock\n7. BN inserts cached SignedHeader in the block\n8. VC signs Block\n9. VC calls SubmitSignedBlock\n10. VC calls GetExecutionPayloadEnvelope\n11. VC signs ExecutionPayloadEnvelope\n12. VC calls SubmitExecutionPayloadEnvelope\n\nWill love to get everyone's feedback here",
+      "createdAt": "2024-09-11T13:23:45.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sounds good for a devnet, I guess it's very trivial to also involve the P2P, aka if at 7. BN inserts different SignedHeader, VC wouldn't do 10-12.",
+      "createdAt": "2024-09-11T13:48:28.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ePBS the markdown, will be changed with https://github.com/ethereum/consensus-specs/pull/3875, this is no small change, I'll rebase also the full tests PR https://github.com/ethereum/consensus-specs/pull/3854 which will take me a bit of time I suspect. <@641548687813902336> your PR hasn't merged unfortunately so you'll probably will get conflicts after Lucas's PR merges",
+      "createdAt": "2024-09-11T17:30:28.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't mind, mine is a tiny PR, will rebase after the merge",
+      "createdAt": "2024-09-11T18:55:03.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm still wrapping my head around everything so forgive if this is a n00b question but.. the following is correct right?",
+      "createdAt": "2024-09-11T22:38:24.247000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "df57bf5326e3271e286865c4a373bc8f6454d02ca193da4d92d55436b1e81693"
+        }
+      ]
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Okay.. I'm fairly certain this IS correct",
+      "createdAt": "2024-09-11T22:45:00.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "which means there's a major bug in the spec",
+      "createdAt": "2024-09-11T22:45:15.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```\nstate_transition(..)\n    process_block(..)\n        process_withdrawals(..)\n```\nwe call `process_withdrawals()` when processing the **beacon_block** which means we iterate over the withdrawals queue and decrement balances. Thus we take care of the accounting on the *beacon chain*. But if the execution payload is missing or otherwise not processed, the accounting on the *execution layer* never happens and ether is just lost",
+      "createdAt": "2024-09-11T22:50:35.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We should instead just completely move `process_withdrawals()` to `process_execution_payload()`",
+      "createdAt": "2024-09-11T22:51:21.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "l_guy",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As per my understanding, \n1. `process_withdrawals()` function in the Beacon layer updates the validator balances and withdrawal queue within the Beacon state and It doesn't directly interact with or modify the Execution layer state.\n2. EL doesn't directly rely from processed Beacon State, instead it receives withdrawal information as part of the Beacon Block data that's passed to it.\ncorrect me if I'm wrong",
+      "createdAt": "2024-09-11T23:06:46.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I believe you are correct on both points.. but that doesn't negate what I said?",
+      "createdAt": "2024-09-11T23:20:13.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The EL processes the withdrawals stored in the `ExecutionPayload` right?\n```python\nclass ExecutionPayload(Container):\n    ...\n    withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]\n    ...\n```\nThe EL will only process withdrawals when it receives a new payload. But we can only send it a new payload when we've received an  `ExecutionPayloadEnvelope` that's been attested as timely by the PTC:\n```python\ndef process_execution_payload(state, signed_envelope, execution_engine):\n    ...\n    payload = envelope.payload\n    ...\n    assert execution_engine.verify_and_notify_new_payload(\n        NewPayloadRequest(\n            execution_payload=payload,\n            versioned_hashes=versioned_hashes,\n            parent_beacon_block_root=state.latest_block_header.parent_root,\n        )\n    )\n    ...\n```",
+      "createdAt": "2024-09-11T23:23:20.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "as noted above, when the `ExecutionPayloadEnvelope` is not revealed in a timely manner/withheld/invalid, the resulting `state` will never have `process_execution_payload()` called to finish the accounting for  `process_withdrawals()`",
+      "createdAt": "2024-09-11T23:28:17.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "l_guy",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "okay, yea, what you said makes sense, If `ExecutionPayloadEnvelope` isn't revealed/attested timely, `process_execution_payload()` isn't called for that slot and EL doesn't process withdrawals for that slot. This does seem like an issue but maybe it is an intentional tradeoff? I'm not exactly sure maybe <@755590043632140352> or <@363800010518822915> can clarify on this?",
+      "createdAt": "2024-09-11T23:37:08.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I've created a PR to fix\nhttps://github.com/ethereum/consensus-specs/pull/3917",
+      "createdAt": "2024-09-11T23:39:27.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "l_guy",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "wouldn't there be changes to forkchoice as well? since now it would need to consider the state of withdrawals in the EL",
+      "createdAt": "2024-09-11T23:42:18.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No payload is valid unless it commits to the right withdrawals",
+      "createdAt": "2024-09-11T23:47:18.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's why we commit the withdrawals root to the state",
+      "createdAt": "2024-09-11T23:47:32.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "every time you call `process_withdrawals()` you are (for lack of a better word) *dequeing* a certain number of withdrawals.",
+      "createdAt": "2024-09-11T23:49:20.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No",
+      "createdAt": "2024-09-11T23:49:46.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you dequeue some from a literal queue, and for the others you're moving the index that loops over validators yea?",
+      "createdAt": "2024-09-11T23:49:50.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You return early if the parent wasn't full",
+      "createdAt": "2024-09-11T23:49:57.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The withdrawal queue stops until the EL unlocks this",
+      "createdAt": "2024-09-11T23:50:39.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "By the way no question is a noob question. I thought a lot about these issues but I'm certain there must be deep bugs and I appreciate the skepticism cause it's the only way to find them",
+      "createdAt": "2024-09-11T23:51:29.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And this is a tricky path",
+      "createdAt": "2024-09-11T23:51:43.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what do you mean you return early if the parent wasn't full?",
+      "createdAt": "2024-09-11T23:55:27.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Look at process withdrawals",
+      "createdAt": "2024-09-11T23:56:06.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is this not what get's called when a `beacon_block` becomes the head?",
+      "createdAt": "2024-09-11T23:56:09.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry on a cell but the first check in process withdrawals returns early in the case you mention",
+      "createdAt": "2024-09-11T23:56:38.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@554799849288105986> https://github.com/ethereum/consensus-specs/blob/dev/specs/_features/eip7732/beacon-chain.md#modified-process_withdrawals\n\n```\n    # return early if the parent block was empty\n    if not is_parent_block_full(state):\n        return\n```",
+      "createdAt": "2024-09-11T23:57:35.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh derp how did it miss that line",
+      "createdAt": "2024-09-11T23:57:39.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think i had the wrong tab open",
+      "createdAt": "2024-09-11T23:57:46.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because i was comparing electra and others",
+      "createdAt": "2024-09-11T23:57:59.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "okay so.. any reason not to just do the accounting in the second half though?",
+      "createdAt": "2024-09-11T23:58:52.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "then you wouldn't need any modifications to `process_withdrawals()` and you wouldn't need to store the root",
+      "createdAt": "2024-09-11T23:59:12.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, and I'm leaning to do that, but didn't want to continue changing the spec",
+      "createdAt": "2024-09-11T23:59:22.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I believe the change is minimal it affects maximum 16 vals",
+      "createdAt": "2024-09-11T23:59:39.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In case of a run and no Liveness",
+      "createdAt": "2024-09-11T23:59:53.271000+00:00",
+      "attachments": []
+    }
+  ]
+}

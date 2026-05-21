@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "allcoredevs",
+  "date": "2020-09-07",
+  "messageCount": 299,
+  "sourceHash": "b5fda861efa0fce21af19224f8fde411c86750468e9d7b53a303337f726d563b",
+  "searchText": "<@543900561460822016> transactions aren't technically part of the block header. They are part of a merkle Patricia trie whose root hash is included in the block header though. The EIP specifies how they are put into that merkle patricia trie. <@301186049323958275> But they’re included in full blocks that are announced to peers (e.g. 0x07 NewBlock messages). So I’m wondering how they should be represented there? I assume as RLP bytes so that a tx decodered can be applied afterwards instead of mixing the RLP decoding with the tx decoding logic They would follow the devp2p protocol in that case (which happens to be the same as how they are merklized), and the EIP should state how they are encoded over devp2p. On mobile right now, if you can't find it in the EIP I can point it out once at computer and you can hopefully help me understand what wasn't clear about the EIP so I can edit. 🙂 > As of `FORK_BLOCK_NUMBER`, all transactions sent over devp2p or included in a block **MUST** be of the form `TransactionType || TransactionPayload` <@!543900561460822016> This is the line I was referring to. I need to delete the \"or included in a block\" bit since that is actually stated more clearly on another line. This is the bit about the transaction root: > As of `FORK_BLOCK_NUMBER`, the transaction root in the block header **MUST** be the root hash of `patriciaTrie(leb128(transactionIndexInBlock) => TransactionType || TransactionPayload)`. I think <@!273808422753796097> was mildly against leb128. Should we just have a 32 byte key instead? Or perhaps simply strip leading 0s? Alternatively we could define the transaction index as 16 bits or something (which should be plenty, and we can always increase the size in a future hard fork). Going to go with big endian 16-bit for those indexes for now. I don't feel strongly, so I'm welcome to debate/discussion around them! > I don't recommend RLP here, everyone seems to prefer \"something else\" <@!301186049323958275> hol' up. I'm not sure \"everyone\" is applicable. I think many client devs (including me) would prefer not to drastically change things if it can be avoided. I, for one, prefer RLP, since it's very well known and has stable implementations The `patriciaTrie( rlp(index) -> rlp(data))` is used both for the root of transactions, aswell as the root of receipts. There's a build-in quirk, that the `0`th element is, key-ordering-wise, \"after\" the `0x7f`th element, but other than that it's a pretty simple thing that works already. I'll try to rope in some other devs here to get some more input... cc <@!206016661470314496> <@!194432762315407360> > <@!301186049323958275> hol' up. I'm not sure \"everyone\" is applicable. I think many client devs (including me) would prefer not to drastically change things if it can be avoided. I, for one, prefer RLP, since it's very well known and has stable implementations <@!211091239112671234> Thanks for speaking up! The impression I got on the call and here in Discord the other day was that no one wanted to use RLP if given the choice, which is why I changed it from RLP. My goal here is to get 2718 through as smoothly as possible, and if that means SSZ I'm fine with that and if that means RLP I'm fine with that too. We *will* have to change the transaction and receipt merkle trie, but we can *only* change the values (not the key) if changing the key complicates things. Why do the transactions/receipts trie need to change? Because we will be adding the TransactionType, which will be part of the value. ``` patriciaTrie(transactionIndexInBlock => TransactionType || ReceiptPayload) ``` is what the EIP currently has, we could change the key back to `rlp(transactionIndexInBlock)` if that simplifies things. The definition of it as `trieroot( rlp(index) -> rlp(object))` doesn't have to change, does it? 🤔 There was quite a bit of \"demand\" on the call and in here to not RLP encode the transaction. The original specification was `rlp([TransactionType, Payload])` and I received pushback against it from multiple people which is why it was changed to `TransactionType || Payload`. I'm still unsure why is the transaction type and payload becoming part of the transaction receipt? Me too. A `hash` is a hash, no? I don't see why anything other than \"how to calculate the hash/signature/sender given a blob of transaction data\" needs to change. Ah wait. My bad. So the patricia trie is _not_ a list of hashes, but a list of bodies. But even so I'm missing something here. Are we talking about the `receiptsRoot` in the block? That trie does not seem to contain the input transaction, unless I'm missing something? Or are we talking about `transactionsRoot`? > This is the bit about the transaction root: <@!301186049323958275> Ah I see, the main discussion is that this proposal now changes the key from rlp to leb128. Most recently I dropped leb128 due to feedback against it. I'm just trying to make everyone happy. 😩 Ah ok, I started to locally edit the EIP, but will wait if you have other changes pending. <@!211091239112671234> Correct, the block header has two merkle roots, one for transactions and one for receipts. The data that goes into the transactions trie is the transaction index (within the block) and the transaction itself. So it is a consensus requirement that all clients build that merkle trie the same way, which means we all have to use the same encoding for the transaction. <@!425279588009246720> They are all merged, do you still see LEB128 in master? No, it has no leb128 in it. <@!301186049323958275> right. And as long as \"encoding the transaction\" is well specified and defined, we don't have touch the rules for how the tx/receipt-roots are generated. (unless there's a strong urge to) I think the EIP could be better organised 🙂 <@!211091239112671234> Hmm, IIUC, you are arguing that we don't need to touch the receipts at all? Originally I didn't and someone an an ACD call indicated that it was needed, and convinced me... but I don't remember what they said. If I can't remember, and no one else can, then we can cut it and pretend this never happened. 🙂 I don't think I'm arguing that. I'm arguing that `DeriveSHA( <list of things>) => root` need not change. It can continue to use `rlp(thing)` for values and `rlp(index)` for key Would it mean that in `rlp(thing)` `thing` becomes an opaque byte serialisation of the transaction? Or could we say it `key=rlp(index) value=<opaque tx bytes>` ? I personally don't see the point in making `value=<opaque blob>` in favour of `value=rlp(tx)`. We can retain `rlp(index)` if that is what people want. I was *trying* to remove RLP as I saw it since there were multiple people who indicated they didn't like RLP and since we had to touch that code I figured we could drop RLP there while we were futzing in there, but we can keep it like that. The value *will* need to change though if we do typed transaction receipts. What do you mean by `rlp(tx)`? Opaque bytes or not? ... not sure what you are asking... `rlp(tx)` == rlp-representation of the transaction, however that is defined That is the main discussion, if the transaction is not using an outer RLP wrapping, then why define an RLP representation of it for the trie? Not all transactions necessarily will use RLP (and in fact, there seems to be a strong push to explicitly *not* use RLP for future transaction types). What is the functional value of not using RLP for future tx types? It seems like the gains are minimal compared to the increased complexity of the EIP I think most people feel that RLP is hard to work with (which I agree with). There's strong push against RLP and it may happen, among other things, that the state trie will not use it. It also is a bit large for some data structures, which is mildly annoying. It seems like other serialization schemes could be introduced at the web3 / RPC / devp2p level if people really want something nicer I'd actually argue for the trie having a fixed size index and the opaque bytes would be good enough. The trie does not need to define how the data is transmitted on the wire? It is only used to create the hash. But I'm relatively clueless here for that part and client devs will know better. Well, in that case one could instead have the `value=tx.hash()`. That would make it easier on memory to construct the trie (in a naive implementation which builds the entire structure before collapsing it) But still, I think there's quite a leap between introducing a couple of more tx-types and redefining our basic encoding schemes... That's true. If it provides some improvements overall, is that a bad step though? Friendly reminder we had a call scheduled in ~35 mins to discuss 2718 and other YOLOv2 EIPs: https://github.com/ethereum/pm/issues/204 Here is a zoom link we can use: https://consensys.zoom.us/j/97683842262 > That's true. If it provides some improvements overall, is that a bad step though? Well, \"some improvements\" needs to be weighed against the complexity of having to support both legacy and new types. All current clients do retain the ability to process the chain from genesis, so it's not like we can just switch over to something new and nuke out all the old stuff. With the outer RLP wrapping, I believe there's still some changes. You have mentioned that a \"naive\" implementation could benefit from a simplification, but I believe geth would not have a naive implementation. Would the RLP-wrapped-RLP-transaction approach require any speed improvement from geth's side or is it transparent? <@!211091239112671234> It is possible I'm not understanding how your code is currently structured, which is why it is very valuable to get client dev input. If you receive a transaction over devp2p in the form `ssz(a, b, c, d)`, is it *easier* for you to put that into the trie as `rlp(ssz(a, b, c, d))` than put it in as `ssz(a, b, c, d)`? Even though that is obviously redundant, the way your code is structured may be such that doing the redundant wrapping is *easier*. Actually, geth does have a rather naive implementation, but me and <@!353136597522448385> were just trying to replace that: https://github.com/ethereum/go-ethereum/pull/21407 <@!301186049323958275> well, I think the threshold to cross here is to receive `ssz` from the network in the first place. I think it would be messy to sometimes do ssz and sometimes to rlp, but <@!194432762315407360> is better suited than me to address that.. > Would the RLP-wrapped-RLP-transaction approach require any speed improvement from geth's side or is it transparent? You've lost me there, I think.. But regardless, I'm not too worried about speed, more about messiness and potential for screwing things up Hmm, we'll have to get feedback from other client devs. I have had I think 3 or 4 core devs now tell me they would rather *not* do RLP for new transaction types, and they would like to drop RLP in favor of \"other\" when the option presents itself. I meant if `rlp([txtype, [nonce, gasLimit, ..]])` poses any speed change compared to `rlp([nonce, gasLimit, ..])` in terms of that optimised \"derivesha\"? > now tell me they would rather not do RLP for new transaction types, and they would like to drop RLP in favor of \"other\" when the option presents itself. Maybe I'm the odd one out here, hence why I've been trying to bring Felix in.. But this entire discussion started with instead of having an outer RLP wrapping *on wire* and include a leading byte. That somehow evolved to changing things down the core 😬 I'm not *personally* married to any particular encoding format, it isn't critical for the EIP and it is a choice that I think others are in a better position to make ultimately. At the moment, I'm just trying to keep the EIP in line with \"popular feedback\" I have received so far, which currently favors not-RLP. 🙂 <@!425279588009246720> I don't think that particular difference makes any real impact To me (not a client developer) I think having a different encoding on the wire and in th",
+  "excerpts": [
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@543900561460822016> transactions aren't technically part of the block header.  They are part of a merkle Patricia trie whose root hash is included in the block header though.  The EIP specifies how they are put into that merkle patricia trie.",
+      "createdAt": "2020-09-07T01:33:56.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "<@301186049323958275>  But they’re included in full blocks that are announced to peers (e.g. 0x07 NewBlock messages). So I’m wondering how they should be represented there? I assume as RLP bytes so that a tx decodered can be applied afterwards instead of mixing the RLP decoding with the tx decoding logic",
+      "createdAt": "2020-09-07T01:47:30.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "They would follow the devp2p protocol in that case (which happens to be the same as how they are merklized), and the EIP should state how they are encoded over devp2p.",
+      "createdAt": "2020-09-07T01:52:44.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "On mobile right now, if you can't find it in the EIP I can point it out once at computer and you can hopefully help me understand what wasn't clear about the EIP so I can edit.  🙂",
+      "createdAt": "2020-09-07T01:54:20.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "> As of `FORK_BLOCK_NUMBER`, all transactions sent over devp2p or included in a block **MUST** be of the form `TransactionType || TransactionPayload`\n<@!543900561460822016> This is the line I was referring to.  I need to delete the \"or included in a block\" bit since that is actually stated more clearly on another line.",
+      "createdAt": "2020-09-07T02:08:12.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "This is the bit about the transaction root:\n> As of `FORK_BLOCK_NUMBER`, the transaction root in the block header **MUST** be the root hash of `patriciaTrie(leb128(transactionIndexInBlock) => TransactionType || TransactionPayload)`.",
+      "createdAt": "2020-09-07T02:12:20.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think <@!273808422753796097> was mildly against leb128.  Should we just have a 32 byte key instead?",
+      "createdAt": "2020-09-07T02:13:09.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Or perhaps simply strip leading 0s?",
+      "createdAt": "2020-09-07T02:13:47.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Alternatively we could define the transaction index as 16 bits or something (which should be plenty, and we can always increase the size in a future hard fork).",
+      "createdAt": "2020-09-07T02:15:05.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Going to go with big endian 16-bit for those indexes for now.  I don't feel strongly, so I'm welcome to debate/discussion around them!",
+      "createdAt": "2020-09-07T02:18:01.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> I don't recommend RLP here, everyone seems to prefer \"something else\"\n\n<@!301186049323958275> hol' up. I'm not sure \"everyone\" is applicable. I think many client devs (including me) would prefer not to drastically change things if it can be avoided. I, for one, prefer RLP, since it's very well known and has stable implementations",
+      "createdAt": "2020-09-07T09:06:00.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "The `patriciaTrie( rlp(index) -> rlp(data))` is used both for the root of transactions, aswell as the root of receipts. There's a build-in quirk, that the `0`th element is, key-ordering-wise, \"after\" the `0x7f`th element, but other than that it's a pretty simple thing that works already. I'll try to rope in some other devs here to get some more input... cc <@!206016661470314496> <@!194432762315407360>",
+      "createdAt": "2020-09-07T09:11:03.453000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "> <@!301186049323958275> hol' up. I'm not sure \"everyone\" is applicable. I think many client devs (including me) would prefer not to drastically change things if it can be avoided. I, for one, prefer RLP, since it's very well known and has stable implementations\n<@!211091239112671234> Thanks for speaking up!  The impression I got on the call and here in Discord the other day was that no one wanted to use RLP if given the choice, which is why I changed it from RLP.  My goal here is to get 2718 through as smoothly as possible, and if that means SSZ I'm fine with that and if that means RLP I'm fine with that too.",
+      "createdAt": "2020-09-07T09:18:03.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We *will* have to change the transaction and receipt merkle trie, but we can *only* change the values (not the key) if changing the key complicates things.",
+      "createdAt": "2020-09-07T09:18:47.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Why do the transactions/receipts trie need to change?",
+      "createdAt": "2020-09-07T09:19:13.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Because we will be adding the TransactionType, which will be part of the value.",
+      "createdAt": "2020-09-07T09:19:29.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "```\npatriciaTrie(transactionIndexInBlock => TransactionType || ReceiptPayload)\n``` is what the EIP currently has, we could change the key back to `rlp(transactionIndexInBlock)` if that simplifies things.",
+      "createdAt": "2020-09-07T09:20:22.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "The definition of it as `trieroot( rlp(index) -> rlp(object))` doesn't have to change, does it?",
+      "createdAt": "2020-09-07T09:20:29.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "🤔  There was quite a bit of \"demand\" on the call and in here to not RLP encode the transaction.",
+      "createdAt": "2020-09-07T09:20:58.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The original specification was `rlp([TransactionType, Payload])` and I received pushback against it from multiple people which is why it was changed to `TransactionType || Payload`.",
+      "createdAt": "2020-09-07T09:21:45.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I'm still unsure why is the transaction type and payload becoming part of the transaction receipt?",
+      "createdAt": "2020-09-07T12:01:53.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "Me too. A `hash` is a hash, no? I don't see why anything other than \"how to calculate the hash/signature/sender given a blob of transaction data\" needs to change.",
+      "createdAt": "2020-09-07T12:14:29.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "Ah wait. My bad. So the patricia trie is _not_ a list of hashes, but a list of bodies. But even so",
+      "createdAt": "2020-09-07T12:16:38.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I'm missing something here. Are we talking about the `receiptsRoot` in the block? That trie does not seem to contain the input transaction, unless I'm missing something?",
+      "createdAt": "2020-09-07T12:19:20.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Or are we talking about `transactionsRoot`?",
+      "createdAt": "2020-09-07T12:19:53.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "> This is the bit about the transaction root:\n<@!301186049323958275> Ah I see, the main discussion is that this proposal now changes the key from rlp to leb128.",
+      "createdAt": "2020-09-07T12:22:38.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Most recently I dropped leb128 due to feedback against it.",
+      "createdAt": "2020-09-07T13:03:28.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I'm just trying to make everyone happy.  😩",
+      "createdAt": "2020-09-07T13:03:36.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Ah ok, I started to locally edit the EIP, but will wait if you have other changes pending.",
+      "createdAt": "2020-09-07T13:04:38.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!211091239112671234> Correct, the block header has two merkle roots, one for transactions and one for receipts.  The data that goes into the transactions trie is the transaction index (within the block) and the transaction itself.  So it is a consensus requirement that all clients build that merkle trie the same way, which means we all have to use the same encoding for the transaction.",
+      "createdAt": "2020-09-07T13:05:11.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!425279588009246720> They are all merged, do you still see LEB128 in master?",
+      "createdAt": "2020-09-07T13:05:23.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "No, it has no leb128 in it.",
+      "createdAt": "2020-09-07T13:07:01.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "<@!301186049323958275> right. And as long as \"encoding the transaction\" is well specified and defined, we don't have touch the rules for how the tx/receipt-roots are generated. (unless there's a strong urge to)",
+      "createdAt": "2020-09-07T13:07:17.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I think the EIP could be better organised 🙂",
+      "createdAt": "2020-09-07T13:07:19.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!211091239112671234> Hmm, IIUC, you are arguing that we don't need to touch the receipts at all?  Originally I didn't and someone an an ACD call indicated that it was needed, and convinced me... but I don't remember what they said.",
+      "createdAt": "2020-09-07T13:09:10.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If I can't remember, and no one else can, then we can cut it and pretend this never happened.  🙂",
+      "createdAt": "2020-09-07T13:09:58.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "I don't think I'm arguing that. I'm arguing that `DeriveSHA( <list of things>) => root` need not change. It can continue to use `rlp(thing)` for values and `rlp(index)` for key",
+      "createdAt": "2020-09-07T13:10:30.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Would it mean that in `rlp(thing)`  `thing` becomes an opaque byte serialisation of the transaction?",
+      "createdAt": "2020-09-07T13:11:10.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Or could we say it `key=rlp(index) value=<opaque tx bytes>` ?",
+      "createdAt": "2020-09-07T13:11:54.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "I personally don't see the point in making `value=<opaque blob>` in favour of `value=rlp(tx)`.",
+      "createdAt": "2020-09-07T13:13:52.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "We can retain `rlp(index)` if that is what people want.  I was *trying* to remove RLP as I saw it since there were multiple people who indicated they didn't like RLP and since we had to touch that code I figured we could drop RLP there while we were futzing in there, but we can keep it like that.  The value *will* need to change though if we do typed transaction receipts.",
+      "createdAt": "2020-09-07T13:14:31.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "What do you mean by `rlp(tx)`? Opaque bytes or not?",
+      "createdAt": "2020-09-07T13:14:35.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "... not sure what you are asking... `rlp(tx)` == rlp-representation of the transaction, however that is defined",
+      "createdAt": "2020-09-07T13:15:23.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "That is the main discussion, if the transaction is not using an outer RLP wrapping, then why define an RLP representation of it for the trie?",
+      "createdAt": "2020-09-07T13:16:46.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Not all transactions necessarily will use RLP (and in fact, there seems to be a strong push to explicitly *not* use RLP for future transaction types).",
+      "createdAt": "2020-09-07T13:17:25.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "What is the functional value of not using RLP for future tx types? It seems like the gains are minimal compared to the increased complexity of the EIP",
+      "createdAt": "2020-09-07T13:18:20.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think most people feel that RLP is hard to work with (which I agree with).",
+      "createdAt": "2020-09-07T13:19:05.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "There's strong push against RLP and it may happen, among other things, that the state trie will not use it.",
+      "createdAt": "2020-09-07T13:19:44.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It also is a bit large for some data structures, which is mildly annoying.",
+      "createdAt": "2020-09-07T13:19:45.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "It seems like other serialization schemes could be introduced at the web3 / RPC / devp2p level if people really want something nicer",
+      "createdAt": "2020-09-07T13:20:31.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I'd actually argue for the trie having a fixed size index and the opaque bytes would be good enough. The trie does not need to define how the data is transmitted on the wire? It is only used to create the hash.",
+      "createdAt": "2020-09-07T13:20:35.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "But I'm relatively clueless here for that part and client devs will know better.",
+      "createdAt": "2020-09-07T13:22:07.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "Well, in that case one could instead have the `value=tx.hash()`. That would make it easier on memory to construct the trie (in a naive implementation which builds the entire structure before collapsing it)",
+      "createdAt": "2020-09-07T13:23:14.694000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "But still, I think there's quite a leap between introducing a couple of more tx-types and redefining our basic encoding schemes...",
+      "createdAt": "2020-09-07T13:24:15.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "That's true. If it provides some improvements overall, is that a bad step though?",
+      "createdAt": "2020-09-07T13:26:17.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "general",
+      "parent": "",
+      "content": "Friendly reminder we had a call scheduled in ~35 mins to discuss 2718 and other YOLOv2 EIPs: https://github.com/ethereum/pm/issues/204",
+      "createdAt": "2020-09-07T13:26:30.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "timbeiko",
+      "category": "general",
+      "parent": "",
+      "content": "Here is a zoom link we can use: https://consensys.zoom.us/j/97683842262",
+      "createdAt": "2020-09-07T13:28:04.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> That's true. If it provides some improvements overall, is that a bad step though?\n\nWell, \"some improvements\" needs to be weighed against the complexity of having to support both legacy and new types. All current clients do retain the ability to process the chain from genesis, so it's not like we can just switch over to something new and nuke out all the old stuff.",
+      "createdAt": "2020-09-07T13:28:40.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "With the outer RLP wrapping, I believe there's still some changes. You have mentioned that a \"naive\" implementation could benefit from a simplification, but I believe geth would not have a naive implementation. Would the RLP-wrapped-RLP-transaction approach require any speed improvement from geth's side or is it transparent?",
+      "createdAt": "2020-09-07T13:30:19.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!211091239112671234> It is possible I'm not understanding how your code is currently structured, which is why it is very valuable to get client dev input.",
+      "createdAt": "2020-09-07T13:31:42.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If you receive a transaction over devp2p in the form `ssz(a, b, c, d)`, is it *easier* for you to put that into the trie as `rlp(ssz(a, b, c, d))` than put it in as `ssz(a, b, c, d)`?",
+      "createdAt": "2020-09-07T13:32:30.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Even though that is obviously redundant, the way your code is structured may be such that doing the redundant wrapping is *easier*.",
+      "createdAt": "2020-09-07T13:33:02.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "Actually, geth does have a rather naive implementation, but me and <@!353136597522448385> were just trying to replace that: https://github.com/ethereum/go-ethereum/pull/21407",
+      "createdAt": "2020-09-07T13:33:13.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "<@!301186049323958275> well, I think the threshold to cross here is to receive `ssz` from the network in the first place.",
+      "createdAt": "2020-09-07T13:34:44.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "I think it would be messy to sometimes do ssz and sometimes to rlp, but <@!194432762315407360> is better suited than me to address that..",
+      "createdAt": "2020-09-07T13:35:24.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> Would the RLP-wrapped-RLP-transaction approach require any speed improvement from geth's side or is it transparent?\n\nYou've lost me there, I think.. But regardless, I'm not too worried about speed, more about messiness and potential for screwing things up",
+      "createdAt": "2020-09-07T13:36:59.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Hmm, we'll have to get feedback from other client devs.  I have had I think 3 or 4 core devs now tell me they would rather *not* do RLP for new transaction types, and they would like to drop RLP in favor of \"other\" when the option presents itself.",
+      "createdAt": "2020-09-07T13:37:36.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I meant if `rlp([txtype, [nonce, gasLimit, ..]])` poses any speed change compared to `rlp([nonce, gasLimit, ..])` in terms of that optimised \"derivesha\"?",
+      "createdAt": "2020-09-07T13:38:21.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> now tell me they would rather not do RLP for new transaction types, and they would like to drop RLP in favor of \"other\" when the option presents itself.\n\nMaybe I'm the odd one out here, hence why I've been trying to bring Felix in..",
+      "createdAt": "2020-09-07T13:38:37.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "But this entire discussion started with instead of having an outer RLP wrapping *on wire* and include a leading byte. That somehow evolved to changing things down the core 😬",
+      "createdAt": "2020-09-07T13:39:13.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I'm not *personally* married to any particular encoding format, it isn't critical for the EIP and it is a choice that I think others are in a better position to make ultimately.  At the moment, I'm just trying to keep the EIP in line with \"popular feedback\" I have received so far, which currently favors not-RLP.  🙂",
+      "createdAt": "2020-09-07T13:39:28.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "<@!425279588009246720> I don't think that particular difference makes any real impact",
+      "createdAt": "2020-09-07T13:39:36.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "To me (not a client developer) I think having a different encoding on the wire and in the merkle trie sounds like the worst option of all.",
+      "createdAt": "2020-09-07T13:40:14.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I would rather see RLP both on the wire and in the trie, or SSZ on the wire and in the trie, or <other> on the wire and in the trie.",
+      "createdAt": "2020-09-07T13:40:43.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "So if we are going to move to SSZ on the wire for some transaction type, then it makes sense IMO to use that same encoding in the trie.",
+      "createdAt": "2020-09-07T13:41:18.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> But this entire discussion started with instead of having an outer RLP wrapping on wire\n\nWell, wire-request are content-addressed. So if I request by  `hash`  and get something, I need to be able to verify it. And the same `hash` is used in other places, so there's a correlation between what's on the wire and what is intrinsically the transaction itself",
+      "createdAt": "2020-09-07T13:41:38.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "The reason I could live with a different encoding on wire vs. trie is because the incoming transaction format on the wire is something which is used widely (not only within clients) and it is the hardest to change (because a lot more infrastructure depends on it). Changing the trie is something which does not affect outside tooling in terms of changes, so it can be done \"behind the scenes\", at least for a non-client dev perspective (see \"binarification\" as an example).",
+      "createdAt": "2020-09-07T13:42:00.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Yes, but that doesn't *have* to match what is in the block header trie.",
+      "createdAt": "2020-09-07T13:42:05.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I definitely think it *should*, but it isn't technically required.",
+      "createdAt": "2020-09-07T13:42:13.766000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!425279588009246720> What tooling speaks devp2p other than Ethereum clients?",
+      "createdAt": "2020-09-07T13:42:49.258000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "I mean if future transaction types would want to include the transaction type in the signature, all of that is prepared outside of devp2p.",
+      "createdAt": "2020-09-07T13:43:45.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "The legacy transaction wrapping is an exception.",
+      "createdAt": "2020-09-07T13:44:03.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "But even if it goes ahead with the outer RLP wrapping, that still keeps the door open to get rid of it in the future, given the leading byte as we discussed would be easily distinguishable from the first byte of any RLP array 🙂",
+      "createdAt": "2020-09-07T13:46:16.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I think the reason for including the receipt change was because it was believed there would be value in being able to decode the receipt without looking up the transaction it was associated with.",
+      "createdAt": "2020-09-07T13:48:46.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Oh, no, I remember.",
+      "createdAt": "2020-09-07T13:49:03.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "It is because of devp2p.  When you receive a receipt over devp2p, I believe the client needs the ability to decode it, which requires knowing its structure.  If we do nothing, then when the client receives a new transaction type receipt it will not be able to decode it and will likely disconnect that peer.",
+      "createdAt": "2020-09-07T13:50:05.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "So technically, we *could* leave legacy receipts the same as they are now, but as soon as we add a second transaction type we will likely need a new receipt type (since the new transaction may not have a receipt that matches the shape of legacy receipts), and that means we will have to define a new receipt type for devp2p layer.  By having the first byte of a receipt over devp2p be the transaction type, it makes it so clients can know *how* to decode the receipt they received over the wire.  If there was no identifier and they tried to decode it as a legacy transaction, decoding would fail.",
+      "createdAt": "2020-09-07T13:54:31.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "So, for all *future* transaction types we really want that leading byte to define the shape of the receipt so it can be decoded easily.  Rather than leaving a special-case branch for legacy transactions, we can instead wrap their receipts up in the new 2718 receipt envelope like all future transactions will be wrapped in.",
+      "createdAt": "2020-09-07T13:55:58.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "For devp2p, I don't think we need to retain backward compatibility like with consensus, so in this case I think we really can delete the old code.",
+      "createdAt": "2020-09-07T13:56:35.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "Will modifying the legacy receipt format cause any problems for downstream tooling?",
+      "createdAt": "2020-09-07T13:57:47.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The current recommendation in the EIP suggests that the client continue to return legacy receipts over their JSON-RPC interfaces and devise a strategy for migrating to new receipts.",
+      "createdAt": "2020-09-07T13:58:48.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Legacy transaction receipts can be converted between 2718 format and old format, so we don't have to break downstream users when we introduce 2718.",
+      "createdAt": "2020-09-07T13:59:18.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "general",
+      "parent": "",
+      "content": "I don't understand why there needs to be a change to receipts",
+      "createdAt": "2020-09-07T14:40:02.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!211091239112671234> Assuming we don't deprecate legacy transactions at all, and just introduce a new transaction type (which happens to be signature compatible with legacy transactions, but does not replace them), do you still have a preference for RLP over positional?  Does that feeling change if the `TransactionType` is the first byte (so the transaction type is positional, but the rest may not be)?",
+      "createdAt": "2020-09-07T15:30:57.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "<@!194432762315407360> (are you Felix?  If not, ignore this message) Do devp2p2 changes usually go through the EIP process, or is there a separate process for that?  I can either include the changes to devp2p in this EIP, or just leave out all mention of how the transactions gossip from it.",
+      "createdAt": "2020-09-07T15:53:12.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "general",
+      "parent": "",
+      "content": "We usually make changes through EIPs in the networking category",
+      "createdAt": "2020-09-07T15:58:39.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "general",
+      "parent": "",
+      "content": "https://eips.ethereum.org/networking",
+      "createdAt": "2020-09-07T15:58:58.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "general",
+      "parent": "",
+      "content": "You can see the EIPs that were applied on the eth protocol in the change log section of the spec: https://github.com/ethereum/devp2p/blob/master/caps/eth.md#change-log",
+      "createdAt": "2020-09-07T16:00:01.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "<@301186049323958275> I can't say. If you have some examples I might understand the nuance better. And yes fjl is Felix",
+      "createdAt": "2020-09-07T16:03:40.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Maybe I'll leave mention of devp2p out of 2718 then, and then create a *separate* EIP for the devp2p change.  Especially since the two don't actually need to be tied to each other I don't think.",
+      "createdAt": "2020-09-07T16:04:31.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "🤔  Hmm, actually, I may be wrong about that...",
+      "createdAt": "2020-09-07T16:04:40.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "If a block contains a 2718 transaction, you need to be able to gossip that transaction with the block, which will require a devp2p change.",
+      "createdAt": "2020-09-07T16:05:01.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I'll still split it up though.",
+      "createdAt": "2020-09-07T16:05:15.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The simplest example would probably be a \"cancellation transaction\":\n```\n0x05 || nonce || gasPrice || chainId || yParity || r || s\n``` where `0x05` is the transaction type and `yParity` is `v` but without the baggage.",
+      "createdAt": "2020-09-07T16:07:39.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "The signature signs `0x05 || nonce || gasPrice || chainId`.",
+      "createdAt": "2020-09-07T16:08:02.959000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "~~The `0x05` is in there twice so that we don't need to manually construct the signed data, while still maintaining that the `TransactionType` is the first byte for rapid discrimination.~~",
+      "createdAt": "2020-09-07T16:09:02.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "Well why not reorder it to `0x05 || nonce || gasPrice || chainId || yParity || r || s ||` and sign the first part?",
+      "createdAt": "2020-09-07T16:09:58.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Ah, good point for this one.  🙂",
+      "createdAt": "2020-09-07T16:10:09.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "axic3354",
+      "category": "general",
+      "parent": "",
+      "content": "The other approach was needed to have the ability to wrap legacy transactions.",
+      "createdAt": "2020-09-07T16:10:18.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "So is the question if I would prefer `rlp([0x05, nonce, gasPrice, chainId, yParity, r, s])` or binary concatenation of fixed-size fields? Personally I'd favour rlp-lists.",
+      "createdAt": "2020-09-07T16:24:53.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Most likely the alternative would be something like `rlp([0x05, rlp([[0x05, nonce, gasPrice, chainId], [yParity, r, s]]))`",
+      "createdAt": "2020-09-07T16:31:33.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Since if we did RLP over the whole thing we would still want the second outermost list item to be a byte array.",
+      "createdAt": "2020-09-07T16:32:05.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Actually, probably need another RLP in there...\n```\nrlp([0x05, rlp([rlp([0x05, nonce, gasPrice, chainId]), [yParity, r, s]])])\n```",
+      "createdAt": "2020-09-07T16:34:30.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Which actually exemplifies one of the problems I think people have with RLP.  It isn't trivial to extract pieces off the head or tail, you have to decode the whole thing, and you can't split it up into parts without decoding the whole thing.  This leads to rlp nested in rlp as seen above, rathere than the much simpler positional format which lets you split up the encoded payload into discrete pieces without any decoding.",
+      "createdAt": "2020-09-07T16:36:11.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "That looks a bit overkill, how about <@273808422753796097> 's proposal this morning?",
+      "createdAt": "2020-09-07T17:00:44.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "holiman",
+      "category": "general",
+      "parent": "",
+      "content": "> Basically, instead of having the data structure be rlp([3, rlp([a, b, c, d, e, f, sig_v, sig_r, sig_s])]) where the signing root is rlp([3, rlp([a, b, c, d, e, f])]), the data structure would be rlp([3, rlp([[a, b, c, d, e, f], [sig_v, sig_r, sig_s]])]) where the signing root is hash(3, hash(rlp([a, b, c, d, e, f])))",
+      "createdAt": "2020-09-07T17:01:42.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "I believe that suggestion still leaves us with the problem of having to decode and then encode to validate a signature.",
+      "createdAt": "2020-09-07T17:04:50.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "Oh, maybe not.  He has you do an extra round of hashing to get around that problem.",
+      "createdAt": "2020-09-07T17:05:15.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "And I think you have to decode and then encode to verify signature?",
+      "createdAt": "2020-09-07T17:06:12.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "general",
+      "parent": "",
+      "content": "You cannot easily turn `rlp([a,b,c], [v,r,s])` into `rlp([a,b,c])` without decoding and then encoding.",
+      "createdAt": "2020-09-07T17:06:40.372000+00:00",
+      "attachments": []
+    }
+  ]
+}

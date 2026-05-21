@@ -1,0 +1,77 @@
+{
+  "id": 7745,
+  "title": "EIP-7745: Trustless log and transaction index",
+  "status": "Draft",
+  "description": "An efficient, light client and DHT friendly replacement for block header bloom filters",
+  "laymanDescription": "Ethereum currently uses bloom filters in each block header to help search event logs, but they are inefficient today. This proposal replaces them with a new Merkle-based log index that uses moderate extra consensus data yet greatly reduces bandwidth and computation for finding events, especially for light clients and indexing services.",
+  "author": "Zsolt Felföldi (@zsfelfoldi)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2024-07-17",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-7745-two-dimensional-log-filter-data-structure/20580",
+  "requires": [
+    "7916"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Declined",
+          "call": "acde/227",
+          "date": "2026-01-05"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Felföldi Zsolt",
+          "discord": "zsfelfoldi"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Indirect impact: improved performance and reliability of dapps or explorers that rely on historical event searches, especially on bandwidth-constrained devices."
+    },
+    "appDevs": {
+      "description": "Log-heavy applications may gain cheaper, more scalable indexing and queries, but need underlying infrastructure updated to support the new index."
+    },
+    "walletDevs": {
+      "description": "Wallets performing event lookups or light-client verification may adopt log-index proofs or depend on upgraded infrastructure providers and RPCs."
+    },
+    "toolingInfra": {
+      "description": "Indexers, explorers, DHT-based log networks and RPC providers must implement the new global log index, filter-map structure and Merkle-proof generation."
+    },
+    "layer2s": {
+      "description": "Specification targets L1 execution; no direct changes for L2s unless they mirror L1 header fields or adopt this log index."
+    },
+    "stakersNodes": {
+      "description": "Validators and full nodes must construct log index state per block, maintain consensus data and integrate changes into fork-handling logic."
+    },
+    "clClients": {
+      "description": "Consensus clients treat log_index_root as opaque execution data but must update header schemas, fork logic and networking to recognize it."
+    },
+    "elClients": {
+      "description": "Execution clients must maintain the LogIndex, replace logs_bloom with log_index_root, manage filter maps and Merkle trees, and extend RPCs."
+    }
+  },
+  "benefits": [
+    "Enables efficient, Merkle-provable log searches that touch only small portions of the global log dataset.",
+    "Maintains consistently low false positive rates even as block gas limits and log volumes increase.",
+    "Reduces bandwidth for log-event discovery by orders of magnitude compared with existing per-block bloom filters.",
+    "Provides precise block and transaction positions for candidate hits, minimizing unnecessary receipt fetches during log queries."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract Replace the fixed 2048 bit log event bloom filters with a new lookup index data structure that can adapt to the changing number of events per block and consistently guarantee a sufficiently low false positive ratio, allowing efficient trustless proofs of log event queries, canonical block hash and transaction hash lookups. The proposed structure maps all index entries (log events, transaction and block markers) onto a global linear index space and hashes them into a binary Merkle tree based on that index. It also contains a _filter map_ for every fixed length section of the index space. These are two dimensional sparse bit maps that provide an efficient probabilistic method for looking up indexed values or query patterns of values, yielding potential matches in the form of exact positions in the linear index space. Unlike the per-block bloom filters, they allow searching for specific events by accessing only a small portion of the entire dataset which can also be proven with a Merkle proof, making the search both efficient and light client friendly. The proposed structure can be efficiently used both for local search and for remote proof generation/verification, thereby simplifying implementation of provers and verifiers. It also allows validators that are not interested in either searching or proving logs to generate the index root hash by maintaining a minimal index state with a relatively small (hard capped) size. ## Motivation Adding logs has a significantly lower gas cost and should accordingly be less resource consuming than writing to the state. The original design of bloom filters in each block achieves this goal as there is no complex data structure like the state to update, the set of logs emitted in each block is all contained within the header and receipts belonging to that block. Logs mostly just have long term storage costs. On the other hand, searching logs in a long range of blocks is very expensive and the current bloom filters do not really help. Bloom filters are only useful as long as they are sufficiently sparse. False positive ratio rises rapidly with the number of events per filter and the density of `1` bits in the filter bit vector. In the currently existing bloom filter each log address and topic sets 3 out of a fixed length of 2048 bits which resulted in sufficiently sparse filters in the beginning but with the increase of the block gas limits the false positive ratio soon made the filter practically useless. Mainnet blocks currently add over 1000 log addresses and topics in average and therefore the bloom filter size would need to increase about tenfold in order to achieve acceptable false positive rates again. This would raise block header size to about 3 kilobytes. Even if the size of the per-block bloom filters would be raised to a sufficient level, log search would still require accessing the entire header chain. Searching in just the most recent one year history would cost over 6 gigabytes of data, not counting the access of actual logs where the bloom filters have a match. The current situation is even worse, requiring a large portion of the full block receipt sets to be accessed due to the high false positive rate of the bloom filters. Transaction inclusion lookup is also very expensive, requiring all block bodies in the searched range. While full nodes and RPC servers can and usually do build additional index structures to aid certain lookups, these structures cannot be verified remotely. While it is important to improve the transaction processing capabilities of Ethereum, trustless provability is required throughout the entire stack, from end user applications signing transactions, to the same or other end user applications getting the results they need. Scaling transaction processing only makes sense as long as there is also a trustless and scalable way to access the relevant results of those transactions. Users relying on trusted servers and indexers kind of beats the whole point of Ethereum. ## Specification ### Terms and definitions - _index entry_: a single entry in the `index_entries` tree associated with an indexed event. It is either a _log entry_, a _transaction entry_ or a _block entry_. An _index entry_ generates one or more _map values_. Each _log entry_ adds one _address value_ and 0..4 _topic values_ (in this order). Each _transaction entry_ adds one _transaction value_ and each _block entry_ adds one _block value_. - _map value_: a searchable value associated with an _index entry_. It is either an _address value_, a _topic value_, a _transaction value_ or a _block value_. Each _map value_ is represented by a 32 byte hash (the _map value hash_) which is calculated as `sha2(address)`, `sha2(topic)`, `sha2(tx_hash + b\"\\x01\")` or `sha2(block_hash + b\"\\x02\")`. - _map value index_: a single position in the global linear index space. A new _map value index_ is assigned to each indexed _map value_. - _map entry index_: the position where an _index entry_ is located in the `index_entries` tree. Each _index entry_ is located at the position corresponding to the _map value index_ of the first _map value_ it generates. - _filter map_: a `MAP_WIDTH` by `MAP_HEIGHT` sized sparse bit map assigned to a `VALUES_PER_MAP` length section of the _map value index_ space. Each _map value_ assigned to this range is marked on the map at a row and column that depends on the _map value index_, _mapping layer_ and the _map value hash_. Rows are sparsely encoded as a list of marked column indices (in strictly ascending order, which also coincides with the order of occurence). Each map contains at most `VALUES_PER_MAP` marks and therefore the chance of false positives is kept at a constant low level. - _mapping layer_: each layer defines a (_map index_, _map value hash_) => _row index_ mapping and imposes a limit on the number of _map values_ mapped into each row using that particular mapping. Multiple _mapping layers_ can be applied simultaneously on th"
+}

@@ -1,0 +1,794 @@
+{
+  "schemaVersion": 1,
+  "channel": "account-abstraction",
+  "date": "2020-10-21",
+  "messageCount": 98,
+  "sourceHash": "c4993d18500c643f5e82f940573c92db83fcecf586c078f3304e7143858483a9",
+  "searchText": "Finally got around to drafting an EIP for sponsored transactions that works with AA: https://hackmd.io/@SamWilsn/rkmD5l8Pw Pretty similar to the proposal anydot had posted back in July <@689161464829050960> Abstract should be a human readable version of the specification, with edge cases and minutia left out. What you have in there right now is content more appropriate for the Motivation section. Also, your simple summary is too long. Imagineemail subject line or the last row in a table, or a GitHub pull request title line. Think of the abstract like a gist of the specification. It isn't fully detailed, but ideally someone reading it can quickly get an idea of what is involved and/or what the solution is. I bring this up because I'm currently trying to get the gist of the solution and failing, looks like I'll have to read and grok the full spec. 😢 I appreciate the feedback! I am a bit concerned that this solution will require maintaining transaction processing code in two places every time we change valid transactions (e.g., introduce new transaction types). Though, bsmaybe I'm thinking about this wrong... I think this approach is more akin to a `CALL` than a transaction Yeah, I'm starting to get that... Basically just a CALL with a different msg.sender. Yep! And the signature and nonce are present to ensure the sender allows it. Exactly Why `gas_limit`? > A transaction package can only be invalidated if both the relayer and sponsee cooperate, which is nice for EOA sponsors, and necessary for AA contracts. I think this is a bad thing, not a good thing. I feel like end users **should** be able to cancel their transactions without needing agreement from a third party. If the relayer is able to choose the gas limit, they could pick a tiny limit, causing the inner transaction to rollback. Essentially a relayer could DoS a sponsee. So a well written relayer contract would allow users to cancel > Use sponsee nonce: the sponsee could attack the sponsor by submitting another transaction with a conflicting nonce at a higher gas price. Can you describe the specific attack here in more detail? > So a well written relayer contract would allow users to cancel <@689161464829050960> requires trust though I believe? > Can you describe the specific attack here in more detail? <@!301186049323958275> An attacker could frontrun a sponsored transaction, but only provide 2300ish gas. The sponsee's nonce would get bumped, and they'd have to resubmit their transaction. It's from https://ethereum-magicians.org/t/eip-callwithsigner-as-a-potential-fix-for-the-msg-sender-problem/4340/3?u=samwilsn Why is that a problem? Is the concern that the sponsor will still have to pay for *some* gas? With AA, can we not verify the nonce is valid prior to PAYGAS? It's not that the sponsor pays for gas, it's that the sponsor can censor a sponsee > The sponsee's nonce would get bumped Perhaps I'm misunderstanding. You are saying that someone *else* (besides the sponsee) can bump a sponsee nonce? Oh, I think we are talking about two different things. I'm convinced on min_gas_limit being necessary. I'm now talking only about the nonce issue. If the sponsee provides and signs over a nonce (as part of the signed call details), what is the attack vector that creates? > I'm now talking only about the nonce issue. If the sponsee provides and signs over a nonce (as part of the signed call details), what is the attack vector that creates? <@!301186049323958275> It's only an issue if the sponsee's transaction never completes, because of the gaslimit Or do you mean why we have to use relayer-sponsee nonces, instead of just sponsee nonce? Ah, yes, I think I see what you were asking now. If an AA contract sponsors a transaction, it wants to be absolutely sure the transaction will succeed before committing to pay with `PAYGAS`. If a malicious sponsee is allowed to invalidate a transaction-like package, they could drain an AA contract with transactions that'll never be valid. If we can check the nonce validity prior to PAYGAS, then it seems like the sponsor can't be screwed out of their gas by front-running the sponsor with a nonce-burning transaction. Also, I'm not terribly concerned about attacks where the attacker has to pay more in gas to burn the victim's gas than the victim has to pay, and it feels like we could ensure this is the case? <@!689161464829050960> Is there a reason we cannot validate the nonce prior to PAYGAS? Thinking more on this subject, it is very unfortunate that AA sponsors can only sponsor private-key signed transactions. I kinda feel like we have failed to achieve AA if we still have restrictions like that. > If we can check the nonce validity prior to PAYGAS, then it seems like the sponsor can't be screwed out of their gas by front-running the sponsor with a nonce-burning transaction. <@!301186049323958275> Allowing an AA contract to read another contract's nonce before `PAYGAS` is a whole can of worms with transaction propagation. You could stack a ton of pending transactions and invalidate them all with a cheap transaction from the sponsee account. > Thinking more on this subject, it is very unfortunate that AA sponsors can only sponsor private-key signed transactions. I kinda feel like we have failed to achieve AA if we still have restrictions like that. <@!301186049323958275> If AA contracts don't need a signature to sponsor a transaction, couldn't they just steal every token from any account? I don't have a solution to the problem, just lamenting that this particular solution doesn't feel like it fits the AA ethos. An AA smart contract wallet wouldn't need signatures, but to sponsor a transaction for an EOA, they absolutely need a signature Can we make it so only AA accounts can be sponsees? 🤔 sponsees or sponsers? The argument here is that an AA account doesn't need a sponsor at all? Correct That is, you can just call it and it can decide (based on call data) whether the transaction is valid or not. Wasn't there some rule against calling an AA account from another contract? Maybe that was in an older iteration? Anyone can craft a transaction targetting an AA contract, and the AA contract decides validity. That is true for all versions. Calls (`CALL` & `STATICCALL`) into an AA contract require a bit more work, and are only supported by the stuff in the \"beyond eip-2938...\" document. Oh, lol, just saw your edit. Heh, sorry. Realized my word choice was terrible the first time around. 🙂 So to sponsor an AA's transaction, we would need \"beyond 2938\" stuff. I haven't thought of any use cases for an AA contract being a sponsee. I've been focused on AA contracts as sponsors, since generally AA contracts will pay for their own transactions. Why would you want to sponsor an AA contract? I actually care relatively little about supporting sponsorship of non-AA transactions in a post-AA world. AA contract only has tokens, no ETH. How would you end up in that state? Or AA contract is redeeming a Tornado note as its first input and the user doesn't want to connect their accounts. Someone transfers some TOK to an AA account. 🤔 Does deploying an AA account require gas? Can that deployment not be sponsored? Presumably yes to the first (deploying an AA contract requires gas). > Or AA contract is redeeming a Tornado note as its first input and the user doesn't want to connect their accounts. <@!301186049323958275> I think, in this case, tornado would be the AA contract and would pay for the fees from the funds being claimed Deploying an AA contract requires gas, because there's no difference between an AA contract and a non-AA contract, consensus-wise But anyone can pay *that* gas right? But, for the same reason, the creation could be sponsored 😛 Yep! So lets say I want to set my grandma up with an AA account that holds DAI. I don't want her to have to understand ETH. I create the contract for her and deposit some DAI into it. She now has an AA account with DAI in it and no ETH. Ah, wait I want her to be able to transact, but I don't want to have to give her ETH to do so. Assume I am building tools for her to use (e.g., MetaMask like thing). But I don't want her to have to trust me, or me to trust her, because I don't want to have to interact with her every time she transacts. I want to help get her setup and then be able to walk away. So you wouldn't set your grandma up with an AA contract. You'd set her up with an EOA, and that EOA would hold Dai. Then, some general AA contract would exist that would sponsor transactions given Dai. > So you wouldn't set your grandma up with an AA contract. You'd set her up with an EOA, and that EOA would hold Dai. This feels like a failure of AA? I thought the whole idea with AA was that we can move away from EOAs? Like what if I want to set her up with a BLS signature instead of an ECDSA signature (for reasons)? Hm, that's a good point. So you'd want a BLS signature based AA contract to hold no ETH, to be sponsored by another AA contract that handles Dai<->ETH conversions? Or rather you'd like a system that can support that construction. Yeah. The ability for an AA account (which may utilize any validation technique including BLS, multisig, etc.) to be able to be sponsored so that gas payments can be come from somewhere else (be it secondary gas sponsorship networks or whatever). Well you could get _close_ to that by adding different signature options for the precompile... but it isn't full account abstraction plus full sender abstraction. Soooo.... technically with the way EIP-2938 (and even with all of its extensions), it's _really_ difficult to use Dai to pay for transactions. You have to deposit your Dai into the AA contract (because the contract can't read external state before `PAYGAS`), and then you need some sort of conservative price oracle... it gets pretty messy. Just as a refresher, the two wins we want from AA are the following right? 1. Gas paid by contract. 2. Expanded signing options. Yep And ideally have those two features work with all of the other things we have/want. (like sponsorship, 1559, etc.) Agreed For some reason, my brain really is struggling to keep properly scoped/focused when talking about AA. 😢 I find my brain constantly leading me down incorrect paths where I think AA contracts are more than they are designed to be. I *think* the \"AA account with only DAI still makes sense in an AA world, but maybe not? There's a lot they _could_ be, but because of various constraints, EIP-2938 _isn't_. That scenario totally makes sense! Why couldn't you have a smart contract wallet that only holds Dai, and uses a relayer to pay gas? If my grandma has the DAI holding contract, how would she do stuff like use a dapp where the calls have `msg.sender` as her DAI holding AA account? FWIW, meta transactions try to solve this at layer 2 today but we are realizing that it is kind of hell for UX, which is why we want a layer 1 solution for sponsorship. So it is *possible* to do all that without layer 1 sponsorship, the question is how do we achieve it via layer 1 sponsorship? You've convinced me that one missing piece is having an AA contract as a sponsee. I don't know exactly how necessary that piece is, but the hole certainly exists. I'm going to have to think about this some more and get back to you! My thoughts so far are that with EIP-2938 and this sponsored transaction precompile, your grandma could keep the Dai in an AA exchange/relayer contract and have `msg.sender` be an EOA **or** keep some ETH with her Dai in an AA smart contract wallet, but not both.",
+  "excerpts": [
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Finally got around to drafting an EIP for sponsored transactions that works with AA: https://hackmd.io/@SamWilsn/rkmD5l8Pw",
+      "createdAt": "2020-10-21T02:21:33.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Pretty similar to the proposal anydot had posted back in July",
+      "createdAt": "2020-10-21T02:22:45.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@689161464829050960> Abstract should be a human readable version of the specification, with edge cases and minutia left out.  What you have in there right now is content more appropriate for the Motivation section.",
+      "createdAt": "2020-10-21T02:28:16.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Also, your simple summary is too long.  Imagineemail subject line or the last row in a table, or a GitHub pull request title line.",
+      "createdAt": "2020-10-21T02:29:23.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Think of the abstract like a gist of the specification.  It isn't fully detailed, but ideally someone reading it can quickly get an idea of what is involved and/or what the solution is.",
+      "createdAt": "2020-10-21T02:30:35.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I bring this up because I'm currently trying to get the gist of the solution and failing, looks like I'll have to read and grok the full spec.  😢",
+      "createdAt": "2020-10-21T02:31:34.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I appreciate the feedback!",
+      "createdAt": "2020-10-21T02:33:20.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am a bit concerned that this solution will require maintaining transaction processing code in two places every time we change valid transactions (e.g., introduce new transaction types).",
+      "createdAt": "2020-10-21T02:33:59.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Though, bsmaybe I'm thinking about this wrong...",
+      "createdAt": "2020-10-21T02:34:36.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think this approach is more akin to a `CALL` than a transaction",
+      "createdAt": "2020-10-21T02:34:42.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, I'm starting to get that...",
+      "createdAt": "2020-10-21T02:34:54.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Basically just a CALL with a different msg.sender.",
+      "createdAt": "2020-10-21T02:35:08.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep!",
+      "createdAt": "2020-10-21T02:35:13.153000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And the signature and nonce are present to ensure the sender allows it.",
+      "createdAt": "2020-10-21T02:35:24.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Exactly",
+      "createdAt": "2020-10-21T02:35:38.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why `gas_limit`?",
+      "createdAt": "2020-10-21T02:35:41.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> A transaction package can only be invalidated if both the relayer and sponsee cooperate, which is nice for EOA sponsors, and necessary for AA contracts.\nI think this is a bad thing, not a good thing.  I feel like end users **should** be able to cancel their transactions without needing agreement from a third party.",
+      "createdAt": "2020-10-21T02:37:49.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If the relayer is able to choose the gas limit, they could pick a tiny limit, causing the inner transaction to rollback. Essentially a relayer could DoS a sponsee.",
+      "createdAt": "2020-10-21T02:37:50.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So a well written relayer contract would allow users to cancel",
+      "createdAt": "2020-10-21T02:39:04.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Use sponsee nonce: the sponsee could attack the sponsor by submitting another transaction with a conflicting nonce at a higher gas price.\nCan you describe the specific attack here in more detail?",
+      "createdAt": "2020-10-21T02:39:17.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> So a well written relayer contract would allow users to cancel\n<@689161464829050960> requires trust though I believe?",
+      "createdAt": "2020-10-21T02:39:32.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Can you describe the specific attack here in more detail?\n<@!301186049323958275> An attacker could frontrun a sponsored transaction, but only provide 2300ish gas. The sponsee's nonce would get bumped, and they'd have to resubmit their transaction.",
+      "createdAt": "2020-10-21T02:42:47.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's from https://ethereum-magicians.org/t/eip-callwithsigner-as-a-potential-fix-for-the-msg-sender-problem/4340/3?u=samwilsn",
+      "createdAt": "2020-10-21T02:43:54.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why is that a problem?",
+      "createdAt": "2020-10-21T02:43:58.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Is the concern that the sponsor will still have to pay for *some* gas?",
+      "createdAt": "2020-10-21T02:44:23.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "With AA, can we not verify the nonce is valid prior to PAYGAS?",
+      "createdAt": "2020-10-21T02:44:33.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It's not that the sponsor pays for gas, it's that the sponsor can censor a sponsee",
+      "createdAt": "2020-10-21T02:44:57.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> The sponsee's nonce would get bumped\nPerhaps I'm misunderstanding.  You are saying that someone *else* (besides the sponsee) can bump a sponsee nonce?",
+      "createdAt": "2020-10-21T02:45:29.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, I think we are talking about two different things.",
+      "createdAt": "2020-10-21T02:49:14.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm convinced on min_gas_limit being necessary.",
+      "createdAt": "2020-10-21T02:49:26.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm now talking only about the nonce issue.  If the sponsee provides and signs over a nonce (as part of the signed call details), what is the attack vector that creates?",
+      "createdAt": "2020-10-21T02:50:20.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> I'm now talking only about the nonce issue.  If the sponsee provides and signs over a nonce (as part of the signed call details), what is the attack vector that creates?\n<@!301186049323958275> It's only an issue if the sponsee's transaction never completes, because of the gaslimit",
+      "createdAt": "2020-10-21T02:56:47.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or do you mean why we have to use relayer-sponsee nonces, instead of just sponsee nonce?",
+      "createdAt": "2020-10-21T02:57:35.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, yes, I think I see what you were asking now.\n\nIf an AA contract sponsors a transaction, it wants to be absolutely sure the transaction will succeed before committing to pay with `PAYGAS`. If a malicious sponsee is allowed to invalidate a transaction-like package, they could drain an AA contract with transactions that'll never be valid.",
+      "createdAt": "2020-10-21T03:04:08.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If we can check the nonce validity prior to PAYGAS, then it seems like the sponsor can't be screwed out of their gas by front-running the sponsor with a nonce-burning transaction.  Also, I'm not terribly concerned about attacks where the attacker has to pay more in gas to burn the victim's gas than the victim has to pay, and it feels like we could ensure this is the case?",
+      "createdAt": "2020-10-21T03:28:39.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!689161464829050960> Is there a reason we cannot validate the nonce prior to PAYGAS?",
+      "createdAt": "2020-10-21T03:28:53.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Thinking more on this subject, it is very unfortunate that AA sponsors can only sponsor private-key signed transactions.  I kinda feel like we have failed to achieve AA if we still have restrictions like that.",
+      "createdAt": "2020-10-21T03:30:08.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> If we can check the nonce validity prior to PAYGAS, then it seems like the sponsor can't be screwed out of their gas by front-running the sponsor with a nonce-burning transaction. \n<@!301186049323958275> Allowing an AA contract to read another contract's nonce before `PAYGAS` is a whole can of worms with transaction propagation. You could stack a ton of pending transactions and invalidate them all with a cheap transaction from the sponsee account.",
+      "createdAt": "2020-10-21T03:31:55.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Thinking more on this subject, it is very unfortunate that AA sponsors can only sponsor private-key signed transactions.  I kinda feel like we have failed to achieve AA if we still have restrictions like that.\n<@!301186049323958275> If AA contracts don't need a signature to sponsor a transaction, couldn't they just steal every token from any account?",
+      "createdAt": "2020-10-21T03:33:33.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't have a solution to the problem, just lamenting that this particular solution doesn't feel like it fits the AA ethos.",
+      "createdAt": "2020-10-21T03:34:13.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "An AA smart contract wallet wouldn't need signatures, but to sponsor a transaction for an EOA, they absolutely need a signature",
+      "createdAt": "2020-10-21T03:34:47.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Can we make it so only AA accounts can be sponsees?",
+      "createdAt": "2020-10-21T03:34:51.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔",
+      "createdAt": "2020-10-21T03:35:06.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "sponsees or sponsers?",
+      "createdAt": "2020-10-21T03:35:18.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The argument here is that an AA account doesn't need a sponsor at all?",
+      "createdAt": "2020-10-21T03:35:21.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Correct",
+      "createdAt": "2020-10-21T03:35:29.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is, you can just call it and it can decide (based on call data) whether the transaction is valid or not.",
+      "createdAt": "2020-10-21T03:35:44.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Wasn't there some rule against calling an AA account from another contract?",
+      "createdAt": "2020-10-21T03:36:22.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Maybe that was in an older iteration?",
+      "createdAt": "2020-10-21T03:36:28.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Anyone can craft a transaction targetting an AA contract, and the AA contract decides validity. That is true for all versions.\n\nCalls (`CALL` & `STATICCALL`) into an AA contract require a bit more work, and are only supported by the stuff in the \"beyond eip-2938...\" document.",
+      "createdAt": "2020-10-21T03:38:20.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, lol, just saw your edit.",
+      "createdAt": "2020-10-21T03:38:50.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Heh, sorry.  Realized my word choice was terrible the first time around.  🙂",
+      "createdAt": "2020-10-21T03:39:23.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So to sponsor an AA's transaction, we would need \"beyond 2938\" stuff.",
+      "createdAt": "2020-10-21T03:39:51.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I haven't thought of any use cases for an AA contract being a sponsee. I've been focused on AA contracts as sponsors, since generally AA contracts will pay for their own transactions.",
+      "createdAt": "2020-10-21T03:39:59.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why would you want to sponsor an AA contract?",
+      "createdAt": "2020-10-21T03:40:09.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I actually care relatively little about supporting sponsorship of non-AA transactions in a post-AA world.",
+      "createdAt": "2020-10-21T03:40:10.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "AA contract only has tokens, no ETH.",
+      "createdAt": "2020-10-21T03:40:22.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How would you end up in that state?",
+      "createdAt": "2020-10-21T03:41:20.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or AA contract is redeeming a Tornado note as its first input and the user doesn't want to connect their accounts.",
+      "createdAt": "2020-10-21T03:41:25.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Someone transfers some TOK to an AA account.",
+      "createdAt": "2020-10-21T03:41:40.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "🤔 Does deploying an AA account require gas?  Can that deployment not be sponsored?",
+      "createdAt": "2020-10-21T03:42:04.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Presumably yes to the first (deploying an AA contract requires gas).",
+      "createdAt": "2020-10-21T03:42:15.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> Or AA contract is redeeming a Tornado note as its first input and the user doesn't want to connect their accounts.\n<@!301186049323958275> I think, in this case, tornado would be the AA contract and would pay for the fees from the funds being claimed",
+      "createdAt": "2020-10-21T03:42:24.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Deploying an AA contract requires gas, because there's no difference between an AA contract and a non-AA contract, consensus-wise",
+      "createdAt": "2020-10-21T03:42:58.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But anyone can pay *that* gas right?",
+      "createdAt": "2020-10-21T03:43:12.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But, for the same reason, the creation could be sponsored 😛",
+      "createdAt": "2020-10-21T03:43:15.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep!",
+      "createdAt": "2020-10-21T03:43:16.277000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So lets say I want to set my grandma up with an AA account that holds DAI.  I don't want her to have to understand ETH.  I create the contract for her and deposit some DAI into it.  She now has an AA account with DAI in it and no ETH.",
+      "createdAt": "2020-10-21T03:43:59.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, wait",
+      "createdAt": "2020-10-21T03:44:12.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I want her to be able to transact, but I don't want to have to give her ETH to do so.",
+      "createdAt": "2020-10-21T03:44:17.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Assume I am building tools for her to use (e.g., MetaMask like thing).",
+      "createdAt": "2020-10-21T03:44:28.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But I don't want her to have to trust me, or me to trust her, because I don't want to have to interact with her every time she transacts.  I want to help get her setup and then be able to walk away.",
+      "createdAt": "2020-10-21T03:45:08.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So you wouldn't set your grandma up with an AA contract. You'd set her up with an EOA, and that EOA would hold Dai.\n\nThen, some general AA contract would exist that would sponsor transactions given Dai.",
+      "createdAt": "2020-10-21T03:45:27.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "> So you wouldn't set your grandma up with an AA contract. You'd set her up with an EOA, and that EOA would hold Dai.\nThis feels like a failure of AA?",
+      "createdAt": "2020-10-21T03:45:46.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I thought the whole idea with AA was that we can move away from EOAs?",
+      "createdAt": "2020-10-21T03:46:01.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Like what if I want to set her up with a BLS signature instead of an ECDSA signature (for reasons)?",
+      "createdAt": "2020-10-21T03:46:21.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hm, that's a good point.",
+      "createdAt": "2020-10-21T03:47:01.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So you'd want a BLS signature based AA contract to hold no ETH, to be sponsored by another AA contract that handles Dai<->ETH conversions?",
+      "createdAt": "2020-10-21T03:47:56.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Or rather you'd like a system that can support that construction.",
+      "createdAt": "2020-10-21T03:48:12.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah.",
+      "createdAt": "2020-10-21T03:48:44.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The ability for an AA account (which may utilize any validation technique including BLS, multisig, etc.) to be able to be sponsored so that gas payments can be come from somewhere else (be it secondary gas sponsorship networks or whatever).",
+      "createdAt": "2020-10-21T03:49:47.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Well you could get _close_ to that by adding different signature options for the precompile... but it isn't full account abstraction plus full sender abstraction.",
+      "createdAt": "2020-10-21T03:50:55.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Soooo.... technically with the way EIP-2938 (and even with all of its extensions), it's _really_ difficult to use Dai to pay for transactions.\n\nYou have to deposit your Dai into the AA contract (because the contract can't read external state before `PAYGAS`), and then you need some sort of conservative price oracle... it gets pretty messy.",
+      "createdAt": "2020-10-21T03:52:43.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Just as a refresher, the two wins we want from AA are the following right?\n1. Gas paid by contract.\n2. Expanded signing options.",
+      "createdAt": "2020-10-21T03:53:02.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yep",
+      "createdAt": "2020-10-21T03:53:10.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And ideally have those two features work with all of the other things we have/want.",
+      "createdAt": "2020-10-21T03:53:31.861000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "(like sponsorship, 1559, etc.)",
+      "createdAt": "2020-10-21T03:53:40.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Agreed",
+      "createdAt": "2020-10-21T03:53:47.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For some reason, my brain really is struggling to keep properly scoped/focused when talking about AA.  😢",
+      "createdAt": "2020-10-21T03:54:10.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I find my brain constantly leading me down incorrect paths where I think AA contracts are more than they are designed to be.",
+      "createdAt": "2020-10-21T03:54:34.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I *think* the \"AA account with only DAI still makes sense in an AA world, but maybe not?",
+      "createdAt": "2020-10-21T03:55:25.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There's a lot they _could_ be, but because of various constraints, EIP-2938 _isn't_.",
+      "createdAt": "2020-10-21T03:55:25.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That scenario totally makes sense!",
+      "createdAt": "2020-10-21T03:55:51.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Why couldn't you have a smart contract wallet that only holds Dai, and uses a relayer to pay gas?",
+      "createdAt": "2020-10-21T03:56:11.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If my grandma has the DAI holding contract, how would she do stuff like use a dapp where the calls have `msg.sender` as her DAI holding AA account?",
+      "createdAt": "2020-10-21T04:00:04.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "FWIW, meta transactions try to solve this at layer 2 today but we are realizing that it is kind of hell for UX, which is why we want a layer 1 solution for sponsorship.",
+      "createdAt": "2020-10-21T04:00:23.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So it is *possible* to do all that without layer 1 sponsorship, the question is how do we achieve it via layer 1 sponsorship?",
+      "createdAt": "2020-10-21T04:00:55.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samwilsn",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You've convinced me that one missing piece is having an AA contract as a sponsee. I don't know exactly how necessary that piece is, but the hole certainly exists.\n\nI'm going to have to think about this some more and get back to you!\n\nMy thoughts so far are that with EIP-2938 and this sponsored transaction precompile, your grandma could keep the Dai in an AA exchange/relayer contract and have `msg.sender` be an EOA **or** keep some ETH with her Dai in an AA smart contract wallet, but not both.",
+      "createdAt": "2020-10-21T04:13:48.707000+00:00",
+      "attachments": []
+    }
+  ]
+}

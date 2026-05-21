@@ -1,0 +1,600 @@
+{
+  "schemaVersion": 1,
+  "channel": "account-abstraction",
+  "date": "2020-09-10",
+  "messageCount": 73,
+  "sourceHash": "b87bb2270acab6795589aa483ebddfc1a1a77a21289ff512cd3a5d478f232be6",
+  "searchText": "hello/ happy to see progress in account abstraction recently Hi kumavis! Good to see you here 😋 Would love to have your more detailed feedback on the proposal btw yeah, i should take the time to review in detail and respond trying to steal time to put together an EIP that abstracts over sendTransaction so dapps just suggest \"actions\" and wallets put them into txs however makes sense. e.g. problem: increasing gasPrice causing a new tx hash, dapps get confused. also covers some batching use cases that have gotten gnosis peeps to build custom interfaces to popular dapps. want to make sure this proposal covers all the account abstraction corners as well <@!188137169905254401> Have you seen <https://github.com/Zoltu/ethereum-browser-sdk/blob/master/ethereum-browser-sdk/library/source/shared.ts#L165-L197>? I had basically the same idea, abstract the whole concept of blocks and inclusion from dapps (along with using a better channel for web than an injected object, but that part is tangential to this particular discussion). <@!301186049323958275> interesting, can you help me understand how it differs <@!188137169905254401> Differs from what? Current ethereum.provider interface? Contract calls are by far the most common transactions that dapps create, so the interface with the wallet is \"call this method signature, on this contract, with these parameters\". The wallet then deals with turning that into a transaction. The response to the dapp is then a confidence value and an update channel they can subscribe to for confidence updates for this particular transaction. Confidence is meant to be an abstraction of \"number of block confirmations\" where `0` means transaction isn't sent yet, maybe `10` is \"pending transaction\" and 1 block confirmation is perhaps `80` and 10 confirmations is maybe `99` or something. The exact algorithm for confidence (scale of 0-100 or 0-1, haven't decided yet) would be up to the individual wallets and may vary by chain, future Ethereum updates (e.g., PoS), etc. The gist sounds like what you were kind of getting at, where the dapp says, \"this is the contract call I want to make\" or \"this is the set of contract calls I want to make\" and instead of getting back a transaction hash, they would get back some mechanism for tracking progress with the wallet that will follow re-pricing, batching, sponsorship, whatever. The goal is to make it so only wallet developers have to solve a bunch of the hard problems instead of every dapp having to solve the hard problems. <@!301186049323958275> that makes sense, thanks your proposal maps very closely to mine That suggests we are both on a reasonable path. 🙂 you included some parameters that are part of transactions and not calls (eg nonce, gasPrice) Yeah, they are optional but I included them in case some dapps need them for some reason. For example, a dapp that is designed specifically to do transaction cancellation (which would be terribly useful) would need to be able to set the nonce. Gas price and limit I really wish dapps wouldn't set, but there are a bunch of dapps that annoyingly have hard dependencies on those (which I think are an abomination). Oh, my naming is a bit different from traditional naming. I have `SubmitContractCall` and `LocalContractCall`. Where the former would result in a transaction on the chain, while the latter would be an off-chain call. Alos, gas price and limit *are* part of the `eth_call` interface, and some apps need to set them because their contracts have code that branches on `msg.gas` (or whatever the Solidity variable is). my thinking was to separate rpc methods for dealing with txs and dealing with actions as in, we already have things for txs so lets make new ones for \"actions\" Ah, in my thing I have `LegacyJsonRpc`, but that is really only for backward compatibility reasons and shouldn't be used. My *hope* is that people would only use the \"actions\", and not be generating custom transactions. I wouldn't be opposed to dropping gas and nonce stuff from the actions and basically telling people \"stop being terrible\". Which would mean the payload for a contract call would be something like: ```ts contract_address method_signature method_parameters value presentation_dsls ``` And *maybe* `chainId`. well i also like how you can do things like use mycrypto with your metamask keys. so i dont mind if wallets choose to support tx based methods for `chainId` we're trying to find a good backwards compatible way for dapps to connect explicitly to a network (and maybe more than one) and that would include info like slip44 code and chainId as needed That problem I solve by getting rid of the whole \"extension injects into the page\" thing. And instead going with an event based system (recommended by browsers for browser-extension communication). This means we no longer have to have a single provider. So you could have MetaMask and Brave Crypto Wallets installed at the same time, and MetaMask could publish a provider for each network it was connected to and Brave Crypto Wallets could do the same. The dapp would then be able to choose from a list of providers they want to communicate with (or multiple). I have a little demo of this... let me find it. neat, curious how you approached some of the details i was also in favor of removing the injection, but was overruled by dapp sympathizers 😛 My solution to that problem was to provide a little extension that injects a provider and then converts injected provider calls into the new event system. So the wallet can use the new mechanisms, while still supporting dapps built on the legacy provider system. practical the other part of the original discussion of injection was a privacy stance, that dapps shouldnt even know if the system was web3 capable or not unless the user opted in. the push back was that dapp devs would have a hard time communicating to the user what to do (install a web3 browser, or press allow, or what) That is a problem for the wallets to solve IMO. If the wallet wants to broadcast its existence to dapps, that is its choice. I don't think the protocol needs to prescribe that. yeah i wasnt really sold but i wasnt actively working on that stuff either so i withdrew from that part I wish I had more time to finish this. I have the whole thing coded and I actually use it for myself (dog food). But it has effectively no UI (I'm terrible at user interfaces). But it works with Uniswap, Augur, ENS, OpenSea via the legacy wrapper. And I have little wallet tool that works with the new stuff only. yeah, ui often seems trivial but can be quite complex in practice I just get stuck trying to build anything other than a programmer UI. 😬 same 😆 ill look more at ethereum-browser-sdk mist is dead, long live mist <@!301186049323958275> oh but if you could surface some more info on your event subscription approach, im very curious It uses `window.postMessage`, which is the officially supported/recommended means of communicating between site and extension. we're doing a plugin system \"metamask snaps\" and supporting other networks/chains, and are trying to figure out how to expose those networks to dapps right When the page is loaded and the user clicks on the extension, the extension will publish an event to the `window` of the page that announces itself and what capabilities it has. It also includes in that announcement a channel (event name essentially) that the app can talk to if it wants to communicate with that particular provider. The extension could announce multiple providers, and the dapp can present them to the user or choose on behalf of the user. And multiple extensions or perhaps an iframe host could announce as well. So the user could get a list of a bunch of options if they have multiple wallets setup (unlikely, but supported). And this works great for multiple networks. ```ts /** used to allow the application to communicate with a specific provider in the case when there are many available providers */ readonly provider_id: string /** the client must communicate with this provider using one of the protocols listed here */ readonly supported_protocols: ReadonlyArray<Protocol> /** the friendly name of this provider to present to the user */ readonly friendly_name: string /** base64 encoded png for an icon to present to the user */ readonly friendly_icon: string /** the name of the blockchain that this provider is connected to; cribbed from https://chainid.network/ */ readonly chain_name: 'Ethereum Mainnet' | 'xDAI Chain' | 'EtherInc' | 'ThunderCore Mainnet' | 'Metadium Mainnet' | 'IPOS Network' | 'Metadium Testnet' | 'Ether-1' | 'Xerom' | 'PepChain Churchill' | 'Lightstreams Testnet' | 'Atheios' | 'Lightstreams Mainnet' | 'ThunderCore Testnet' | 'IOLite' | 'Teslafunds' | 'EtherGem' | 'Expanse Network' | 'Akaroma' | 'Webchain' | 'ARTIS sigma1' | 'ARTIS tau1' | 'High Performance Blockchain' | 'Auxilium Network Mainnet' | 'Ethereum Testnet Ropsten' | 'RSK Mainnet' | 'RSK Testnet' | 'Ethersocial Network' | 'Pirl' | 'Lisinski' | 'Ethereum Testnet Rinkeby' | 'Ethereum Testnet Kovan' | 'Athereum' | 'Ethereum Testnet Görli' | 'Ethereum Classic Testnet Kotti' | 'GoChain' | 'Ethereum Classic Mainnet' | 'Aquachain' | 'Ethereum Classic Testnet' | 'Ellaism' | 'Mix' | 'POA Network Sokol' | 'Musicoin' | 'Ubiq Network Mainnet' | 'Callisto Mainnet' | 'Callisto Testnet' | 'TomoChain' | 'Ubiq Network Testnet' | 'Nepal Blockchain Network' | 'POA Network Core' | 'Private' ``` That is the announcement payload description. Also, the client can publish a request for all providers to re-announce, which is useful if there was a timing issue such as the app wasn't listening yet when the provider announced. The SDK I wrote has the client request announcements from all providers when it is initialized, and the provider announces itself to the app when the user interacts with the extension. So there shouldn't be any race/timing issues like injection has. Found a screenshot of the terrible provider chooser: seems very practical In that example, I have both a browser extension and I load the page in a wallet iframe (something that isn't possible with injection). Both publish as being a provider with different capabilities and accounts setup, and switching between them will let the dapp UI easily switch.",
+  "excerpts": [
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "hello/",
+      "createdAt": "2020-09-10T03:18:10.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "happy to see progress in account abstraction recently",
+      "createdAt": "2020-09-10T03:18:37.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Hi kumavis! Good to see you here 😋",
+      "createdAt": "2020-09-10T03:19:16.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".vbuterin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Would love to have your more detailed feedback on the proposal btw",
+      "createdAt": "2020-09-10T03:19:30.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, i should take the time to review in detail and respond",
+      "createdAt": "2020-09-10T03:22:13.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "trying to steal time to put together an EIP that abstracts over sendTransaction so dapps just suggest \"actions\" and wallets put them into txs however makes sense. e.g. problem: increasing gasPrice causing a new tx hash, dapps get confused. also covers some batching use cases that have gotten gnosis peeps to build custom interfaces to popular dapps.",
+      "createdAt": "2020-09-10T03:28:31.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "want to make sure this proposal covers all the account abstraction corners as well",
+      "createdAt": "2020-09-10T03:29:04.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!188137169905254401> Have you seen <https://github.com/Zoltu/ethereum-browser-sdk/blob/master/ethereum-browser-sdk/library/source/shared.ts#L165-L197>?  I had basically the same idea, abstract the whole concept of blocks and inclusion from dapps (along with using a better channel for web than an injected object, but that part is tangential to this particular discussion).",
+      "createdAt": "2020-09-10T03:35:11.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> interesting, can you help me understand how it differs",
+      "createdAt": "2020-09-10T03:38:15.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!188137169905254401> Differs from what?  Current ethereum.provider interface?",
+      "createdAt": "2020-09-10T03:41:58.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Contract calls are by far the most common transactions that dapps create, so the interface with the wallet is \"call this method signature, on this contract, with these parameters\".  The wallet then deals with turning that into a transaction.  The response to the dapp is then a confidence value and an update channel they can subscribe to for confidence updates for this particular transaction.",
+      "createdAt": "2020-09-10T03:43:32.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Confidence is meant to be an abstraction of \"number of block confirmations\" where `0` means transaction isn't sent yet, maybe `10` is \"pending transaction\" and 1 block confirmation is perhaps `80` and 10 confirmations is maybe `99` or something.",
+      "createdAt": "2020-09-10T03:44:28.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The exact algorithm for confidence (scale of 0-100 or 0-1, haven't decided yet) would be up to the individual wallets and may vary by chain, future Ethereum updates (e.g., PoS), etc.",
+      "createdAt": "2020-09-10T03:45:11.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The gist sounds like what you were kind of getting at, where the dapp says, \"this is the contract call I want to make\" or \"this is the set of contract calls I want to make\" and instead of getting back a transaction hash, they would get back some mechanism for tracking progress with the wallet that will follow re-pricing, batching, sponsorship, whatever.",
+      "createdAt": "2020-09-10T03:47:43.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The goal is to make it so only wallet developers have to solve a bunch of the hard problems instead of every dapp having to solve the hard problems.",
+      "createdAt": "2020-09-10T03:48:00.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> that makes sense, thanks",
+      "createdAt": "2020-09-10T03:55:49.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "your proposal maps very closely to mine",
+      "createdAt": "2020-09-10T03:56:38.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That suggests we are both on a reasonable path.  🙂",
+      "createdAt": "2020-09-10T03:56:50.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "you included some parameters that are part of transactions and not calls (eg nonce, gasPrice)",
+      "createdAt": "2020-09-10T03:57:03.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yeah, they are optional but I included them in case some dapps need them for some reason.",
+      "createdAt": "2020-09-10T03:57:31.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "For example, a dapp that is designed specifically to do transaction cancellation (which would be terribly useful) would need to be able to set the nonce.",
+      "createdAt": "2020-09-10T03:57:53.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Gas price and limit I really wish dapps wouldn't set, but there are a bunch of dapps that annoyingly have hard dependencies on those (which I think are an abomination).",
+      "createdAt": "2020-09-10T03:58:22.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, my naming is a bit different from traditional naming.  I have `SubmitContractCall` and `LocalContractCall`.",
+      "createdAt": "2020-09-10T03:59:47.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Where the former would result in a transaction on the chain, while the latter would be an off-chain call.",
+      "createdAt": "2020-09-10T04:00:17.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Alos, gas price and limit *are* part of the `eth_call` interface, and some apps need to set them because their contracts have code that branches on `msg.gas` (or whatever the Solidity variable is).",
+      "createdAt": "2020-09-10T04:00:51.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "my thinking was to separate rpc methods for dealing with txs and dealing with actions",
+      "createdAt": "2020-09-10T04:02:12.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "as in, we already have things for txs so lets make new ones for \"actions\"",
+      "createdAt": "2020-09-10T04:02:47.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah, in my thing I have `LegacyJsonRpc`, but that is really only for backward compatibility reasons and shouldn't be used.",
+      "createdAt": "2020-09-10T04:03:24.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My *hope* is that people would only use the \"actions\", and not be generating custom transactions.",
+      "createdAt": "2020-09-10T04:03:39.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I wouldn't be opposed to dropping gas and nonce stuff from the actions and basically telling people \"stop being terrible\".",
+      "createdAt": "2020-09-10T04:04:07.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which would mean the payload for a contract call would be something like:\n```ts\ncontract_address\nmethod_signature\nmethod_parameters\nvalue\npresentation_dsls\n```",
+      "createdAt": "2020-09-10T04:04:42.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And *maybe* `chainId`.",
+      "createdAt": "2020-09-10T04:04:45.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "well i also like how you can do things like use mycrypto with your metamask keys. so i dont mind if wallets choose to support tx based methods",
+      "createdAt": "2020-09-10T04:05:16.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "for `chainId` we're trying to find a good backwards compatible way for dapps to connect explicitly to a network (and maybe more than one)",
+      "createdAt": "2020-09-10T04:06:25.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and that would include info like slip44 code and chainId as needed",
+      "createdAt": "2020-09-10T04:06:49.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That problem I solve by getting rid of the whole \"extension injects into the page\" thing.",
+      "createdAt": "2020-09-10T04:06:52.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And instead going with an event based system (recommended by browsers for browser-extension communication).",
+      "createdAt": "2020-09-10T04:07:10.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This means we no longer have to have a single provider.",
+      "createdAt": "2020-09-10T04:07:22.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So you could have MetaMask and Brave Crypto Wallets installed at the same time, and MetaMask could publish a provider for each network it was connected to and Brave Crypto Wallets could do the same.",
+      "createdAt": "2020-09-10T04:08:11.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The dapp would then be able to choose from a list of providers they want to communicate with (or multiple).",
+      "createdAt": "2020-09-10T04:08:21.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have a little demo of this... let me find it.",
+      "createdAt": "2020-09-10T04:08:43.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "neat, curious how you approached some of the details",
+      "createdAt": "2020-09-10T04:09:06.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i was also in favor of removing the injection, but was overruled by dapp sympathizers 😛",
+      "createdAt": "2020-09-10T04:09:42.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "My solution to that problem was to provide a little extension that injects a provider and then converts injected provider calls into the new event system.",
+      "createdAt": "2020-09-10T04:10:48.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So the wallet can use the new mechanisms, while still supporting dapps built on the legacy provider system.",
+      "createdAt": "2020-09-10T04:11:13.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "practical",
+      "createdAt": "2020-09-10T04:11:16.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "the other part of the original discussion of injection was a privacy stance, that dapps shouldnt even know if the system was web3 capable or not unless the user opted in. the push back was that dapp devs would have a hard time communicating to the user what to do (install a web3 browser, or press allow, or what)",
+      "createdAt": "2020-09-10T04:12:47.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "That is a problem for the wallets to solve IMO.",
+      "createdAt": "2020-09-10T04:13:13.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If the wallet wants to broadcast its existence to dapps, that is its choice.  I don't think the protocol needs to prescribe that.",
+      "createdAt": "2020-09-10T04:13:30.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah i wasnt really sold but i wasnt actively working on that stuff either so i withdrew from that part",
+      "createdAt": "2020-09-10T04:13:54.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I wish I had more time to finish this.  I have the whole thing coded and I actually use it for myself (dog food).  But it has effectively no UI (I'm terrible at user interfaces).",
+      "createdAt": "2020-09-10T04:15:00.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But it works with Uniswap, Augur, ENS, OpenSea via the legacy wrapper.",
+      "createdAt": "2020-09-10T04:15:08.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And I have little wallet tool that works with the new stuff only.",
+      "createdAt": "2020-09-10T04:15:24.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, ui often seems trivial but can be quite complex in practice",
+      "createdAt": "2020-09-10T04:15:45.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I just get stuck trying to build anything other than a programmer UI.  😬",
+      "createdAt": "2020-09-10T04:15:57.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "same 😆",
+      "createdAt": "2020-09-10T04:16:36.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ill look more at ethereum-browser-sdk",
+      "createdAt": "2020-09-10T04:17:26.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "mist is dead, long live mist",
+      "createdAt": "2020-09-10T04:18:03.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "<@!301186049323958275> oh but if you could surface some more info on your event subscription approach, im very curious",
+      "createdAt": "2020-09-10T04:20:32.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It uses `window.postMessage`, which is the officially supported/recommended means of communicating between site and extension.",
+      "createdAt": "2020-09-10T04:21:12.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we're doing a plugin system \"metamask snaps\" and supporting other networks/chains, and are trying to figure out how to expose those networks to dapps",
+      "createdAt": "2020-09-10T04:21:30.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2020-09-10T04:21:54.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "When the page is loaded and the user clicks on the extension, the extension will publish an event to the `window` of the page that announces itself and what capabilities it has.",
+      "createdAt": "2020-09-10T04:22:16.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It also includes in that announcement a channel (event name essentially) that the app can talk to if it wants to communicate with that particular provider.",
+      "createdAt": "2020-09-10T04:22:50.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The extension could announce multiple providers, and the dapp can present them to the user or choose on behalf of the user.",
+      "createdAt": "2020-09-10T04:23:05.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And multiple extensions or perhaps an iframe host could announce as well.",
+      "createdAt": "2020-09-10T04:23:22.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So the user could get a list of a bunch of options if they have multiple wallets setup (unlikely, but supported).  And this works great for multiple networks.",
+      "createdAt": "2020-09-10T04:23:39.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```ts\n/** used to allow the application to communicate with a specific provider in the case when there are many available providers */\nreadonly provider_id: string\n/** the client must communicate with this provider using one of the protocols listed here */\nreadonly supported_protocols: ReadonlyArray<Protocol>\n/** the friendly name of this provider to present to the user */\nreadonly friendly_name: string\n/** base64 encoded png for an icon to present to the user */\nreadonly friendly_icon: string\n/** the name of the blockchain that this provider is connected to; cribbed from https://chainid.network/ */\nreadonly chain_name: 'Ethereum Mainnet' | 'xDAI Chain' | 'EtherInc' | 'ThunderCore Mainnet' | 'Metadium Mainnet' | 'IPOS Network' | 'Metadium Testnet' | 'Ether-1' | 'Xerom' | 'PepChain Churchill' | 'Lightstreams Testnet' | 'Atheios' | 'Lightstreams Mainnet' | 'ThunderCore Testnet' | 'IOLite' | 'Teslafunds' | 'EtherGem' | 'Expanse Network' | 'Akaroma' | 'Webchain' | 'ARTIS sigma1' | 'ARTIS tau1' | 'High Performance Blockchain' | 'Auxilium Network Mainnet' | 'Ethereum Testnet Ropsten' | 'RSK Mainnet' | 'RSK Testnet' | 'Ethersocial Network' | 'Pirl' | 'Lisinski' | 'Ethereum Testnet Rinkeby' | 'Ethereum Testnet Kovan' | 'Athereum' | 'Ethereum Testnet Görli' | 'Ethereum Classic Testnet Kotti' | 'GoChain' | 'Ethereum Classic Mainnet' | 'Aquachain' | 'Ethereum Classic Testnet' | 'Ellaism' | 'Mix' | 'POA Network Sokol' | 'Musicoin' | 'Ubiq Network Mainnet' | 'Callisto Mainnet' | 'Callisto Testnet' | 'TomoChain' | 'Ubiq Network Testnet' | 'Nepal Blockchain Network' | 'POA Network Core' | 'Private'\n```\nThat is the announcement payload description.",
+      "createdAt": "2020-09-10T04:23:57.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Also, the client can publish a request for all providers to re-announce, which is useful if there was a timing issue such as the app wasn't listening yet when the provider announced.",
+      "createdAt": "2020-09-10T04:25:30.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The SDK I wrote has the client request announcements from all providers when it is initialized, and the provider announces itself to the app when the user interacts with the extension.  So there shouldn't be any race/timing issues like injection has.",
+      "createdAt": "2020-09-10T04:26:54.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Found a screenshot of the terrible provider chooser:",
+      "createdAt": "2020-09-10T04:32:47.696000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "ff92adbdb736c75b8e7a259fe58883bafec1f5197f7ce01d55921fe157d5c539"
+        }
+      ]
+    },
+    {
+      "author": "kumavis",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "seems very practical",
+      "createdAt": "2020-09-10T04:34:24.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sky.cactus",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In that example, I have both a browser extension and I load the page in a wallet iframe (something that isn't possible with injection).  Both publish as being a provider with different capabilities and accounts setup, and switching between them will let the dapp UI easily switch.",
+      "createdAt": "2020-09-10T04:35:19.704000+00:00",
+      "attachments": []
+    }
+  ]
+}

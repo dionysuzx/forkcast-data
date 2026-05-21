@@ -1,0 +1,964 @@
+{
+  "schemaVersion": 1,
+  "channel": "witnesses",
+  "date": "2020-10-29",
+  "messageCount": 117,
+  "sourceHash": "ff2807a5aa8cac3ec8e5a84aefa98212a7d096be026bafae768ba8a00dcc9eae",
+  "searchText": "<@!489256758989029405> your node is not yet handling GetBlockWitnessHashes requests, is it? it should did you try? I will see today if that works have you pushed transactions? didn't push transactions, but I was expecting to get an empty reply at least yes, it should send an empty response, let me check what is wrong <@!482518216019542016> do you send it with 0 MessageId? (adaptive 16 or so) <@!489256758989029405> nope, this is one of them: `GetBlockWitnessHashesPayload(request_id=3233061740745749297, block_hash=b'\\x da\\xf1\\nzw\\xd8\\xf7\\x19\\x97\\xe5\\x91\\\\\\x1c\\xe0\\x1e0\\x1cb\\x81f\\xd5r\\xfad\\xe0\\x1f\\x1c6Tm\\xa6\\x0f')` or do you mean the protocol's command ID? if so, yes, that will be 0, as per the spec (GetBlockWitnessHashes (0x00)) check now I am getting responses from my machine I made a mistake and I was sending BlockWitnessHashes with 0 msgId insted of 1 (copy paste error) what is this: \\nzw and this: \\x1c6Tm <@!489256758989029405> I'm still not seeing any BlockWitnessHashes replies I can debug with you now if you want, I am getting responses to my requests when sending from my machine to the server do you have the msg data (hexadecimal ideally, without \\x notation) the one that you sent? (I just checked again, I receive responses to requests) if you send the message then I can test if we serialize it the same way public void Serialize(IByteBuffer byteBuffer, GetBlockWitnessHashesMessage message) { NettyRlpStream nettyRlpStream = new NettyRlpStream(byteBuffer); int contentLength = Rlp.LengthOf(message.RequestId) + Rlp.LengthOfKeccakRlp; nettyRlpStream.StartSequence(contentLength); nettyRlpStream.Encode(message.RequestId); nettyRlpStream.Encode(message.BlockHash); } public GetBlockWitnessHashesMessage Deserialize(IByteBuffer byteBuffer) { NettyRlpStream rlpStream = new NettyRlpStream(byteBuffer); rlpStream.ReadSequenceLength(); long requestId = rlpStream.DecodeLong(); var hash = rlpStream.DecodeKeccak(); return new GetBlockWitnessHashesMessage(requestId, hash); } I should be able to get that, just a sec do you want me to rest DB? (so there are less blocks to download?) this will come as 192 '0x242ba8ea88f10d66431c58aeeda00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000' that's the body of the GetBlockWitnessHashes thanks, I was sending 195,1,192 instead of 194,1,192 (fixing the sequence length) cool, just let me know when it's ready and I'll give it another try sorry, was on a call ready 🙂 <@!489256758989029405> still nothing I have a couple state-churning contracts that trigger a couple interesting beam sync conditions in local conditions, so I will work on connecting to our test network today, and making a daemon that pushes those state changes 0x242ba8ea88f10d66431c58aeeda00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000 <- will try it but just by looking at it, it seems wrong this does not look like a valid RLP to me? a00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000 <- this looks like Keccak (starting with a0) but whatever is before does not look to me like vlid RLP 24 is not a valid sequence start Nethermind.Serialization.Rlp.RlpException : Expected a sequence prefix to be in the range of <192, 255> and got 36 at position 1 in the message of length 50 starting with |NettyRlpStream|description missing| > I have a couple state-churning contracts that trigger a couple interesting beam sync conditions in local conditions, so I will work on connecting to our test network today, and making a daemon that pushes those state changes <@!425615769280315392> we need: code read, branch rebuild in storage and state conditions, extension split in storage and state conditions <@!489256758989029405> sorry, that was snappy-compressed. this is the raw version, without the command id: b'\\xea\\x88\\x0e\\xa2\\x9c\\xa8\\x02\\x8d~\\xde\\xa0K\\xf6\\x04\\x01$\\x10}\\xe0\\x18\\xc7S\\xff*\\x9eFL\\xa1>\\x9d\\t\\x9cE\\xdfjH\\xdd\\xbfCl\\xe3\\x0c\\x83' '0xea880ea29ca8028d7edea04bf6040124107de018c753ff2a9e464ca13e9d099c45df6a48ddbf436ce30c83' deserializes fine <@!489256758989029405> do you see a received msg and the reply sent, in your logs? let me launch it with trce log level I'm logging all messages received, and I see all the messages your node sends, but there has never been a BlockWitnessHashes msg ok, launched wait need to disable discovery otherwise it is super messy ok can you try now? ok, could see the connection, let me analyze the logs I cannot see any incoming message on wit from your node I can see the headers sync: |Received headers request from [Node|94.63.192.187:30303|Trinity/v0.1.0a36/linux/cpython3.8.5|eth65]: 2020-10-29 16:30:13.2302|TRACE|22| MaxHeaders: 192 2020-10-29 16:30:13.2302|TRACE|22| Reverse: 0 2020-10-29 16:30:13.2302|TRACE|22| Skip: 0 2020-10-29 16:30:13.2302|TRACE|22| StartingBlockhash: 2020-10-29 16:30:13.2302|TRACE|22| StartingBlockNumber: 4655 but no witness requests I think you shut it down before any NewBlock msg was sent, and I'm currently only sending GetBlockWitnessHashes upon receiving that aaaah hmmmm, no you got disconnected before that let me tell you who disconnected ah, we disconnected you because of the 0 head (wrong of us) have you started it again? it is started again but let me reenable block production ok, started as a miner connecting ok, already sent a GetBlockWitnessHashes then lost connection, apparently without receiving a disconnect msg 2020-10-29 16:39:44.8716|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3) 2020-10-29 16:39:45.1133|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3) 2020-10-29 16:39:45.2287|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3) 2020-10-29 16:39:45.4719|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3) 2020-10-29 16:39:45.7837|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3) 2020-10-29 16:39:45.9866|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 43 (36 => .0) 2020-10-29 16:39:45.9866|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 43 (36 => .0) seems that we did not recognize the protocol properly 2020-10-29 16:39:45.9866|WARN|22|Received a message from node: 0x61d5b02c6dd0268c31aec5ee4cbafb171b8083ebe65fae587200f1621de1f606045de8e00ac22f3aadf8e580fe956124ad9932ce936b28612455d47c5a5be671, (36 => 0), known protocols (3): p2p 16, eth65 17, wit0 2 I have 16 as the # of commands for the base P2P proto, plus 20 for eth65 maybe this is wrong we have 17 for eth65 don't know if the correct for eth65 is 17 or 20 I have 17 for eth64 fixed, deployinh geth uses 17, I think we're in the wrong then no should be 20 > var protocolLengths = map[uint]uint64{eth65: 17, eth64: 17, eth63: 17} interesting maybe I'm looking at an old version of geth, one sec public const int NewPooledTransactionHashes = 0x08; public const int GetPooledTransactions = 0x09; public const int PooledTransactions = 0x0a; yeah 17 was prereserved eth 65 simply uses some of the recycled messages > maybe I'm looking at an old version of geth, one sec <@!482518216019542016> it should be 17 you need to fix on eth65 > Transport Received BlockWitnessHashes msg from <Node(0xcedb23@94.237.80.80)> eth65 does not add new messages to the space, it simply reuses the existing messag id space cool, if Jason sends transactions the node should be able to process them and then the witness will be generated cool, <@!482518216019542016> let me know when the latest changes are pushed to your PR branch so I can connect properly do you know the private keys? the simple ones you said it was just 1-10 right? _keySeed[31] = 1; for (int i = 0; i < walletConfig?.DevAccounts; i++) { PrivateKey key = new PrivateKey(_keySeed); _keys.Add(key.Address, key); _passwords.Add(key.Address, AnyPassword); _isUnlocked.Add(key.Address, true); _keySeed[31]++; } _keySeed is all zeros at the beginning 10 accounts cool, 0-9 I seem to remember 0 being an invalid private key. I'm curious to go retry that. Anyway, there are plenty to choose from, thx 1 to 10 that is why _keySeed is set to 1 before the loop oh, hah missed that line 👍 <@!425615769280315392> https://github.com/gsalgado/trinity/tree/firehose-proto has been updated if that works well we will be able to enable it on mainnet pretty fast I think can default enable it for all nodes and just clear the witnesses to prevent the db from growing in recent days more nethermind nodes appeared on the network > ah, we disconnected you because of the 0 head (wrong of us) <@!489256758989029405> we seem to be getting disconnected all the time now. is that the reason? <@!425615769280315392> ^ let me remove it changed",
+  "excerpts": [
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> your node is not yet handling GetBlockWitnessHashes requests, is it?",
+      "createdAt": "2020-10-29T11:24:54.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it should",
+      "createdAt": "2020-10-29T11:25:06.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "did you try?",
+      "createdAt": "2020-10-29T11:25:18.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I will see today if that works",
+      "createdAt": "2020-10-29T11:25:31.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "have you pushed transactions?",
+      "createdAt": "2020-10-29T11:25:40.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "didn't push transactions, but I was expecting to get an empty reply at least",
+      "createdAt": "2020-10-29T11:31:50.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yes, it should send an empty response, let me check what is wrong",
+      "createdAt": "2020-10-29T11:33:41.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!482518216019542016> do you send it with 0 MessageId?",
+      "createdAt": "2020-10-29T12:22:43.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(adaptive 16 or so)",
+      "createdAt": "2020-10-29T12:23:05.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> nope, this is one of them: `GetBlockWitnessHashesPayload(request_id=3233061740745749297, block_hash=b'\\x\nda\\xf1\\nzw\\xd8\\xf7\\x19\\x97\\xe5\\x91\\\\\\x1c\\xe0\\x1e0\\x1cb\\x81f\\xd5r\\xfad\\xe0\\x1f\\x1c6Tm\\xa6\\x0f')`",
+      "createdAt": "2020-10-29T13:08:54.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "or do you mean the protocol's command ID? if so, yes, that will be 0, as per the spec (GetBlockWitnessHashes (0x00))",
+      "createdAt": "2020-10-29T13:13:53.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "check now",
+      "createdAt": "2020-10-29T13:38:18.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I am getting responses from my machine",
+      "createdAt": "2020-10-29T13:38:39.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I made a mistake and I was sending BlockWitnessHashes with 0 msgId insted of 1 (copy paste error)",
+      "createdAt": "2020-10-29T13:39:00.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "what is this: \\nzw",
+      "createdAt": "2020-10-29T13:43:38.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "and this: \\x1c6Tm",
+      "createdAt": "2020-10-29T13:43:52.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> I'm still not seeing any BlockWitnessHashes replies",
+      "createdAt": "2020-10-29T13:55:27.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can debug with you now if you want, I am getting responses to my requests when sending from my machine to the server",
+      "createdAt": "2020-10-29T13:59:21.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "do you have the msg data (hexadecimal ideally, without \\x notation)",
+      "createdAt": "2020-10-29T14:00:26.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the one that you sent?",
+      "createdAt": "2020-10-29T14:00:42.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "(I just checked again, I receive responses to requests)",
+      "createdAt": "2020-10-29T14:02:09.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if you send the message then I can test if we serialize it the same way",
+      "createdAt": "2020-10-29T14:02:21.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "public void Serialize(IByteBuffer byteBuffer, GetBlockWitnessHashesMessage message)\n        {\n            NettyRlpStream nettyRlpStream = new NettyRlpStream(byteBuffer);\n            int contentLength =\n                Rlp.LengthOf(message.RequestId)\n                + Rlp.LengthOfKeccakRlp;\n            nettyRlpStream.StartSequence(contentLength);\n            nettyRlpStream.Encode(message.RequestId);\n            nettyRlpStream.Encode(message.BlockHash);\n        }\n\n        public GetBlockWitnessHashesMessage Deserialize(IByteBuffer byteBuffer)\n        {\n            NettyRlpStream rlpStream = new NettyRlpStream(byteBuffer);\n            rlpStream.ReadSequenceLength();\n            long requestId = rlpStream.DecodeLong();\n            var hash = rlpStream.DecodeKeccak();\n            return new GetBlockWitnessHashesMessage(requestId, hash);\n        }",
+      "createdAt": "2020-10-29T14:03:14.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I should be able to get that, just a sec",
+      "createdAt": "2020-10-29T14:03:53.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "do you want me to rest DB? (so there are less blocks to download?)",
+      "createdAt": "2020-10-29T14:04:39.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-10-29T14:06:16.770000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "unknown.png",
+          "content": "5e7fab824c072540ac8d1721552c11144303bd75e24ceef1214f61be11efb07d"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this will come as 192",
+      "createdAt": "2020-10-29T14:06:21.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "'0x242ba8ea88f10d66431c58aeeda00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000'",
+      "createdAt": "2020-10-29T14:09:26.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "that's the body of the GetBlockWitnessHashes",
+      "createdAt": "2020-10-29T14:09:41.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "thanks, I was sending 195,1,192 instead of 194,1,192 (fixing the sequence length)",
+      "createdAt": "2020-10-29T14:12:57.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cool, just let me know when it's ready and I'll give it another try",
+      "createdAt": "2020-10-29T14:17:17.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "sorry, was on a call",
+      "createdAt": "2020-10-29T14:50:37.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ready",
+      "createdAt": "2020-10-29T14:50:38.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "🙂",
+      "createdAt": "2020-10-29T15:18:48.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> still nothing",
+      "createdAt": "2020-10-29T15:23:14.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have a couple state-churning contracts that trigger a couple interesting beam sync conditions in local conditions, so I will work on connecting to our test network today, and making a daemon that pushes those state changes",
+      "createdAt": "2020-10-29T15:26:37.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "0x242ba8ea88f10d66431c58aeeda00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000 <- will try it but just by looking at it, it seems wrong",
+      "createdAt": "2020-10-29T15:39:18.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "this does not look like a valid RLP to me?",
+      "createdAt": "2020-10-29T15:43:40.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "a00007908f0262ff9828077d7dfe9a47954208925109f29bc28c4067524789e97865390000 <- this looks like Keccak (starting with a0)",
+      "createdAt": "2020-10-29T15:44:24.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but whatever is before does not look to me like vlid RLP",
+      "createdAt": "2020-10-29T15:44:33.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "24 is not a valid sequence start",
+      "createdAt": "2020-10-29T15:44:41.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "Nethermind.Serialization.Rlp.RlpException : Expected a sequence prefix to be in the range of <192, 255> and got 36 at position 1 in the message of length 50 starting with |NettyRlpStream|description missing|",
+      "createdAt": "2020-10-29T15:47:22.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> I have a couple state-churning contracts that trigger a couple interesting beam sync conditions in local conditions, so I will work on connecting to our test network today, and making a daemon that pushes those state changes\n<@!425615769280315392> we need: code read, branch rebuild in storage and state conditions, extension split in storage and state conditions",
+      "createdAt": "2020-10-29T15:53:13.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-10-29T15:54:33.408000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "NethWitnessCollector.pdf",
+          "content": "47490bcfeca17672ea3787068406e8dd3c5baf79cf483c02c090e86b5925873f"
+        }
+      ]
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> sorry, that was snappy-compressed. this is the raw version, without the command id: b'\\xea\\x88\\x0e\\xa2\\x9c\\xa8\\x02\\x8d~\\xde\\xa0K\\xf6\\x04\\x01$\\x10}\\xe0\\x18\\xc7S\\xff*\\x9eFL\\xa1>\\x9d\\t\\x9cE\\xdfjH\\xdd\\xbfCl\\xe3\\x0c\\x83'",
+      "createdAt": "2020-10-29T16:00:17.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "'0xea880ea29ca8028d7edea04bf6040124107de018c753ff2a9e464ca13e9d099c45df6a48ddbf436ce30c83'",
+      "createdAt": "2020-10-29T16:00:40.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "deserializes fine",
+      "createdAt": "2020-10-29T16:24:24.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!489256758989029405> do you see a received msg and the reply sent, in your logs?",
+      "createdAt": "2020-10-29T16:25:58.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let me launch it with trce log level",
+      "createdAt": "2020-10-29T16:26:35.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I'm logging all messages received, and I see all the messages your node sends, but there has never been a BlockWitnessHashes msg",
+      "createdAt": "2020-10-29T16:27:25.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, launched",
+      "createdAt": "2020-10-29T16:27:39.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "wait",
+      "createdAt": "2020-10-29T16:28:00.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "need to disable discovery",
+      "createdAt": "2020-10-29T16:28:04.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "otherwise it is super messy",
+      "createdAt": "2020-10-29T16:28:08.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2020-10-29T16:29:54.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "can you try now?",
+      "createdAt": "2020-10-29T16:29:58.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, could see the connection, let me analyze the logs",
+      "createdAt": "2020-10-29T16:30:48.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I cannot see any incoming message on wit from your node",
+      "createdAt": "2020-10-29T16:32:47.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I can see the headers sync:",
+      "createdAt": "2020-10-29T16:33:20.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "|Received headers request from [Node|94.63.192.187:30303|Trinity/v0.1.0a36/linux/cpython3.8.5|eth65]:\n2020-10-29 16:30:13.2302|TRACE|22|  MaxHeaders: 192\n2020-10-29 16:30:13.2302|TRACE|22|  Reverse: 0\n2020-10-29 16:30:13.2302|TRACE|22|  Skip: 0\n2020-10-29 16:30:13.2302|TRACE|22|  StartingBlockhash:\n2020-10-29 16:30:13.2302|TRACE|22|  StartingBlockNumber: 4655",
+      "createdAt": "2020-10-29T16:33:21.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "but no witness requests",
+      "createdAt": "2020-10-29T16:33:27.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I think you shut it down before any NewBlock msg was sent, and I'm currently only sending GetBlockWitnessHashes upon receiving that",
+      "createdAt": "2020-10-29T16:35:02.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "",
+      "createdAt": "2020-10-29T16:36:13.362000+00:00",
+      "attachments": [
+        {
+          "type": "",
+          "origin_name": "message.txt",
+          "content": "ac9fadac75075271fb47d8c91870434a7b34cab9635b5e2343c7b3707648572e"
+        }
+      ]
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "aaaah",
+      "createdAt": "2020-10-29T16:36:27.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "hmmmm, no you got disconnected before that",
+      "createdAt": "2020-10-29T16:36:58.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let me tell you who disconnected",
+      "createdAt": "2020-10-29T16:37:02.805000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ah, we disconnected you because of the 0 head (wrong of us)",
+      "createdAt": "2020-10-29T16:38:00.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "have you started it again?",
+      "createdAt": "2020-10-29T16:38:17.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "it is started again but let me reenable block production",
+      "createdAt": "2020-10-29T16:38:57.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, started as a miner",
+      "createdAt": "2020-10-29T16:39:22.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "connecting",
+      "createdAt": "2020-10-29T16:39:41.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "ok, already sent a GetBlockWitnessHashes",
+      "createdAt": "2020-10-29T16:39:59.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "then lost connection, apparently without receiving a disconnect msg",
+      "createdAt": "2020-10-29T16:41:07.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2020-10-29 16:39:44.8716|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3)\n2020-10-29 16:39:45.1133|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3)\n2020-10-29 16:39:45.2287|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3)\n2020-10-29 16:39:45.4719|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3)\n2020-10-29 16:39:45.7837|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 8 (19 => eth.3)\n2020-10-29 16:39:45.9866|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 43 (36 => .0)",
+      "createdAt": "2020-10-29T16:41:50.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2020-10-29 16:39:45.9866|TRACE|22|[Session|In|Initialized|94.63.192.187:58558->31505] received a message of length 43 (36 => .0)",
+      "createdAt": "2020-10-29T16:41:59.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "seems that we did not recognize the protocol properly",
+      "createdAt": "2020-10-29T16:42:08.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "2020-10-29 16:39:45.9866|WARN|22|Received a message from node: 0x61d5b02c6dd0268c31aec5ee4cbafb171b8083ebe65fae587200f1621de1f606045de8e00ac22f3aadf8e580fe956124ad9932ce936b28612455d47c5a5be671, (36 => 0), known protocols (3): p2p 16, eth65 17, wit0 2",
+      "createdAt": "2020-10-29T16:45:11.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have 16 as the # of commands for the base P2P proto, plus 20 for eth65",
+      "createdAt": "2020-10-29T16:45:16.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "maybe this is wrong",
+      "createdAt": "2020-10-29T16:45:37.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "we have 17 for eth65",
+      "createdAt": "2020-10-29T16:45:41.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "don't know if the correct for eth65 is 17 or 20",
+      "createdAt": "2020-10-29T16:45:47.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I have 17 for eth64",
+      "createdAt": "2020-10-29T16:46:08.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "fixed, deployinh",
+      "createdAt": "2020-10-29T16:46:12.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "geth uses 17, I think we're in the wrong then",
+      "createdAt": "2020-10-29T16:47:07.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "no should be 20",
+      "createdAt": "2020-10-29T16:47:18.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> var protocolLengths = map[uint]uint64{eth65: 17, eth64: 17, eth63: 17}",
+      "createdAt": "2020-10-29T16:47:21.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "interesting",
+      "createdAt": "2020-10-29T16:47:31.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "maybe I'm looking at an old version of geth, one sec",
+      "createdAt": "2020-10-29T16:47:43.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "public const int NewPooledTransactionHashes  = 0x08;\n        public const int GetPooledTransactions = 0x09;\n        public const int PooledTransactions  = 0x0a;",
+      "createdAt": "2020-10-29T16:47:47.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2020-10-29T16:47:49.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "17 was prereserved",
+      "createdAt": "2020-10-29T16:47:53.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "eth 65 simply uses some of the recycled messages",
+      "createdAt": "2020-10-29T16:48:12.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> maybe I'm looking at an old version of geth, one sec\n<@!482518216019542016> it should be 17",
+      "createdAt": "2020-10-29T16:49:32.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you need to fix on eth65",
+      "createdAt": "2020-10-29T16:49:39.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> Transport  Received BlockWitnessHashes msg from <Node(0xcedb23@94.237.80.80)>",
+      "createdAt": "2020-10-29T16:49:53.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "eth65 does not add new messages to the space, it simply reuses the existing messag id space",
+      "createdAt": "2020-10-29T16:49:56.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cool, if Jason sends transactions the node should be able to process them and then the witness will be generated",
+      "createdAt": "2020-10-29T16:50:41.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cool, <@!482518216019542016> let me know when the latest changes are pushed to your PR branch so I can connect properly",
+      "createdAt": "2020-10-29T16:52:07.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "do you know the private keys?",
+      "createdAt": "2020-10-29T16:52:08.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "the simple ones",
+      "createdAt": "2020-10-29T16:52:13.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "you said it was just 1-10 right?",
+      "createdAt": "2020-10-29T16:52:30.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "_keySeed[31] = 1;\n            for (int i = 0; i < walletConfig?.DevAccounts; i++)\n            {\n                PrivateKey key = new PrivateKey(_keySeed);\n                _keys.Add(key.Address, key);\n                _passwords.Add(key.Address, AnyPassword);\n                _isUnlocked.Add(key.Address, true);\n                _keySeed[31]++;\n            }",
+      "createdAt": "2020-10-29T16:52:41.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "_keySeed is all zeros at the beginning",
+      "createdAt": "2020-10-29T16:52:54.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "10 accounts",
+      "createdAt": "2020-10-29T16:53:00.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "cool, 0-9",
+      "createdAt": "2020-10-29T16:53:45.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "I seem to remember 0 being an invalid private key. I'm curious to go retry that. Anyway, there are plenty to choose from, thx",
+      "createdAt": "2020-10-29T16:54:14.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "1 to 10",
+      "createdAt": "2020-10-29T16:54:56.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "that is why _keySeed is set to 1 before the loop",
+      "createdAt": "2020-10-29T16:55:13.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jason.carver",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "oh, hah missed that line 👍",
+      "createdAt": "2020-10-29T16:55:32.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!425615769280315392> https://github.com/gsalgado/trinity/tree/firehose-proto has been updated",
+      "createdAt": "2020-10-29T16:59:09.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "if that works well we will be able to enable it on mainnet pretty fast I think",
+      "createdAt": "2020-10-29T17:06:45.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "can default enable it for all nodes and just clear the witnesses to prevent the db from growing",
+      "createdAt": "2020-10-29T17:07:02.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "in recent days more nethermind nodes appeared on the network",
+      "createdAt": "2020-10-29T17:07:24.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "> ah, we disconnected you because of the 0 head (wrong of us)\n<@!489256758989029405> we seem to be getting disconnected all the time now. is that the reason?",
+      "createdAt": "2020-10-29T17:37:47.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "guilhermesalgado9479",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "<@!425615769280315392> ^",
+      "createdAt": "2020-10-29T17:37:51.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "let me remove it",
+      "createdAt": "2020-10-29T17:56:20.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tkstanczak",
+      "category": "Execution R&D",
+      "parent": "",
+      "content": "changed",
+      "createdAt": "2020-10-29T17:59:47.286000+00:00",
+      "attachments": []
+    }
+  ]
+}

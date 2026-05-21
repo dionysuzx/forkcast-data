@@ -17,7 +17,10 @@ interface GhIssue {
 const parseCallIdentity = (issue: GhIssue): { series: string; date: string; number: number } => {
   const title = issue.title.toLowerCase();
   const dateMatch = issue.body.match(/\[([A-Z][a-z]+ \d{1,2}, 20\d{2}),/);
-  const date = dateMatch?.[1] ? new Date(`${dateMatch[1]} UTC`).toISOString().slice(0, 10) : issue.updatedAt.slice(0, 10);
+  const parsedDate = dateMatch?.[1] ? new Date(`${dateMatch[1]} UTC`) : null;
+  const date = parsedDate && Number.isFinite(parsedDate.valueOf())
+    ? parsedDate.toISOString().slice(0, 10)
+    : issue.updatedAt?.slice(0, 10) ?? "1970-01-01";
   const number = Number.parseInt(issue.title.match(/#\s?(\d+)/)?.[1] ?? String(issue.number), 10);
   const series =
     title.includes("execution") || title.includes("acde") ? "acde" :
@@ -38,6 +41,7 @@ const discourseLinks = (issue: GhIssue): string[] =>
     .filter((value, index, values) => values.indexOf(value) === index);
 
 const issueListViaGh = (limit: number): GhIssue[] => {
+  const resolvedLimit = limit > 0 ? limit : 1000;
   const list = spawnSync("gh", [
     "issue",
     "list",
@@ -46,29 +50,14 @@ const issueListViaGh = (limit: number): GhIssue[] => {
     "--state",
     "all",
     "--limit",
-    String(limit),
+    String(resolvedLimit),
     "--search",
     "protocol-call",
     "--json",
-    "number"
-  ], { encoding: "utf8" });
+    "number,title,body,state,url,updatedAt,labels,comments"
+  ], { encoding: "utf8", maxBuffer: 1024 * 1024 * 96 });
   if (list.status !== 0) return [];
-  const numbers = (JSON.parse(list.stdout) as Array<{ number: number }>).map((issue) => issue.number);
-  const issues: GhIssue[] = [];
-  for (const number of numbers) {
-    const view = spawnSync("gh", [
-      "issue",
-      "view",
-      String(number),
-      "-R",
-      "ethereum/pm",
-      "--comments",
-      "--json",
-      "number,title,body,state,url,updatedAt,labels,comments"
-    ], { encoding: "utf8", maxBuffer: 1024 * 1024 * 8 });
-    if (view.status === 0) issues.push(JSON.parse(view.stdout) as GhIssue);
-  }
-  return issues;
+  return JSON.parse(list.stdout) as GhIssue[];
 };
 
 const fixtureIssues = (): GhIssue[] => [

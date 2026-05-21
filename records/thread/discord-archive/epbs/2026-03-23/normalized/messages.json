@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-03-23",
+  "messageCount": 46,
+  "sourceHash": "a920deeae050a262d0c9562ae6ff827b393bf6dbdca801b0816d3ee7e2fc9f56",
+  "searchText": "<@363800010518822915> can we get this into the epbs branch ? gonna try to recover the network <@358120958726373381> do you also have a fix for the withdrawals? I'm happy to try to get the network back in working order if I know that we have client implementations that could work otherwise its just gonna be a waste of effort GM, catching up on the bugs during the weekend, now you know not to deploy these changes on a Friday :). I do not think we need a breakout on ACDT right? we said on ACDC that the decision about PTC is gonna be made today on ACDT So I do expect to have a need for breakout room again yeah I'm hoping that decision is made in the general part of the meeting, not in the breakout I can't be in the ePBS breakout as I'm at the BAL one but maybe someone can relay my thoughts: * I'm against the variable payload deadline mainly because **anchoring on the uncompressed size will not yield good-enough results to actually make use of the little additional gas headroom we can squeeze out**: We'd need to assume the worst-case compression (uncompressed size == compressed size) for benchmarking, and since blocks usually compress very well, but worst-case we get no compression at all, we end up over-allocating propagation time for most blocks, collapsing the variable deadline back toward a fixed one and leaving little to no room to actually realize the ~6% headroom in practice. * Another, independent \"issue\" is that we're dealing with a heavily right-skewed distribution when it comes to uncompressed block sizes. Today, worst-case is 20x larger than avg., which would lead to most blocks receiving very early deadlines, eating into the nice propagation time ePBS originally provided (and which might also be needed bc of BALs adding additional size to the payload). * Talking with builders, the post-state monopoly argument doesn't hold - esp. since BALs will allow them to get to the post state even faster while validating the block async while already being able to build. If we still want to do it then: * the boundaries for interpolation must be figured out (we should not use 3.6s as the lower border - that might be too tight). * we must study the block size distribution better: we're dealing with a heavily right-skewed distribution (both when looking at compressed as well as uncompressed). Worst-case of 10 MiB is 5x to much compared to what's realistic with today's gas limit and glamsterdam repricings. Better add the block gas limit to the formula and have the max be gas_limit / 64 (calldata cost per byte with 7976) - there are edge cases where 7702 auths could be used for even larger uncompressed blocks - not sure if this is overcomplicating things or if we want to be super precise here. * agree with potuz that in general linear(!) interpolation is the right approach, but the lower and upper bound + assumption for worst-case size matters a lot. My feeling is, since we can still to it later on (and it would be a simple change), let's delay it for now, see how the market evolves with ePBS being shipped, and reconsider it. Also, we might want to reconsider agreeing on a specific version/variant of Snappy, which would help here. For additional details, [I put the hackmd post I shared on last week's ACDC onto ethresearch](https://ethresear.ch/t/why-a-variable-payload-deadline-only-helps-by-6/24488) I don't think we'll discuss the issue of variable PTC deadline today? we're not close at all to even looking into that. But anyway we can also mention a link to this in the general part of the meeting. But I do want to know what do you mean by BAL helping here with the post-state, there's no way we'll have BAL in the bid right? BAL will have to be broadcast with the payload, not the block yeah we have a fix but we can’t sync rn ah right, how far out is that? I could move around some validator keys to get us back to finalization so if checkpoint sync could be fixed, then we could get lh back in the game We haven’t made much progress on checkpoint sync hopefully we can push it forward this week As soon as you get the ExecutionPayload, you only need a few ms to get to the post-state, no execution/validation needed to get there. Ofc, to know that the BAL is correct, you need to execute the block, but this can be done async. So, in the worst-case, instead of executing for 2-3s to arrive at the post-state, you would apply the BAL, start building the next block while validating the prev block + BAL async. still this then gives seconds of monopoly to the builder during those seconds that builder is the only one that can provide preconfs for example This doesn't matter as \"competetive\" building only starts right before the next slot. I think we might overindex on the usefulness of the post-state here. I think assuming that block building dynamic will remain the same as now is too optimistic Let's say you're right (this is the weakest argument I had against the variable deadline), the fact that we're anchoring on uncompressed vs compressed (which matters over the wire) removes any benefits as we'd have to assume worst-case compression. yes with this I agree, we need to do this over the compressed size for sure, that's what's being broadcast. So at the very least we need to have a protocol in which the compressed size is bound, even if it's not deterministic, we want to have it bounded so that we can do a linear regression over the bound <@592004585506340885> could you take a look at the last commit here? https://github.com/ethereum/consensus-specs/pull/4979 I don't want to start fixing tests if you'll change the core logic right away 🙂 Do we want to support `MIN_SEED_LOOKAHEAD` future epochs? I'm thinking we should just hardcode this to 1. So prev, curr, next. I pushed a few changes. Fixed tests, renamed `ptc_lookbehind` to `ptc_window` (like <@363800010518822915> suggested), and refactored `process_ptc_window`. Before & now, if `MIN_SEED_LOOKAHEAD` is not 1, there will be issues. I would prefer we do: ``` ptc_window: Vector[Vector[ValidatorIndex, PTC_SIZE], 3 * SLOTS_PER_EPOCH] ``` do we have a p2p builder implemented today? for kurtosis or even devnet 0 i want to test the following: - p2p gossip for proposer preference - p2p gossip for bids - proposer uses the p2p bid when its value is higher than local bid - p2p builder releases the payload after seeing the proposer includes its bid we have https://github.com/ethpandaops/buildoor but it doesn't support reading proposer preferences yet. we can do that pretty easily shouldn't be a lot of work. I think we will need this API in a client to implement an external builder: https://github.com/ethereum/beacon-APIs/pull/584 this api is needed for the builder with the payload and execution requests to construct an execution payload envelope as the envelope construction involves a post state beacon state transition does prysm support all of these things now? if so, I can work on implementing these things quickly so that you can be unblocked on testing. We can implement listening to the proposer preferences topic pretty fast buildoor has been tested pre-gloas on a local kurtosis testnet and delivers payloads via the builder-api. so i believe we would just need to link up the machinery to get it to create the bids and submit them We have to support MIN_SEED_LOOKAHEAD IMO, there's no point of keeping it without supporting it across helpers for duties, it makes it easier to reason about proposals/ptc, etc. I also think we should remove MIN_SEED_LOOKAHEAD anyway and just hardcode everything to 1, but that's a different story https://discord.com/channels/595666850260713488/1483497365594832917 for visibility, relevant for proposer preferences discussion above Hmm let me think about this some more & maybe revert the changes I made. i dont think we have the beacon api, but i was thinking we dont even need the beacon api, we could just having a light weight builder that does it. I dont have a preference which direction we take its in our devnet0 branch! should i be able to checkpoint sync from lodestar? i know it’s a 2-3d old checkpoint so might take a while to get to head its fine as long as it's a fresh DB <@755590043632140352> thanks for your message. I've reverted my change. We're using `MIN_SEED_LOOKAHEAD` again.",
+  "excerpts": [
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@363800010518822915> can we get this into the epbs branch ?",
+      "createdAt": "2026-03-23T06:26:00.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "gonna try to recover the network",
+      "createdAt": "2026-03-23T06:26:10.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@358120958726373381> do you also have a fix for the withdrawals?",
+      "createdAt": "2026-03-23T12:39:05.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm happy to try to get the network back in working order if I know that we have client implementations that could work",
+      "createdAt": "2026-03-23T12:39:20.258000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "otherwise its just gonna be a waste of effort",
+      "createdAt": "2026-03-23T12:39:28.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "GM, catching up on the bugs during the weekend, now you know not to deploy these changes on a Friday :). I do not think we need a breakout on ACDT right?",
+      "createdAt": "2026-03-23T12:55:27.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we said on ACDC that the decision about PTC is gonna be made today on ACDT",
+      "createdAt": "2026-03-23T13:13:21.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So I do expect to have a need for breakout room again",
+      "createdAt": "2026-03-23T13:13:31.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I'm hoping that decision is made in the general part of the meeting, not in the breakout",
+      "createdAt": "2026-03-23T13:26:59.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I can't be in the ePBS breakout as I'm at the BAL one but maybe someone can relay my thoughts:\n* I'm against the variable payload deadline mainly because **anchoring on the uncompressed size will not yield good-enough results to actually make use of the little additional gas headroom we can squeeze out**: We'd need to assume the worst-case compression (uncompressed size == compressed size) for benchmarking, and since blocks usually compress very well, but worst-case we get no compression at all, we end up over-allocating propagation time for most blocks, collapsing the variable deadline back toward a fixed one and leaving little to no room to actually realize the ~6% headroom in practice.\n* Another, independent \"issue\" is that we're dealing with a heavily right-skewed distribution when it comes to uncompressed block sizes. Today, worst-case is 20x larger than avg., which would lead to most blocks receiving very early deadlines, eating into the nice propagation time ePBS originally provided (and which might also be needed bc of BALs adding additional size to the payload).\n* Talking with builders, the post-state monopoly argument doesn't hold - esp. since BALs will allow them to get to the post state even faster while validating the block async while already being able to build.",
+      "createdAt": "2026-03-23T13:54:34.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we still want to do it then:\n* the boundaries for interpolation must be figured out (we should not use 3.6s as the lower border - that might be too tight). \n* we must study the block size distribution better: we're dealing with a heavily right-skewed distribution (both when looking at compressed as well as uncompressed). Worst-case of 10 MiB is 5x to much compared to what's realistic with today's gas limit and glamsterdam repricings. Better add the block gas limit to the formula and have the max be gas_limit / 64 (calldata cost per byte with 7976) - there are edge cases where 7702 auths could be used for even larger uncompressed blocks - not sure if this is overcomplicating things or if we want to be super precise here.\n* agree with potuz that in general linear(!) interpolation is the right approach, but the lower and upper bound + assumption for worst-case size matters a lot.\n\nMy feeling is, since we can still to it later on (and it would be a simple change), let's delay it for now, see how the market evolves with ePBS being shipped, and reconsider it.\nAlso, we might want to reconsider agreeing on a specific version/variant of Snappy, which would help here.\n\nFor additional details, [I put the hackmd post I shared on last week's ACDC onto ethresearch](https://ethresear.ch/t/why-a-variable-payload-deadline-only-helps-by-6/24488)",
+      "createdAt": "2026-03-23T13:55:34.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think we'll discuss the issue of variable PTC deadline today? we're not close at all to even looking into that. But anyway we can also mention a link to this in the general part of the meeting.",
+      "createdAt": "2026-03-23T13:56:31.653000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I do want to know what do you mean by BAL helping here with the post-state, there's no way we'll have BAL in the bid right?",
+      "createdAt": "2026-03-23T13:57:17.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "BAL will have to be broadcast with the payload, not the block",
+      "createdAt": "2026-03-23T13:57:29.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah we have a fix but we can’t sync rn",
+      "createdAt": "2026-03-23T14:00:29.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah right, how far out is that?",
+      "createdAt": "2026-03-23T14:00:57.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I could move around some validator keys to get us back to finalization",
+      "createdAt": "2026-03-23T14:01:10.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so if checkpoint sync could be fixed, then we could get lh back in the game",
+      "createdAt": "2026-03-23T14:01:21.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We haven’t made much progress on checkpoint sync hopefully we can push it forward this week",
+      "createdAt": "2026-03-23T14:02:04.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As soon as you get the ExecutionPayload, you only need a few ms to get to the post-state, no execution/validation needed to get there. Ofc, to know that the BAL is correct, you need to execute the block, but this can be done async.",
+      "createdAt": "2026-03-23T14:08:32.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So, in the worst-case, instead of executing for 2-3s to arrive at the post-state, you would apply the BAL, start building the next block while validating the prev block + BAL async.",
+      "createdAt": "2026-03-23T14:09:36.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "still this then gives seconds of monopoly to the builder",
+      "createdAt": "2026-03-23T14:09:51.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "during those seconds that builder is the only one that can provide preconfs",
+      "createdAt": "2026-03-23T14:10:07.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "for example",
+      "createdAt": "2026-03-23T14:10:11.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This doesn't matter as \"competetive\" building only starts right before the next slot. I think we might overindex on the usefulness of the post-state here.",
+      "createdAt": "2026-03-23T14:10:37.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think assuming that block building dynamic will remain the same as now is too optimistic",
+      "createdAt": "2026-03-23T14:11:36.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Let's say you're right (this is the weakest argument I had against the variable deadline), the fact that we're anchoring on uncompressed vs compressed (which matters over the wire) removes any benefits as we'd have to assume worst-case compression.",
+      "createdAt": "2026-03-23T14:16:52.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes with this I agree, we need to do this over the compressed size for sure, that's what's being broadcast. So at the very least we need to have a protocol in which the compressed size is bound, even if it's not deterministic, we want to have it bounded so that we can do a linear regression over the bound",
+      "createdAt": "2026-03-23T15:47:50.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@592004585506340885> could you take a look at the last commit here? https://github.com/ethereum/consensus-specs/pull/4979 I don't want to start fixing tests if you'll change the core logic right away 🙂",
+      "createdAt": "2026-03-23T15:49:39.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do we want to support `MIN_SEED_LOOKAHEAD` future epochs? I'm thinking we should just hardcode this to 1. So prev, curr, next.",
+      "createdAt": "2026-03-23T17:53:18.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I pushed a few changes. Fixed tests, renamed `ptc_lookbehind` to `ptc_window` (like <@363800010518822915> suggested), and refactored `process_ptc_window`.",
+      "createdAt": "2026-03-23T17:54:58.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Before & now, if `MIN_SEED_LOOKAHEAD` is not 1, there will be issues.",
+      "createdAt": "2026-03-23T17:55:42.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I would prefer we do:\n```\nptc_window: Vector[Vector[ValidatorIndex, PTC_SIZE], 3 * SLOTS_PER_EPOCH]\n```",
+      "createdAt": "2026-03-23T17:59:27.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "do we have a p2p builder implemented today? for kurtosis or even devnet 0 i want to test the following:\n- p2p gossip for proposer preference\n- p2p gossip for bids\n- proposer uses the p2p bid when its value is higher than local bid\n- p2p builder releases the payload after seeing the proposer includes its bid",
+      "createdAt": "2026-03-23T18:06:11.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have https://github.com/ethpandaops/buildoor but it doesn't support reading proposer preferences yet. we can do that pretty easily shouldn't be a lot of work. \nI think we will need this API in a client to implement an external builder: https://github.com/ethereum/beacon-APIs/pull/584 this api is needed for the builder with the payload and execution requests to construct an execution payload envelope as the envelope construction involves a post state beacon state transition",
+      "createdAt": "2026-03-23T18:33:46.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "does prysm support all of these things now? if so, I can work on implementing these things quickly so that you can be unblocked on testing.\nWe can implement listening to the proposer preferences topic pretty fast",
+      "createdAt": "2026-03-23T18:34:57.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "buildoor has been tested pre-gloas on a local kurtosis testnet and delivers payloads via the builder-api. so i believe we would just need to link up the machinery to get it to create the bids and submit them",
+      "createdAt": "2026-03-23T18:36:00.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We have to support MIN_SEED_LOOKAHEAD IMO, there's no point of keeping it without supporting it across helpers for duties, it makes it easier to reason about proposals/ptc, etc. I also think we should remove MIN_SEED_LOOKAHEAD anyway and just hardcode everything to 1, but that's a different story",
+      "createdAt": "2026-03-23T18:43:26.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://discord.com/channels/595666850260713488/1483497365594832917 for visibility, relevant for proposer preferences discussion above",
+      "createdAt": "2026-03-23T18:44:51.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm let me think about this some more & maybe revert the changes I made.",
+      "createdAt": "2026-03-23T19:51:36.878000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i dont think we have the beacon api, but i was thinking we dont even need the beacon api, we could just having a light weight builder that does it.  I dont have a preference which direction we take",
+      "createdAt": "2026-03-23T20:12:54.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "its in our devnet0 branch!",
+      "createdAt": "2026-03-23T20:13:15.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "should i be able to checkpoint sync from lodestar?",
+      "createdAt": "2026-03-23T20:16:25.213000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i know it’s a 2-3d old checkpoint so might take a while to get to head",
+      "createdAt": "2026-03-23T20:16:40.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "its fine as long as it's a fresh DB",
+      "createdAt": "2026-03-23T20:16:55.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> thanks for your message. I've reverted my change. We're using `MIN_SEED_LOOKAHEAD` again.",
+      "createdAt": "2026-03-23T20:31:18.728000+00:00",
+      "attachments": []
+    }
+  ]
+}

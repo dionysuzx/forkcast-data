@@ -1,0 +1,510 @@
+{
+  "schemaVersion": 1,
+  "channel": "cl-testing",
+  "date": "2023-10-27",
+  "messageCount": 61,
+  "sourceHash": "c1920ddabea211db64f7a841018cb1fe1110566f28ad0d7aaa43afe43a521dd4",
+  "searchText": "Hello! I am running a private devnet 10 kurtosis network, I found 1) formerly pre-fund accounts have no money except 0x878705ba3f8Bc32FCf7F4CAa1A35E72AF65CF766 has a few, slowly increasing, and 2) there are txs automatically executing. Any idea? devnet 10 and kurtosis will have different mnemonics for prefunded addresses. What do you mean you run a private devnet 10 network? Its either a private network or devnet 10 network. sorry I mean I use devnet-10 of images in a kurtosis which I used to do with devnet-8 images current config like ```json { \"participants\": [ { \"el_client_type\": \"geth\", \"el_client_image\": \"ethpandaops/geth:lightclient-devnet-10-4d161de\", \"cl_client_type\": \"lighthouse\", \"cl_client_image\": \"ethpandaops/lighthouse:devnet-10-b7a3f52\", \"count\": 3 } ], \"network_params\": { \"deneb_fork_epoch\": 1 }, \"launch_additional_services\": false, \"wait_for_finalization\": false, \"wait_for_verifications\": false, \"global_client_log_level\": \"info\", \"snooper_enabled\": true } ``` And I was able to get funds from accounts here: https://github.com/kurtosis-tech/eth-network-package/blob/9295b3997aef6678f670d5d99c5ca7e6ff64d281/src/prelaunch_data_generator/genesis_constants/genesis_constants.star#L4, but now can't. So I suppose something changed? And the kurtosis network with the above config seems very busy with txs running by itself. I wonder if it is still suitable for a rollup to test as an L1 You looking at an archived repository. Here is the latest main branch, with the proper pubkey/priv key list: https://github.com/kurtosis-tech/ethereum-package/blob/main/src/prelaunch_data_generator/genesis_constants/genesis_constants.star Try to use this instead: ```json { \"participants\": [ { \"el_client_type\": \"geth\", \"el_client_image\": \"ethpandaops/geth:lightclient-devnet-10-4d161de\", \"cl_client_type\": \"lighthouse\", \"cl_client_image\": \"ethpandaops/lighthouse:devnet-10-b7a3f52\", \"count\": 3 } ], \"network_params\": { \"deneb_fork_epoch\": 1 }, \"additional_services\": [], \"snooper_enabled\": true } ``` or even nicer if you use yaml: ```yaml participants: - el_client_type: geth el_client_image: ethpandaops/geth:lightclient-devnet-10-4d161de cl_client_type: lighthouse cl_client_image: ethpandaops/lighthouse:devnet-10-b7a3f52 count: 3 network_params: deneb_fork_epoch: 1 additional_services: [] snooper_enabled: true ``` By default we have a few tools enabled by default like tx fuzzer, thats why you going to see some traffic on the network as soon as you start it up. Perfect! Thanks! I need help with another hive test 🙂 Test: `engine-cancun/Re-Org Back into Canonical Chain, Depth=5` In this test, the following (seems) to happen: (lots of \"normal\" stuff here) FCU to Block 5, with PayloadAttributes for Block 6 NewPayload for block 6 FCU to block 6 FCU to block 5 `eth_getBlockNumber` get block 6 We throw here since this (should) not be part of the canonical chain (?). However it seems that the passing clients return the block..? Am I missing something here? I think I remember that the spec says that the FcUs that point back to the canonical chain (5 is ancestor of 6), should be ignored, let me look up the excerpt where it says this I think it's point 2 on the ref spec here: https://github.com/ethereum/execution-apis/blob/main/src/engine/paris.md#specification-1 It does say `\"MAY\"` though, so this check might be too strict Aha!! Yes I think we are being too strict here, but now it is about the interpretation of \"may\", because we essentially reorg back to block 5 and thus block 6 is too high 🤔 Thanks for the pointer 😄 But, if we \"may\" skip an update, what does this actually mean? So we either reorg back to block 5, or we skip it and stay on block 6? 🤔 I'm not super sure what the spec means by this? Yep, that's why I don't really like it when the spec uses these optional parts, because the test becomes meaningless, at the most we can check that the client does not error out in this case Ok right, yes I agree here This confuses me a lot 😅 Because now for me the spec \"canonical chain\" and especially the canonical head become rather ambiguous Right but just to get back to the point, hive expects us to have block 6, which thus implies we should ignore the rollback to block 5 🤔 Basically yes, it forces what the spec specifies to be optional 😅 Let me really quickly just double check that on the source 👀 I just skimmed over the logs at https://hivecancun.ethdevops.io/ for all other clients and it does seem that all other clients (except us) seem to (semi?)-ignore the FCU and report back the block 6 🙂 It seems like we are also changing the Safe and finalized blocks in this test :/ ``` api.ForkchoiceStateV1{ HeadBlockHash: previousHash, SafeBlockHash: previousHash, FinalizedBlockHash: previousHash, } ``` could this be causing trouble for ethjs? I think safeblockhash nor finalizedblockhash should be updated I think I checked this, I think safe and final are both the zero hash Let me re-check the local logs 🙂 Ah yes you're right, the safe and finalized are delayed in the config for this test 👍 Ah yes sorry should have mentioned, we thus crash early on, right after the \"reorg\" If it helps for debug the logs with other clients, RPC request \"id\"=25 is the FCU which updates to block 5 (reorg) and then \"id\"=15\" calls `eth_getBlockByNumber` and tries to retrieve block 6 Test runs up till 49 it seems so it seems we crash halfway 😂 I think the test is doing something a bit wrong, so the test doesn't already actually expect for the client to update the head, it expects no error, but the head is being checked at the end of the test, but this is a mistake Hmm ok, so why does it ask for block 6? Is this the thing which is mistaken? So the CL Mock executes the flow which involves sending a ForkchoiceUpdated at the end to the latest block (6), but after it does this, we do a callback where we perform this re-org to canonical test, and send the FcU to re-org back (block 5), and we don't check the head here, we simply expect no error, but then we leave the client with this, we basically override the FcU->6 with FcU->5 and never correct this Ah ok, so CL Mock thinks we are at block 6, if I understand it correctly? Yes exactly 😄 Ah great 🙂 Ok, then the follow-up question and this is more spec-related: I do not understand - at all - why all clients seem to return a block (block 6) if we get a FCU to an ancestor, and then we request a block which was actually built on top of that ancestor (ancestor = 5, built on top = 6). Because this confuses to me how reorgs would actually happen at the EL side, especially regarding respecting `eth_getBlockByNumber` 🤔 I think I missed something in the specs, but for now it makes no sense to me that if you FCU to block 5 and then request block 6, this is a valid block (what if you would instead send to request block 0x6 to clients, the `latest` block? Would these return block 5!?) I think the purpose is that the re-org only kicks-in when there FcU points to a sidechain, I think the beacon client will never do something like this (fcu->6 then fcu->5) unless something of a concurrency issue happens, which is what I think the point of this point in the spec is (protecting the EL from listening to a call that is likely result of a race condition on the CL) Ok that's actually a super good point 🙂 Yeah fcu->6 then fcu->5 makes no sense in CL world, there is no way to \"retract attestations\" from a block in order to end up in a previous block in the same chain, only a re-org to a sidechain makes sense when the voting suddendly gains more weight on this other chain but I think someone from the CL devs can correct me if I said anything that made no sense 😅 Actually it would be helpful to be able to do this from the CL side. I've opened an issue about changing the EL rules here: <https://github.com/ethereum/execution-apis/issues/313>. The reason it would be useful is that sometimes the CL wants to re-org the head, so it wants the EL to start building on the parent of the head. At the moment we work around this by suppressing the fcU for a block when we think we _might_ want to re-org it. i.e. there's an extra layer of unnecessary guess work for the CL because of this restriction. More context here: <https://github.com/ethereum/consensus-specs/pull/3034> Yes I agree FCU canonical 6 to canonical 5 makes no sense. But, what if: (and this might not even be possible, I have limited knowledge on CL side 😅 ) What if we are at block 6, and now we reorg to block 5. However, this block 5 is not part of the canonical chain at this point, it actually forked off of block 4: (diag) ``` /----> 5 -----> 6 / 4 -| \\ \\----> 5 ``` I am not even sure if this is possible, so please let me know if this can't be done 😅 But in my head with my limited knowledge on CL side this could happen if there are limited attestations and then at some point the other (the lower) chain takes over? I see, this makes sense, I think then the main distinction would be that the ForkchoiceUpdated contains or not payload attributes to instruct the EL to build payload, so if it contains payload attributes, the switch is required and the payload building process starts, whereas if it doesn't contain the payload attributes, it may decide to skip the update So assuming there are two 5's, `5` and`5'`, it's totally possible, say the block `4` of the execution chain occurred at slot `N`, then at `N+1` one proposer starts to build `5`, but if the next proposer at slot `N+2` misses block at `N+1`, it will start to build `5'`, which is a side chain, then lastly the proposer at slot `N+3` can pick on top of which `5` block to build the next one but the difference here is that `5` and `5'` are different chains, so a bit different from this specific case <@508125616940515329> Test fix is here: https://github.com/ethereum/hive/pull/934 😄 Ok yes, thanks 🙂 Ok great I will test on this branch to see if we get past the \"problem point\" of the test, thanks 😄 Heh 😄 Yeah using the payload attributes to differentiate is a good idea. Mikhail also suggested using finalization as a barrier. I'll add your suggestion to the issue not even on concurrency, the only reason that a CL would get FCU 6 -> FCU 5 is if 1) NewPayload 6 -> SYNCING 2) FCU 6 -> INVALID, LVH:5 Some CL MAY send FCU: 5 in this case. Edit: Prysm will send here in most cases too (Removing more contrived example) This is essentially the only situation we would revert an FCU that I can think so right now Either way, all reasons always involve optimistic syncing hmm, I kind of disagree with this rationale. I rather change the notion of head so that it's not a tip of the tree instead of building blocks on top of blocks that are not the canonical head. I like the invariant that the proposer always extends its canonical head",
+  "excerpts": [
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hello! I am running a private devnet 10 kurtosis network, I found 1) formerly pre-fund accounts have no money except 0x878705ba3f8Bc32FCf7F4CAa1A35E72AF65CF766 has a few, slowly increasing, and 2) there are txs automatically executing. Any idea?",
+      "createdAt": "2023-10-27T10:11:48.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "devnet 10 and kurtosis will have different mnemonics for prefunded addresses. \n\nWhat do you mean you run a private devnet 10 network? Its either a private network or devnet 10 network.",
+      "createdAt": "2023-10-27T10:17:43.776000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "sorry I mean I use devnet-10 of images in a kurtosis",
+      "createdAt": "2023-10-27T10:22:24.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "which I used to do with devnet-8 images",
+      "createdAt": "2023-10-27T10:23:11.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "current config like ```json\n{\n  \"participants\": [\n    {\n        \"el_client_type\": \"geth\",\n        \"el_client_image\": \"ethpandaops/geth:lightclient-devnet-10-4d161de\",\n        \"cl_client_type\": \"lighthouse\",\n        \"cl_client_image\": \"ethpandaops/lighthouse:devnet-10-b7a3f52\",\n      \"count\": 3\n    }\n  ],\n  \"network_params\": {\n      \"deneb_fork_epoch\": 1\n  },\n  \"launch_additional_services\": false,\n  \"wait_for_finalization\": false,\n  \"wait_for_verifications\": false,\n  \"global_client_log_level\": \"info\",\n  \"snooper_enabled\": true\n}\n```",
+      "createdAt": "2023-10-27T10:23:33.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "And I was able to get funds from accounts here: https://github.com/kurtosis-tech/eth-network-package/blob/9295b3997aef6678f670d5d99c5ca7e6ff64d281/src/prelaunch_data_generator/genesis_constants/genesis_constants.star#L4, but now can't. So I suppose something changed?",
+      "createdAt": "2023-10-27T10:28:22.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "And the kurtosis network with the above config seems very busy with txs running  by itself. I wonder if it is still suitable for a rollup  to test as an L1",
+      "createdAt": "2023-10-27T10:43:18.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "You looking at an archived repository.",
+      "createdAt": "2023-10-27T10:44:10.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-10-27T10:44:17.931000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2023-10-27_at_12.44.15.png",
+          "content": "0818ecd7b43fce1344d8b29c8d93ec7e0db2053f6b86c0c56de20a86742349db"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Here is the latest main branch, with the proper pubkey/priv key list: https://github.com/kurtosis-tech/ethereum-package/blob/main/src/prelaunch_data_generator/genesis_constants/genesis_constants.star",
+      "createdAt": "2023-10-27T10:45:02.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Try to use this instead:\n```json\n{\n  \"participants\": [\n    {\n        \"el_client_type\": \"geth\",\n        \"el_client_image\": \"ethpandaops/geth:lightclient-devnet-10-4d161de\",\n        \"cl_client_type\": \"lighthouse\",\n        \"cl_client_image\": \"ethpandaops/lighthouse:devnet-10-b7a3f52\",\n      \"count\": 3\n    }\n  ],\n  \"network_params\": {\n      \"deneb_fork_epoch\": 1\n  },\n  \"additional_services\": [],\n  \"snooper_enabled\": true\n}\n```\nor even nicer if you use yaml:\n```yaml\nparticipants:\n  - el_client_type: geth\n    el_client_image: ethpandaops/geth:lightclient-devnet-10-4d161de\n    cl_client_type: lighthouse\n    cl_client_image: ethpandaops/lighthouse:devnet-10-b7a3f52\n    count: 3\nnetwork_params:\n  deneb_fork_epoch: 1\nadditional_services: []\nsnooper_enabled: true\n```",
+      "createdAt": "2023-10-27T10:46:55.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "By default we have a few tools enabled by default like tx fuzzer, thats why you going to see some traffic on the network as soon as you start it up.",
+      "createdAt": "2023-10-27T10:47:30.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0x_dl",
+      "category": "Testing",
+      "parent": "",
+      "content": "Perfect! Thanks!",
+      "createdAt": "2023-10-27T10:48:22.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "I need help with another hive test 🙂 Test: `engine-cancun/Re-Org Back into Canonical Chain, Depth=5`\n\nIn this test, the following (seems) to happen:\n\n(lots of \"normal\" stuff here)\nFCU to Block 5, with PayloadAttributes for Block 6\nNewPayload for block 6\nFCU to block 6\nFCU to block 5\n`eth_getBlockNumber` get block 6\n\nWe throw here since this (should) not be part of the canonical chain (?). However it seems that the passing clients return the block..? Am I missing something here?",
+      "createdAt": "2023-10-27T20:53:39.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think I remember that the spec says that the FcUs that point back to the canonical chain (5 is ancestor of 6), should be ignored, let me look up the excerpt where it says this",
+      "createdAt": "2023-10-27T21:15:16.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think it's point 2 on the ref spec here: https://github.com/ethereum/execution-apis/blob/main/src/engine/paris.md#specification-1",
+      "createdAt": "2023-10-27T21:17:02.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It does say `\"MAY\"` though, so this check might be too strict",
+      "createdAt": "2023-10-27T21:18:38.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Aha!!",
+      "createdAt": "2023-10-27T21:25:57.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes I think we are being too strict here, but now it is about the interpretation of \"may\", because we essentially reorg back to block 5 and thus block 6 is too high 🤔",
+      "createdAt": "2023-10-27T21:26:37.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks for the pointer 😄",
+      "createdAt": "2023-10-27T21:30:33.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "But, if we \"may\" skip an update, what does this actually mean? So we either reorg back to block 5, or we skip it and stay on block 6? 🤔 I'm not super sure what the spec means by this?",
+      "createdAt": "2023-10-27T21:31:39.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep, that's why I don't really like it when the spec uses these optional parts, because the test becomes meaningless, at the most we can check that the client does not error out in this case",
+      "createdAt": "2023-10-27T21:40:55.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok right, yes I agree here",
+      "createdAt": "2023-10-27T21:42:42.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "This confuses me a lot 😅  Because now for me the spec \"canonical chain\" and especially the canonical head become rather ambiguous",
+      "createdAt": "2023-10-27T21:46:28.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Right but just to get back to the point, hive expects us to have block 6, which thus implies we should ignore the rollback to block 5 🤔",
+      "createdAt": "2023-10-27T21:47:36.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Basically yes, it forces what the spec specifies to be optional 😅 \n\nLet me really quickly just double check that on the source 👀",
+      "createdAt": "2023-10-27T21:54:46.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "I just skimmed over the logs at https://hivecancun.ethdevops.io/ for all other clients and it does seem that all other clients (except us) seem to (semi?)-ignore the FCU and report back the block 6 🙂",
+      "createdAt": "2023-10-27T21:57:36.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It seems like we are also changing the Safe and finalized blocks in this test :/\n```\napi.ForkchoiceStateV1{\n                    HeadBlockHash:      previousHash,\n                    SafeBlockHash:      previousHash,\n                    FinalizedBlockHash: previousHash,\n                }\n```",
+      "createdAt": "2023-10-27T21:58:39.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "could this be causing trouble for ethjs? I think safeblockhash nor finalizedblockhash should be updated",
+      "createdAt": "2023-10-27T21:58:59.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think I checked this, I think safe and final are both the zero hash",
+      "createdAt": "2023-10-27T21:59:10.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let me re-check the local logs 🙂",
+      "createdAt": "2023-10-27T21:59:16.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah yes you're right, the safe and finalized are delayed in the config for this test 👍",
+      "createdAt": "2023-10-27T21:59:50.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah yes sorry should have mentioned, we thus crash early on, right after the \"reorg\"",
+      "createdAt": "2023-10-27T22:00:15.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "If it helps for debug the logs with other clients, RPC request \"id\"=25 is the FCU which updates to block 5 (reorg) and then \"id\"=15\" calls `eth_getBlockByNumber` and tries to retrieve block 6",
+      "createdAt": "2023-10-27T22:01:02.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Test runs up till 49 it seems so it seems we crash halfway 😂",
+      "createdAt": "2023-10-27T22:01:31.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think the test is doing something a bit wrong, so the test doesn't already actually expect for the client to update the head, it expects no error, but the head is being checked at the end of the test, but this is a mistake",
+      "createdAt": "2023-10-27T22:04:40.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm ok, so why does it ask for block 6? Is this the thing which is mistaken?",
+      "createdAt": "2023-10-27T22:06:43.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "So the CL Mock executes the flow which involves sending a ForkchoiceUpdated at the end to the latest block (6), but after it does this, we do a callback where we perform this re-org to canonical test, and send the FcU to re-org back (block 5), and we don't check the head here, we simply expect no error, but then we leave the client with this, we basically override the FcU->6 with FcU->5 and never correct this",
+      "createdAt": "2023-10-27T22:10:51.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah ok, so CL Mock thinks we are at block 6, if I understand it correctly?",
+      "createdAt": "2023-10-27T22:11:54.309000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes exactly 😄",
+      "createdAt": "2023-10-27T22:12:06.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah great 🙂",
+      "createdAt": "2023-10-27T22:12:09.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok, then the follow-up question and this is more spec-related: I do not understand - at all - why all clients seem to return a block (block 6) if we get a FCU to an ancestor, and then we request a block which was actually built on top of that ancestor (ancestor = 5, built on top = 6). Because this confuses to me how reorgs would actually happen at the EL side, especially regarding respecting `eth_getBlockByNumber` 🤔",
+      "createdAt": "2023-10-27T22:13:28.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think I missed something in the specs, but for now it makes no sense to me that if you FCU to block 5 and then request block 6, this is a valid block (what if you would instead send to request block 0x6 to clients, the `latest` block? Would these return block 5!?)",
+      "createdAt": "2023-10-27T22:14:23.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think the purpose is that the re-org only kicks-in when there FcU points to a sidechain, I think the beacon client will never do something like this (fcu->6 then fcu->5) unless something of a concurrency issue happens, which is what I think the point of this point in the spec is",
+      "createdAt": "2023-10-27T22:18:51.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "(protecting the EL from listening to a call that is likely result of a race condition on the CL)",
+      "createdAt": "2023-10-27T22:19:49.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok that's actually a super good point 🙂",
+      "createdAt": "2023-10-27T22:20:28.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah fcu->6 then fcu->5 makes no sense in CL world, there is no way to \"retract attestations\" from a block in order to end up in a previous block in the same chain, only a re-org to a sidechain makes sense when the voting suddendly gains more weight on this other chain",
+      "createdAt": "2023-10-27T22:22:12.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "but I think someone from the CL devs can correct me if I said anything that made no sense 😅",
+      "createdAt": "2023-10-27T22:22:43.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "Actually it would be helpful to be able to do this from the CL side. I've opened an issue about changing the EL rules here: <https://github.com/ethereum/execution-apis/issues/313>.\n\nThe reason it would be useful is that sometimes the CL wants to re-org the head, so it wants the EL to start building on the parent of the head. At the moment we work around this by suppressing the fcU for a block when we think we _might_ want to re-org it. i.e. there's an extra layer of unnecessary guess work for the CL because of this restriction.\n\nMore context here: <https://github.com/ethereum/consensus-specs/pull/3034>",
+      "createdAt": "2023-10-27T22:24:06.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes I agree FCU canonical 6 to canonical 5 makes no sense. But, what if: (and this might not even be possible, I have limited knowledge on CL side 😅 )\n\nWhat if we are at block 6, and now we reorg to block 5. However, this block 5 is not part of the canonical chain at this point, it actually forked off of block 4: \n\n(diag)\n\n```\n      /----> 5 -----> 6\n    /\n4 -|\n    \\\n     \\----> 5\n```\n\nI am not even sure if this is possible, so please let me know if this can't be done 😅  But in my head with my limited knowledge on CL side this could happen if there are limited attestations and then at some point the other (the lower) chain takes over?",
+      "createdAt": "2023-10-27T22:26:22.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see, this makes sense, I think then the main distinction would be that the ForkchoiceUpdated contains or not payload attributes to instruct the EL to build payload, so if it contains payload attributes, the switch is required and the payload building process starts, whereas if it doesn't contain the payload attributes, it may decide to skip the update",
+      "createdAt": "2023-10-27T22:28:01.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "So assuming there are two 5's, `5` and`5'`, it's totally possible, say the block `4` of the execution chain occurred at slot `N`, then at `N+1` one proposer starts to build `5`, but if the next proposer at slot `N+2` misses block at `N+1`, it will start to build `5'`, which is a side chain, then lastly the proposer at slot `N+3` can pick on top of which `5` block to build the next one",
+      "createdAt": "2023-10-27T22:33:28.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "but the difference here is that `5` and `5'` are different chains, so a bit different from this specific case",
+      "createdAt": "2023-10-27T22:33:56.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@508125616940515329> Test fix is here: https://github.com/ethereum/hive/pull/934 😄",
+      "createdAt": "2023-10-27T22:38:10.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok yes, thanks 🙂",
+      "createdAt": "2023-10-27T22:38:38.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok great I will test on this branch to see if we get past the \"problem point\" of the test, thanks 😄",
+      "createdAt": "2023-10-27T22:39:08.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "Testing",
+      "parent": "",
+      "content": "Heh 😄",
+      "createdAt": "2023-10-27T22:43:01.021000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "f2f9c0114b23cb49ad1abab7e6cd5c5e8a211e53e69baaec509a91cf49643391"
+        }
+      ]
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah using the payload attributes to differentiate is a good idea. Mikhail also suggested using finalization as a barrier. I'll add your suggestion to the issue",
+      "createdAt": "2023-10-27T22:44:03.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "not even on concurrency, the only reason that a CL would get FCU 6 -> FCU 5 is if \n1) NewPayload 6 -> SYNCING\n2) FCU 6 -> INVALID, LVH:5\nSome CL MAY send FCU: 5 in this case. Edit: Prysm will send here in most cases too\n\n(Removing more contrived example)\n\nThis is essentially the only situation we would revert an FCU that I can think so right now",
+      "createdAt": "2023-10-27T23:31:42.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Either way, all reasons always involve optimistic syncing",
+      "createdAt": "2023-10-27T23:32:04.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm, I kind of disagree with this rationale. I rather change the notion of head so that it's not a tip of the tree instead of building blocks on top of blocks that are not the canonical head. I like the invariant that the proposer always extends its canonical head",
+      "createdAt": "2023-10-27T23:54:10.306000+00:00",
+      "attachments": []
+    }
+  ]
+}

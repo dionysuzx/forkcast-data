@@ -1,0 +1,79 @@
+{
+  "id": 8070,
+  "title": "EIP-8070: eth/72 - Sparse Blobpool",
+  "status": "Draft",
+  "description": "Introduce custody-aligned sampling in the EL blobpool to vacate bandwidth",
+  "laymanDescription": "Ethereum nodes fully download only some blob transactions and sample the exact blob pieces the consensus layer cares about, cutting Execution Layer bandwidth roughly fourfold while keeping blob transactions moving.",
+  "author": "Raúl Kripalani (@raulk), Bosul Mun (@healthykim), Francesco D'Amato (@fradamt), Csaba Kiraly (@cskiraly), Felix Lange (@fjl), Marios Ioannou (@mariosioannou-create), Alex Stokes (@ralexstokes)",
+  "type": "Standards Track",
+  "category": "Networking",
+  "createdDate": "2025-10-29",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-8070-sparse-blobpool/26023",
+  "requires": [
+    "4844",
+    "7594",
+    "7870"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Glamsterdam",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": null,
+          "date": null
+        },
+        {
+          "status": "Considered",
+          "call": "acde/225",
+          "date": "2025-12-04"
+        }
+      ],
+      "champions": [
+        {
+          "name": "Raúl Kripalani",
+          "discord": "raulvk"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "No user-facing change; blob transactions stay reliable as BPO forks raise throughput, reducing failures from Execution Layer bandwidth pressure."
+    },
+    "appDevs": {
+      "description": "Application logic unchanged; contracts or rollup sequencers relying on blob data get steadier L1 availability during busy network-wide periods."
+    },
+    "walletDevs": {
+      "description": "Wallets submitting type-3 blob transactions gain more reliable propagation; minimal adjustments, mainly ensuring compatibility with updated EL peers locally."
+    },
+    "toolingInfra": {
+      "description": "Block explorers, relays and monitors should surface partial-blob availability and new eth/71 fields to reflect node sampling state."
+    },
+    "layer2s": {
+      "description": "Rollups posting blobs to L1 face lower risk of EL blobpool saturation, keeping DA publication within expected windows."
+    },
+    "stakersNodes": {
+      "description": "Validator operators must run EL clients supporting sparse blobpool to match CL custody; operational workflows stay largely intact."
+    },
+    "clClients": {
+      "description": "Consensus clients need to send custody updates over Engine API and tolerate EL sampling, adding moderate networking and API work."
+    },
+    "elClients": {
+      "description": "Execution clients implement eth/71, blobpool sampling, storage for custody cells and builder policies—largest code changes and testing burden."
+    }
+  },
+  "benefits": [
+    "Cuts EL blobpool bandwidth to ~25% of current design.",
+    "Keeps CL and EL sampling aligned for DA checks.",
+    "Preserves stochastic blobpool without complex sharding.",
+    "Supports future BPO fork throughput increases."
+  ],
+  "tradeoffs": null,
+  "abstract": "",
+  "bodyPreview": "## Abstract This proposal introduces the sparse blobpool, a construction that brings cell-level, custody-aligned sampling in the Execution Layer (EL). For every new type 3 (blob-carrying) transaction, an EL node fetches full blob payloads only with probability p = 0.15, and otherwise it merely samples the blobs, using the same custody assignment as its Consensus Layer (CL) counterpart. For full nodes, this means downloading as little as 1/8 of the data (8 out of 128 cells), so that the average bandwidth consumption compared to the (current) full blobpool is 0.15 + 0.85/8 ~ 0.25, a ~4x reduction. The choice of p = 0.15 balances reducing bandwidth consumption with guaranteeing the full propagation of txs, by ensuring that for each blob tx there exists a large connected backbone of nodes that have the full blob payload. At an individual node level, p = 0.15 translates to 98.6% probability of least 3/50 neighbours holding the full blob payload, only 0.03% chance of total unavailability. The sampling performed with probability 1 - p = 0.85 enables streamlined data availability checks during block validation, as well as enhancing the availability of the data. ## Motivation As Blob Parameter Only (BPO) forks progressively increase throughput, the full-replication nature of today's EL blobpool will begin dominating bandwidth utilization, causing us to hit [EIP-7870](./eip-7870.md) limits. Furthermore, this traffic will compete, and potentially starve, block and attestation propagation, risking instability and liveness issues. This behavior has already been observed in Fusaka devnets, where the average bandwidth consumption _of a full node_ is dominated by the EL blobpool, since column propagation on the CL benefits from sampling. ![](../assets/eip-8070/bandwidth-breakdown-fusaka-devnets.png) **Figure 1.** _Breakdown of the average bandwidth consumption (download) of full nodes in Fusaka Devnet 5, for blob count target/max of 22/33 (left) and 48/72 (right). The average bandwidth consumption of the EL is ~4-5x that of the CL._ While the average bandwidth consumption does not reflect that the load on the EL is spread out over time rather than concentrated in a small time window as it is in the CL, the gap between the EL and CL is quite large (~4-5x), and future upgrades will enable the CL to better spread out data propagation in the slot, leaving the EL blobpool as even more of a bottleneck. The sparse blobpool mechanism brings sampling to the EL as well, with an anticipated ~4x reduction in average bandwidth consumption for a given blobpool load. In doing so, it preserves the unstructured, stochastic nature of the current blobpool rather than introducing complex sharding architectures, prioritizing simplicity and resilience. Moreover, it preserves the CL's ability to satisfy its own sampling needs with the pre-propagated data in the EL blobpool (through the `getBlobs` Engine API). This is achieved by aligning the EL and CL sampling, in particular by having the EL fetch the cells corresponding to the CL custody set. This preserves a key feature of the blobpool, as it stretches the time window for blob data propagation, offloading this work from the critical path of block validation and leading to smoother and less bursty bandwidth utilization patterns over time. While the scalability gain may be more modest than with other solutions, we believe this design balances between simplicity, security, and scalability, in order to unlock the next tier of blob throughput without requiring user-facing changes, or deeper architectural redesigns. ## Specification The key words \"MUST\", \"MUST NOT\", \"REQUIRED\", \"SHALL\", \"SHALL NOT\", \"SHOULD\", \"SHOULD NOT\", \"RECOMMENDED\", \"NOT RECOMMENDED\", \"MAY\", and \"OPTIONAL\" in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174). ### Execution clients :: devp2p changes We introduce a new devp2p protocol version, `eth/71` extending the existing `eth/70` protocol (TODO: spec for eth/70 missing). **Modify `NewPooledTransactionHashes` (`0x08`) message.** Add a new field `cell_mask` of type `B_16` (`uint128`). This field MUST be interpreted as a bitarray of length `CELLS_PER_EXT_BLOB`, carrying `1` in the indices of colums the announcer has available for **all type 3 txs announced within the message**. This field MUST be set to `nil` when no transactions of such type are announced. (TODO: this approach is not expressive enough if the node wants to offer randomly sampled columns, nor if it wants to announce transactions with full and partial availability in a single message). - old schema (`eth/70`): `[types: B, [size_0: P, size_1: P, ...], [hash_0: B_32, hash_1: B_32, ...]]` - new schema (`eth/71`): `[types: B, [size_0: P, size_1: P, ...], [hash_0: B_32, hash_1: B_32, ...], cell_mask: B_16]` **Modify `GetPooledTransactions` (`0x09`) / `PooledTransactions` (`0x10`) behaviour.** Responses now elide blob payloads for type 3 transactions requested via this RPC. This is performed by setting an RLP `nil` literal in the list position corresponding to the transaction's blob data. Cell proofs and commitments are unaffected and continue to be sent. **New message type `GetCells` (`0x12`).** Used to request cells for type 3 transactions. It specifies the transaction hashes being requested, along with a `cell_mask` specifying which cell indices are needed, with syntax identical as `cell_mask` in `NewPooledTransactionHashes`. - `eth/71`: `[[hash_0: B_32, hash_1: B_32, ...], cell_mask: B_16]` **New message type `Cells` (`0x13`).** Used to respond to a `GetCells` requests. - `eth/71`: `[[hash_0: B_32, hash_1: B_32, ...], cells: [[cell_0_0: B_2048, cell_0_1: B_2048, ...], [cell_1_0: B_2048, cell_1_1: B_2048, ...]], cell_mask: B_16]` ### Execution clients :: Blobpool behavior **New transaction hash.** Upon receiving a `NewPooledTransactionHashes` announcement containing a previously unknown type"
+}

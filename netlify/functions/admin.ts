@@ -1,17 +1,28 @@
 import type { Config } from "@netlify/functions";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { adminSecretStatus, isAuthorized } from "./_shared/admin-auth.js";
 
-type AdminAction = "ingest" | "evals" | "snapshot" | "dataDeploy" | "astroRebuild";
+type AdminAction = "ingestCanonical" | "ingestFull" | "evals" | "snapshot" | "dataDeploy" | "astroRebuild";
 
 const env = (key: string): string | undefined => Netlify.env.get(key) ?? undefined;
 
 const controls = (authed: boolean) => ({
-  ingest: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"] },
-  evals: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"] },
-  snapshot: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"] },
+  ingestCanonical: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"], description: "Run canonical ingest: EIPs, Forkcast, PM, PM issues, eth-rnd archive, Magicians links." },
+  ingestFull: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"], description: "Run full backfill source=all." },
+  evals: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"], description: "Run eval-gated pipeline with fixture judge." },
+  snapshot: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"], description: "Force snapshot rebuild and data deploy." },
   dataDeploy: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN", "NETLIFY_AUTH_TOKEN", "NETLIFY_SITE_ID"] },
   astroRebuild: { enabled: authed && Boolean(env("GITHUB_TOKEN")), requiredSecrets: ["GITHUB_TOKEN"] }
 });
+
+const readStaticJson = async <T>(path: string, fallback: T): Promise<T> => {
+  try {
+    return JSON.parse(await readFile(join(process.cwd(), "dist", "latest", path), "utf8")) as T;
+  } catch {
+    return fallback;
+  }
+};
 
 const dispatchWorkflow = async (repo: string, workflow: string, inputs: Record<string, string | boolean>): Promise<Response> => {
   const token = env("GITHUB_TOKEN");
@@ -44,7 +55,14 @@ export default async (request: Request) => {
   if (request.method === "POST") {
     const body = await request.json().catch(() => ({})) as { action?: AdminAction; targetSnapshot?: string };
     switch (body.action) {
-      case "ingest":
+      case "ingestCanonical":
+        return dispatchWorkflow("forkcast-data", "data-pipeline.yml", {
+          source: "canonical",
+          dummy_mode: false,
+          force_rebuild: true,
+          eval_bypass_reason: ""
+        });
+      case "ingestFull":
       case "evals":
       case "snapshot":
         return dispatchWorkflow("forkcast-data", "data-pipeline.yml", {
@@ -66,16 +84,21 @@ export default async (request: Request) => {
     }
   }
   const missing = adminSecretStatus();
+  const stats = await readStaticJson("stats.json", {});
+  const evals = await readStaticJson("evals/results.json", { ok: false, results: [] });
+  const manifest = await readStaticJson("manifest.json", {});
   return Response.json({
     ok: true,
     authorized: authed,
     status: {
-      snapshots: "read-only static manifests",
-      sources: "configured through GitHub Actions",
-      evals: "fixture gate required",
-      search: "static index plus function fallback",
-      mcp: "read-only stdio server"
+      manifest,
+      stats,
+      sources: "forkcast-data owns canonical ingest; pm-lean is optional source input only",
+      evals: "fixture gate required; optional judge keys can be added later",
+      search: "static weighted index plus function fallback",
+      mcp: "read-only stdio server over latest snapshot"
     },
+    evals,
     controls: controls(authed),
     secrets: missing
   }, {

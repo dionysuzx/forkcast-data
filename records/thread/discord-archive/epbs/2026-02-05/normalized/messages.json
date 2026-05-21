@@ -1,0 +1,258 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-02-05",
+  "messageCount": 31,
+  "sourceHash": "678905e5fdeace48056feae0d7e30a9ef11c1918621dc41903a5e6703a2d1e37",
+  "searchText": "I don't know where to share this, perhaps in my annotated docs, but I wanted to share a little perk that became a problem in forkchoice implementations. When doing optimistic sync, catching up and removing up to the LVH because of receiving an INVALID with a non-trivial LVH from the EL, removing nodes in forkchoice may be a problem. Previously it would remove the full node containing the payload, now it needs to traverse removing all children (both empty and full) from the full node, but leave the empty node that contained the payload commitment and should **not** remove descendants of this node. cc <@602753420033785856> referring to this: https://discord.com/channels/595666850260713488/692078615269212180/1466085824268468357 I think we will require a beacon-API to generate the ExecutionPayloadEnvelope given the payload, blobs bundle, execution requests, withdrawals and beacon block with the bid, so that external builders can create the envelope raised it here https://github.com/ethereum/beacon-APIs/pull/552/changes#r2769231258 maybe we don't have to send the blobs bundle because we don't need to include the kzg commitments in the envelope? I wonder if we should have a separate API for this or have the same API but with the payload etc being optional params. Also the operation is called `getSignedExecutionPayloadEnvelope` but can the beacon-api generate a `SignedExecutionPayloadEnvelope`. I think it can only create an `ExecutionPayloadEnvelope` and the VC has to sign it <@780792191244566529> also regarding the beacon API, did you take care of the forkchoice endpoint? We need to be able to see forks on Forky The [fork-choice PR](https://github.com/ethereum/consensus-specs/pull/4884/changes) changes the behavior quite a bit as far as I can tell, in particular now the PTC has the power to force a payload to be reorged regardless of what the next proposer decides to extend, because of this in `should_extend_payload`: ```python if not is_payload_data_available(store, root): return False ``` Whereas previously a proposer could always choose to extend a payload even if it was late/the PTC didn't vote for it, as long as it was actually available. I am not sure we want this behavior. Also it's not clear to me why we would require this about blob availability but not about the payload? If anything it is more important for the payload to arrive timely, so that the next slot's builder can start working on it, and the next slot's proposer can start verifying it I wonder if we should have a separate The PTC doesn't have this right, that's why there is an implementation dependent part: if the proposer does have the data then it can build on top of present. The problem is for the proposer that has only its part of the data but doesn't know if the full data is available. If the PTC says it's not, then it should build on top of empty the Current status makes it build on present and it may be reorged We should change the attester's path though created an [issue](https://github.com/ethereum/beacon-APIs/issues/576) to we can tackle it separately, the original PR takes forever to load at this point because there are 128 comments so we should not increase the scope 😅 <@520034910149410861> I think even for attesters this behavior should be as in the stated PR: if you are an attester that don't have all the data and you see the PTC saying that it's not there, you should vote against the payload I guess your argument would be that anyway the block won't be attested if the data wasn't there because attesters wiithout the data will be a majority. But my worry is about data arriving after the deadline to do an ex-ante reorg. i think <@520034910149410861> may have missed this sentence: `Implemnetations MAY return `True` if the node have recovered all the blob data.` maybe you can just use the helper `is_data_available(root)` and put that in `is_payload_data_available` like: ``` def is_payload_data_available(store: Store, root: Root) -> bool: if is_data_available(root) -> return True ``` No I think Francesco's honestly worried about this new requirement, but I think that this should be the right behavior to prevent the data becoming available late I don't understand what's the rationale for being more strict with blobs than with the payload. Attesters will never vote for extending a payload if `is_payload_data_available` returns `False` (other than if implementations decide to just care about the local DA check, but that may not be the case as it is written here), but they will vote for it if `is_payload_timely` is `False` as long as the proposer has extended it? Why does that make sense? Also don't understand making this an implementation choice, the function is used not just by the proposer (where making it a choice would be reasonable) but by attesters. I don't think we should leave attestation behavior as an implementation choice but if we add `is_data_available(root)` to `is_payload_data_available` and return `true`, it's no longer an implementation choice right > other than if implementations decide to just care about the local DA check, but that may not be the case as it is written here) It is not about **just** the local DA check. I can make it more explicit if you want, but I think it should be really left as an implementation detail instead of specifying it in Forkchoice cause it becomes more complicated. But the statement is that: 1. If the validating node has enough keys or is subscribing to all columns or is a supernode or for whatever reason has enough data to be 100% certain that the data is available, this function should return `True`. 2. Otherwise this function should rely on PTC for DA check. I think we need to be more strict with DA than with the payload timeliness because the payload not being timely cannot cause ante reorg here: we do allow the proposer to reorg untimely payloads, and the payload is fully validated by the attester regardless of timeliness, whether DA is not validated by attesters. Attesters that have gotten the DA check late, will currently reorg a beacon block that builds on empty simply because it has not gotten the data and the proposer had no indication that the data was available because the PTC itself was signaling that the data was not available. I don't mean to have it as an *optional* behavior, but rather a mandatory one that is not possible to currently specify here as far as I can tell since `is_data_available` is an implementation detail The attack scenario is to time the data to be available exactly at the end of the slot, and thus it will cause the next proposer to be reorged. Also it makes the free option problem worse by making the PTC deadline irrelevant, no matter how much we shorten it, the builder gets to have the full slot to reveal I guess we can deal with this locally by recording the time at which the data is available and not rely on PTC, that would be more like the Payload treatment and at least won't suffer from this attack. In this case we can even remove the boolean from the PTC attestation But it's strictly more complex > The attack scenario is to time the data to be available exactly at the end of the slot, and thus it will cause the next proposer to be reorged. It wouldn't, the way it was written before was: if the proposer does *not* extend a payload that's not voted by a majority of the PTC, everyone attests to the proposal (when there's no majority, it's always up to the proposer). Here the majority of the PTC is voting that the payload was timely It's just voting that it wasn't available Before this PR there's zero mention of the second part On the side: I am recalling some nuances as I implement forkchoice in Prysm and since this took me twice time (yeah my memory sucks and I forget that I had to deal with this already over a year ago) I thought about keeping the annotated file updated with these things in the end of the file. So far I've only written a little sentence about the prunning of invalid branches with optimistic sync (which can lead to a bad bug invalidating the empty node so please take care of this case, we should have a test), about keeping track of pre-finalized information like the finalized payload hash for the engine when the checkpoint root is for an *empty* slot that isn't *skipped*. And finally the dependent root issue that <@688748669268132001> raised here a while ago. Will keep that updated, most of the complications are for edge cases that aren't really in the main forkchoice specification, but rather in implementation details on clients.",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't know where to share this, perhaps in my annotated docs, but I wanted to share a little perk that became a problem in  forkchoice implementations. When doing optimistic sync, catching up and removing up to the LVH because of receiving an INVALID with a non-trivial LVH from the EL, removing nodes in forkchoice may be a problem. Previously it would remove the full node containing the payload, now it needs to traverse removing all children (both empty and full) from the full node, but leave the empty node that contained the payload commitment and should **not** remove descendants of this node.",
+      "createdAt": "2026-02-05T12:59:44.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@602753420033785856>",
+      "createdAt": "2026-02-05T13:00:10.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "referring to this: https://discord.com/channels/595666850260713488/692078615269212180/1466085824268468357\nI think we will require a beacon-API to generate the ExecutionPayloadEnvelope given the payload, blobs bundle, execution requests, withdrawals and beacon block with the bid, so that external builders can create the envelope\nraised it here https://github.com/ethereum/beacon-APIs/pull/552/changes#r2769231258",
+      "createdAt": "2026-02-05T13:42:28.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "maybe we don't have to send the blobs bundle because we don't need to include the kzg commitments in the envelope?",
+      "createdAt": "2026-02-05T13:43:27.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I wonder if we should have a separate API for this or have the same API but with the payload etc being optional params. Also the operation is called `getSignedExecutionPayloadEnvelope` but can the beacon-api generate a `SignedExecutionPayloadEnvelope`. I think it can only create an `ExecutionPayloadEnvelope` and the VC has to sign it",
+      "createdAt": "2026-02-05T13:45:36.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@780792191244566529> also regarding the beacon API, did you take care of the forkchoice endpoint? We need to be able to see forks on Forky",
+      "createdAt": "2026-02-05T13:57:11.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The [fork-choice PR](https://github.com/ethereum/consensus-specs/pull/4884/changes) changes the behavior quite a bit as far as I can tell, in particular now the PTC has the power to force a payload to be reorged regardless of what the next proposer decides to extend, because of this in `should_extend_payload`:\n\n```python\n    if not is_payload_data_available(store, root):\n        return False\n```\n\nWhereas previously a proposer could always choose to extend a payload even if it was late/the PTC didn't vote for it, as long as it was actually available. I am not sure we want this behavior.",
+      "createdAt": "2026-02-05T15:05:51.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also it's not clear to me why we would require this about blob availability but not about the payload? If anything it is more important for the payload to arrive timely, so that the next slot's builder can start working on it, and the next slot's proposer can start verifying it",
+      "createdAt": "2026-02-05T15:14:28.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I wonder if we should have a separate",
+      "createdAt": "2026-02-05T15:20:50.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The PTC doesn't have this right, that's why there is an implementation dependent part: if the proposer does have the data then it can build on top of present.",
+      "createdAt": "2026-02-05T15:25:01.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem is for the proposer that has only its part of the data but doesn't know if the full data is available. If the PTC says it's not, then it should build on top of empty",
+      "createdAt": "2026-02-05T15:25:38.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the Current status makes it build on present and it may be reorged",
+      "createdAt": "2026-02-05T15:25:58.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We should change the attester's path though",
+      "createdAt": "2026-02-05T15:28:50.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "created an [issue](https://github.com/ethereum/beacon-APIs/issues/576) to we can tackle it separately, the original PR takes forever to load at this point because there are 128 comments so we should not increase the scope 😅",
+      "createdAt": "2026-02-05T15:29:20.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@520034910149410861> I think even for attesters this behavior should be as in the stated PR: if you are an attester that don't have all the data and you see the PTC saying that it's not there, you should vote against the payload",
+      "createdAt": "2026-02-05T15:32:26.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess your argument would be that anyway the block won't be attested if the data wasn't there because attesters wiithout the data will be a majority. But my worry is about data arriving after the deadline to do an ex-ante reorg.",
+      "createdAt": "2026-02-05T15:37:16.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think <@520034910149410861>  may have missed this sentence: `Implemnetations MAY return `True` if the node have recovered all the blob data.`\nmaybe you can just use the helper `is_data_available(root)` and put that in `is_payload_data_available` like:\n\n```\ndef is_payload_data_available(store: Store, root: Root) -> bool:\n   if is_data_available(root) -> return True\n```",
+      "createdAt": "2026-02-05T17:29:05.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No I think Francesco's honestly worried about this new requirement, but I think that this should be the right behavior to prevent the data becoming available late",
+      "createdAt": "2026-02-05T17:39:16.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't understand what's the rationale for being more strict with blobs than with the payload. Attesters will never vote for extending a payload if `is_payload_data_available` returns `False` (other than if implementations decide to just care about the local DA check, but that may not be the case as it is written here), but they will vote for it if `is_payload_timely` is `False` as long as the proposer has extended it? Why does that make sense?",
+      "createdAt": "2026-02-05T17:42:51.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also don't understand making this an implementation choice, the function is used not just by the proposer (where making it a choice would be reasonable) but by attesters. I don't think we should leave attestation behavior as an implementation choice",
+      "createdAt": "2026-02-05T17:43:21.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but if we add `is_data_available(root)` to `is_payload_data_available` and return `true`, it's no longer an implementation choice right",
+      "createdAt": "2026-02-05T17:46:22.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> other than if implementations decide to just care about the local DA check, but that may not be the case as it is written here)\nIt is not about **just** the local DA check. I can make it more explicit if you want, but I think it should be really left as an implementation detail instead of specifying it in Forkchoice cause it becomes more complicated. But the statement is that:\n\n1. If the validating node has enough keys or is subscribing to all columns or is a supernode or for whatever reason has enough data to be 100% certain that the data is available, this function should return `True`. \n2. Otherwise this function should rely on PTC for DA check. \n\nI think we need to be more strict with DA than with the payload timeliness because the payload not being timely cannot cause ante reorg here: we do allow the proposer to reorg untimely payloads, and the payload is fully validated by the attester regardless of timeliness, whether DA is not validated by attesters. Attesters that have gotten the DA check late, will currently reorg a beacon block that builds on empty simply because it has not gotten the data  and the proposer had no indication that the data was available because the PTC itself was signaling that the data was not available.",
+      "createdAt": "2026-02-05T17:53:54.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't mean to have it as an *optional* behavior, but rather a mandatory one that is not possible to currently specify here as far as I can tell since  `is_data_available` is an implementation detail",
+      "createdAt": "2026-02-05T17:55:29.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The attack scenario is to time the data to be available exactly at the end of the slot, and thus it will cause the next proposer to be reorged. Also it makes the free option problem worse by making the PTC deadline irrelevant, no matter how much we shorten it, the builder gets to have the full slot to reveal",
+      "createdAt": "2026-02-05T19:16:27.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess we can deal with this locally by recording the time at which the data is available and not rely on PTC, that would be more like the Payload treatment and at least won't suffer from this attack. In this case we can even remove the boolean from the PTC attestation",
+      "createdAt": "2026-02-05T19:21:09.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But it's strictly more complex",
+      "createdAt": "2026-02-05T19:21:28.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> The attack scenario is to time the data to be available exactly at the end of the slot, and thus it will cause the next proposer to be reorged.\n\nIt wouldn't, the way it was written before was: if the proposer does *not* extend a payload that's not voted by a majority of the PTC, everyone attests to the proposal (when there's no majority, it's always up to the proposer).",
+      "createdAt": "2026-02-05T22:21:15.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Here the majority of the PTC is voting that the payload was timely",
+      "createdAt": "2026-02-05T23:04:34.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's just voting that it wasn't available",
+      "createdAt": "2026-02-05T23:04:57.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Before this PR there's zero mention of the second part",
+      "createdAt": "2026-02-05T23:05:12.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "On the side: I am recalling some nuances as I implement forkchoice in Prysm and since this took me twice time (yeah my memory sucks and I forget that I had to deal with this already over a year ago) I thought about keeping the annotated file updated with these things in the end of the file. So far I've only written a little sentence about the prunning of invalid branches with optimistic sync (which can lead to a bad bug invalidating the empty node so please take care of this case, we should have a test), about keeping track of pre-finalized information like the finalized payload hash for the engine when the checkpoint root is for an *empty* slot that isn't *skipped*. And finally the dependent root issue that <@688748669268132001> raised here a while ago. Will keep that updated, most of the complications are for edge cases that aren't really in the main forkchoice specification, but rather in implementation details on clients.",
+      "createdAt": "2026-02-05T23:45:29.302000+00:00",
+      "attachments": []
+    }
+  ]
+}
