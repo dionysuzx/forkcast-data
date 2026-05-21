@@ -59,6 +59,7 @@ jobs:
       EIPS_ROOT: ${{ github.workspace }}/upstream-eips
       ETH_RND_ARCHIVE_ROOT: ${{ github.workspace }}/eth-rnd-archive
       GH_TOKEN: ${{ github.token }}
+      FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
     steps:
       - uses: actions/checkout@v6
       - name: Checkout pm-lean feed
@@ -118,6 +119,7 @@ jobs:
       - run: npm run derive
       - run: npm run validate
       - name: Persist canonical files
+        id: canonical
         if: ${{ env.SOURCE != 'dummy' }}
         run: |
           git config user.name "github-actions[bot]"
@@ -125,13 +127,21 @@ jobs:
           git add records catalog.json
           if git diff --cached --quiet; then
             echo "No canonical record changes"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit -m "Update canonical Forkcast data"
             git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Skip unchanged scheduled deploy
+        if: ${{ env.SOURCE != 'dummy' && steps.canonical.outputs.changed != 'true' && env.FORCE_REBUILD != 'true' }}
+        run: echo "No canonical changes and force_rebuild=false; skipping snapshot, Netlify deploy, and Astro dispatch."
       - run: npm run build-snapshot
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
       - run: npm run build-search
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
       - name: Evals
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         run: |
           if npm run run-evals; then
             exit 0
@@ -142,18 +152,23 @@ jobs:
           fi
           exit 1
       - run: npm run build-site
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
       - name: Capture snapshot id
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         id: snapshot
         run: |
           snapshot_id="$(node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync('dist/latest/manifest.json', 'utf8')).snapshot_id)")"
           echo "snapshot_id=$snapshot_id" >> "$GITHUB_OUTPUT"
           echo "snapshot_id=$snapshot_id"
       - run: npm run compact-dist
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
       - uses: actions/upload-artifact@v4
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         with:
           name: forkcast-data-dist
           path: dist
       - name: Deploy data site to Netlify
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         run: |
           if [ -z "$NETLIFY_AUTH_TOKEN" ] || [ -z "$NETLIFY_SITE_ID" ]; then
             echo "NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID are required for scheduled production deploys."
@@ -164,6 +179,7 @@ jobs:
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
       - name: Dispatch forkcast-astro rebuild
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.FORKCAST_ASTRO_DISPATCH_TOKEN }}

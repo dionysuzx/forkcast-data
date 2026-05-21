@@ -52,7 +52,7 @@ ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 
 ## Alive Automation
 
-The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; builds snapshots/search/evals/site; deploys Netlify; then dispatches `forkcast-astro`.
+The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; and publishes only when canonical files changed or `force_rebuild=true`.
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
