@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { readJson, writeText } from "../lib/fs.js";
 import type { CallReadModel, EipReadModel, SearchDocument, SnapshotManifest } from "../domain/types.js";
 
-const SITE_ASSET_VERSION = "20260521-fast-search";
+const SITE_ASSET_VERSION = "20260521-fast-search-v2";
 
 const html = (title: string, body: string): string => `<!doctype html>
 <html lang="en">
