@@ -10,6 +10,7 @@ import { compactDist } from "../src/pipeline/compactDist.js";
 import { validate } from "../src/pipeline/validate.js";
 import { readJson } from "../src/lib/fs.js";
 import type { SearchDocument } from "../src/domain/types.js";
+import { newRecord, upsertArtifact, writeArtifactText, writeRecord } from "../src/domain/record.js";
 
 const dirs: string[] = [];
 
@@ -40,6 +41,9 @@ describe("data pipeline", () => {
     const docs = await buildSearchIndex(join(repo, "dist", "latest"));
     const hit = searchDocuments(docs, "BAL decision", 3)[0];
     expect(`${hit?.title} ${hit?.body}`).toContain("BAL");
+    const call = await readJson<{ summary: string }>(join(repo, "dist", "latest", "calls", "dummy-acde", "1.json"));
+    expect(call.summary).toContain("Dummy EIPs moved to SFI");
+    expect(call.summary).not.toContain("fakeData");
     const eip = await readJson<{ id: number }>(join(repo, "dist", "latest", "eips", "7702.json"));
     expect(eip.id).toBe(7702);
     await compactDist(join(repo, "dist"));
@@ -62,5 +66,42 @@ describe("data pipeline", () => {
     const secondArtifact = second.artifacts.find((artifact) => artifact.path === "derived/call-intelligence.json");
     expect(secondArtifact?.sha256).toBe(firstArtifact?.sha256);
     expect(secondArtifact?.from).not.toContain("derived/call-intelligence.json");
+  });
+
+  it("derives readable call summaries from structured agenda artifacts", async () => {
+    const repo = await tempRepo();
+    let record = newRecord({
+      id: "acde/2099.01.02-2",
+      kind: "call",
+      title: "All Core Devs - Execution (ACDE) #2",
+      generatedAt: "2099-01-02T00:00:00.000Z",
+      sources: [{ type: "github-pm-issues", ref: "ethereum/pm#2" }]
+    });
+    record = upsertArtifact(record, await writeArtifactText({
+      repoRoot: repo,
+      record,
+      layer: "normalized",
+      role: "agenda",
+      fileName: "agenda.json",
+      body: `${JSON.stringify({
+        issue: 2,
+        title: "All Core Devs - Execution (ACDE) #2",
+        agendaMarkdown: "- Glamsterdam\n  - EIP-7702 delegation UX follow-up"
+      }, null, 2)}\n`,
+      source: "github-pm-issues",
+      generatedAt: "2099-01-02T00:00:00.000Z"
+    }));
+    await writeRecord(repo, record);
+    await derive(repo, "2099-01-02T00:10:00.000Z");
+    const manifest = await buildSnapshot(repo, join(repo, "dist"), "2099-01-02T00:10:00.000Z");
+    const call = await readJson<{ summary: string }>(join(repo, "dist", "latest", "calls", "acde", "2.json"));
+    expect(call.summary).toContain("Glamsterdam");
+    expect(call.summary).toContain("EIP-7702");
+    expect(call.summary).not.toContain("\"agendaMarkdown\"");
+    const docs = await buildSearchIndex(join(repo, "dist", "latest"));
+    const hit = searchDocuments(docs, "Glamsterdam 7702", 3)[0];
+    expect(hit?.id).toBe("acde/2099.01.02-2");
+    await compactDist(join(repo, "dist"));
+    await expect(readJson(join(repo, "dist", "snapshots", manifest.snapshot_id, "calls", "acde", "2.json"))).resolves.toMatchObject({ id: "acde/2099.01.02-2" });
   });
 });

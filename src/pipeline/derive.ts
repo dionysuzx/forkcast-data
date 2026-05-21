@@ -5,6 +5,48 @@ import { nowIso, sha256 } from "../lib/fs.js";
 
 const compact = (value: string): string => value.replace(/\s+/g, " ").trim();
 
+const textValue = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() ? value : null;
+
+const collectText = (value: unknown): string[] => {
+  if (typeof value === "string") return value.trim() ? [value] : [];
+  if (Array.isArray(value)) return value.flatMap(collectText);
+  if (!value || typeof value !== "object") return [];
+  const object = value as Record<string, unknown>;
+  const prioritized = [
+    "agendaMarkdown",
+    "markdown",
+    "summary",
+    "description",
+    "body",
+    "text",
+    "content",
+    "highlight",
+    "decision",
+    "action",
+    "topic",
+    "eip",
+    "title"
+  ];
+  const direct = prioritized.flatMap((key) => collectText(object[key]));
+  return direct.length ? direct : Object.values(object).flatMap(collectText);
+};
+
+const readReadableArtifactText = async (
+  repoRoot: string,
+  record: RecordManifest,
+  artifact: RecordManifest["artifacts"][number]
+): Promise<string> => {
+  const body = await readArtifactText(repoRoot, record, artifact);
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const text = collectText(parsed).join("\n");
+    return text || body;
+  } catch {
+    return body;
+  }
+};
+
 const parseJsonArtifact = async <T>(repoRoot: string, record: RecordManifest, role: string): Promise<T | null> => {
   const artifact = record.artifacts.find((entry) => entry.role === role);
   if (!artifact) return null;
@@ -37,33 +79,52 @@ export const derive = async (repoRoot: string, generatedAt = nowIso()): Promise<
   const changed: RecordManifest[] = [];
   for (let record of records) {
     if (record.kind === "call") {
-      const tldr = await parseJsonArtifact<{ decisions?: Array<{ decision?: string; timestamp?: string }>; action_items?: unknown[] }>(repoRoot, record, "tldr");
-      const agenda = await parseJsonArtifact<{ agendaMarkdown?: string }>(repoRoot, record, "agenda");
+      const tldr = await parseJsonArtifact<{
+        summary?: unknown;
+        highlights?: unknown;
+        decisions?: Array<{ decision?: unknown; timestamp?: unknown } | string>;
+        action_items?: unknown[];
+      }>(repoRoot, record, "tldr");
+      const agendaArtifact = record.artifacts.find((entry) => entry.role === "agenda");
+      const agendaText = agendaArtifact ? await readReadableArtifactText(repoRoot, record, agendaArtifact) : "";
       const transcriptArtifact = record.artifacts.find((entry) => entry.role.includes("transcript"));
       const transcript = transcriptArtifact ? await readArtifactText(repoRoot, record, transcriptArtifact) : "";
       const summary = compact(
-        tldr ? JSON.stringify(tldr).slice(0, 1000) :
-        agenda?.agendaMarkdown ?? transcript.slice(0, 1000) ?? record.title
+        [
+          textValue(tldr?.summary),
+          ...collectText(tldr?.highlights),
+          ...collectText(tldr?.decisions),
+          ...collectText(tldr?.action_items)
+        ].filter(Boolean).join(" ") ||
+        agendaText ||
+        transcript ||
+        record.title
       ).slice(0, 420);
-      const decisions: DecisionReadModel[] = (tldr?.decisions ?? []).map((decision, index) => ({
-        id: `${record.id}#decision-${index + 1}`,
-        record_id: record.id,
-        title: decision.decision ?? "Decision",
-        decided_at: decision.timestamp,
-        canonical_url: `/latest/decisions/index.ndjson`,
-        citations: [{
-          recordId: record.id,
-          artifactPath: "derived/call-intelligence.json",
-          url: `/records/call/${record.id}/derived/call-intelligence.json`,
-          label: record.title,
-          snippet: decision.decision
-        }]
-      }));
+      const decisions: DecisionReadModel[] = (tldr?.decisions ?? [])
+        .flatMap((decision, index) => {
+          const title = typeof decision === "string" ? decision : textValue(decision.decision);
+          if (!title) return [];
+          const model: DecisionReadModel = {
+            id: `${record.id}#decision-${index + 1}`,
+            record_id: record.id,
+            title,
+            decided_at: typeof decision === "string" ? undefined : textValue(decision.timestamp) ?? undefined,
+            canonical_url: `/latest/decisions/index.ndjson`,
+            citations: [{
+              recordId: record.id,
+              artifactPath: "derived/call-intelligence.json",
+              url: `/records/call/${record.id}/derived/call-intelligence.json`,
+              label: record.title,
+              snippet: title
+            }]
+          };
+          return [model];
+        });
       const outputPath = "derived/call-intelligence.json";
       const inputArtifacts = record.artifacts
         .filter((artifact) => artifact.path !== outputPath)
         .map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }));
-      const agendaHash = agenda?.agendaMarkdown ? sha256(agenda.agendaMarkdown) : null;
+      const agendaHash = agendaText ? sha256(agendaText) : null;
       const previous = await parseJsonArtifact<CallIntelligence>(repoRoot, record, "call-intelligence");
       const stableGeneratedAt = previous &&
         previous.title === record.title &&
