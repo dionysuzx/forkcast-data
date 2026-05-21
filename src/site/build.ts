@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { readJson, writeText } from "../lib/fs.js";
 import type { CallReadModel, EipReadModel, SearchDocument, SnapshotManifest } from "../domain/types.js";
 
+const SITE_ASSET_VERSION = "20260521-fast-search";
+
 const html = (title: string, body: string): string => `<!doctype html>
 <html lang="en">
 <head>
@@ -10,7 +12,7 @@ const html = (title: string, body: string): string => `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${title}</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=${SITE_ASSET_VERSION}">
 </head>
 <body>
   <header class="topbar">
@@ -26,7 +28,7 @@ const html = (title: string, body: string): string => `<!doctype html>
     </nav>
   </header>
   <main>${body}</main>
-  <script type="module" src="/assets/site.js"></script>
+  <script type="module" src="/assets/site.js?v=${SITE_ASSET_VERSION}"></script>
 </body>
 </html>
 `;
