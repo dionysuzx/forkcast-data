@@ -1,0 +1,60 @@
+name: Data Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Source selection"
+        required: true
+        default: "all"
+        type: choice
+        options: ["all", "forkcast", "pm", "pm-lean", "github-pm-issues", "discord-archive", "discourse", "dummy"]
+      dummy_mode:
+        description: "Enable deterministic dummy mode"
+        required: false
+        default: false
+        type: boolean
+      target_snapshot:
+        description: "Optional target snapshot label"
+        required: false
+        type: string
+      force_rebuild:
+        description: "Force rebuild"
+        required: false
+        default: false
+        type: boolean
+      eval_bypass_reason:
+        description: "Named audit reason required to bypass eval failures"
+        required: false
+        type: string
+  schedule:
+    - cron: "11 * * * *"
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Backfill
+        run: |
+          if [ "${{ github.event.inputs.source }}" = "dummy" ]; then
+            ENABLE_DUMMY_PIPELINE=true npm run ingest -- --source dummy --dummy true
+          else
+            npm run backfill -- --source "${{ github.event.inputs.source || 'all' }}" --limit 20
+          fi
+      - run: npm run derive
+      - run: npm run validate
+      - run: npm run build-snapshot
+      - run: npm run build-search
+      - name: Evals
+        run: npm run run-evals
+      - run: npm run build-site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forkcast-data-dist
+          path: dist
