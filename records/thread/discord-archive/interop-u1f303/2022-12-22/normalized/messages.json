@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2022-12-22",
+  "messageCount": 406,
+  "sourceHash": "22b7224fd5fda38abd6c93247da0c37d1081179cfebf1c7ff8fbd4329434edb7",
+  "searchText": "We just had genesis of the chain, we're steady at ~83% participation and no surprises so far. Get some ether here: https://faucet.withdrawalsdevnet1.ethpandaops.io/ and feel free to play around. Capella should be in ~4h from now We plan to do some bls changes pre capella to see what happens. Expected behaviour should be the change doesn't get triggered till we hit capella, but the pool of bls changes should fill up. I'm planning to do about 2000 BLS changes, so all pools should fill up. When capella hits, will there be populated withdrawals or empty arrays? This is what I'm trying to find out. When will tx fuzzing start? <@360491619402776577> and <@199561711278227457> are working on it. Should begin shortly. ok thanks, might be offline but can check progress tomorrow. <@386930523815149571> might be able to look if anything goes bang though just cleaning up some things, tx-fuzz will be online in a few mins its up and running, blocks are full <@792822129019584562> could you have a look at `withdrawal-devnet-1-lodestar-ethereumjs-1`? ok are we running blocks full with txs? yup hmmm ethereumjs can't handle that, its choking on cpu core 😅 isn't the gas limit too low? `Gas Limit: 4,879,794` <@360491619402776577> ? ah its still going up Could be that the gas limit in the genesis is set very low and we're slowly voting up Yea you're right, its super low at genesis it is synced now, do we know what is the per core speed? they aren't super powerful machines to be fair we could bump up just lodestar-ethereumjs if it helps would more cores help or is it single threaded? yes it would help to bump up where single core performace is high, preferably some latest intel machine ``` [Created at cpu.465] Unique ID: rdCR.j8NaKXDZtZ6 Hardware Class: cpu Arch: X86-64 Vendor: \"AuthenticAMD\" Model: 23.49.0 \"DO-Premium-AMD\" Features: fpu,vme,de,pse,tsc,msr,pae,mce,cx8,apic,sep,mtrr,pge,mca,cmov,pat,pse36,clflush,mmx,fxsr,sse,sse2,ht,syscall,nx,mmxext,fxsr_opt,pdpe1gb,rdtscp,lm,rep_good,nopl,cpuid,extd_apicid,tsc_known_freq,pni,pclmulqdq,ssse3,fma,cx16,sse4_1,sse4_2,x2apic,movbe,popcnt,aes,xsave,avx,f16c,rdrand,hypervisor,lahf_lm,cmp_legacy,svm,cr8_legacy,abm,sse4a,misalignsse,3dnowprefetch,osvw,topoext,perfctr_core,ibpb,stibp,vmmcall,fsgsbase,bmi1,avx2,smep,bmi2,rdseed,adx,smap,clflushopt,clwb,sha_ni,xsaveopt,xsavec,xgetbv1,xsaves,clzero,xsaveerptr,wbnoinvd,arat,npt,nrip_save,umip,rdpid Clock: 2300 MHz BogoMips: 4599.99 Cache: 512 kb Units/Processor: 4 Config Status: cfg=new, avail=yes, need=no, active=unknown``` single threaded its a 2.3Ghz its probs just some vcore magic some machines can turbo single core to 4.5ghz we can upgrade it to a 8 core cpu-optimized machine if you liek what would be single core performance? make a hot fix to make ethereumjs multi threaded 😂 this i guess: https://pcr.cloud-mercato.com/providers/digitalocean/flavors/c-16/performance they look all 2.7ghz cores whats the blockscout url for devnet? https://explorer.withdrawalsdevnet1.ethpandaops.io/ Think lighthouse is calling V2 methods pre-capella/shanghai, whereas teku, prysm, lodestar are calling V1...maybe not an issue but might explain some of the weirdness we were seeing with lighthouse-besu before, will have to dig in more tomorrow as heading offline could you restart ethereumjs with `--loglevel debug` and is it possible to pass an env variable to ethereumjs docker via your ansible setup? want to pass `DEBUG=vm:*` env variable to see where/if vm execution is the choke point <@199561711278227457> on it hmm, taking a long time to stop the container even yes container takes some time to stop normally even, mostly to make sure all modules do clean exit i think if we can provide a 4ghz+ cpu core, ethereumjs will be able to follow along the network nicely, since it falls back on some particular block and then catches up back again so some kind of txes choke ethereumjs more than others check it now 😄 were you able to add env variable to the container: `DEBUG=vm:*`? yup hmmm somehow vm run debug logs are not getting dumped though i can see the DEBUG variable having correct value inside container <@412614104222531604> you sent the BLS changes signed with Capella fork or before? Prysm will put them in its pool if they are signed with Capella, but I don't know if every client will do this, I suspect not ``` \"Env\": [ \"DEBUG=vm:*\", \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\", \"NODE_VERSION=16.17.0\", \"YARN_VERSION=1.22.19\", \"NODE_OPTIONS=--max_old_space_size=6144\" ``` yea it has these vars yes it can see it inside shell as well I have so far only sent it with teku teku seems to have not put it in a pool I'll give it a try with prysm right away prysm will take them in the pool if you sign them correctly with Capella, otherwise it will reject them you will need to pass the genesis validator root and the fork version to ethdo Im using the newest version and it doesn't prompt me that anymore Lodestar reports this: ```:\"Internal Server Error\",\"message\":\"Multiple errors on submitPoolBlsToExecutionChange\\nBLS_TO_EXECUTION_CHANGE_ERROR_INVALID_SIGNATURE``` Prysm reports this: ```{\"message\":\"Could not validate SignedBLSToExecutionChange: cannot process BLSToExecutionChange before Capella fork\",\"code\":400}``` Is it bc the genesis-validator-root and fork version missing? lighthouse reports: ```{\"code\":400,\"message\":\"BAD_REQUEST: some BLS to execution changes failed to verify\",\"failures\":[{\"index\":0,\"message\":\"invalid: BlsToExecutionChangeBadFork(Merge)\"}``` I have included in the ethdo call now the genesis_validators_root and fork-version, and even like that prysm reports that it can't process the change before capella ```curl -s 127.0.0.1:4000/eth/v1/beacon/pool/bls_to_execution_changes {\"message\":\"Method Not Allowed\",\"code\":501}%``` and to verify that the pool is empty, its actually says that the method is not even allowed. I guess capella will trigger the API to allow this call. This is how I generated the change : ``` ~/ethdo --connection 127.0.0.1:4000 validator credentials set --json \\ --path=\"m/12381/3600/1/0/0\" \\ --mnemonic=\"say ... wool\" \\ --withdrawal-address=0xE7c180eAdA8f60D63e9671867b2e0CA2649207A8 \\ --fork-version=0x40000041 \\ --genesis-validators-root=0xf306b3f8c766086aac88147a84f7fdeb224b080922cf653e479cc0dd04009d93 ``` <@755590043632140352> are you sure we supposed to be able to fill the pool even before capella is hit? We are using `HEAD-29dfca` still. Ah crap that may be old. I'm changing money right now but will be at my computer in 40 minutes to check ok, capella gonna hit in about 70 mins would like to fill a pool before that hits. Let me check that head <@792822129019584562> is lodestar supposed to reject bls change before capella? <@554799849288105986> is lighthouse supposed to reject bls change before capella? <@680234424037670912> is teku supposed to reject bls change before capella? i think we might accept it but it will be pruned out as soon as the fork changes to capella/next one as the signature will become stale as its domain will change also we will only accept it if its signed with the current fork's domain this is what I got <@792822129019584562> so if ethdo or any other tooling will sign it with future fork, the beacon node might reject it as signature will be invalid ahh yes, see above explanation ^^^ might make sense to fail with \"Capella is not yet triggered\" error message and not BLS invalid signature message it must have been signed with capella fork (which might be correct), but we only validate against the current fork which is not yet capella yes, ideed. its been signed with a future fork id. hmmm will see how we can imprive the ux I had trouble with lighthouse and Teku on the hive tests signing the Bls changes with capella, while still on the bellatrix fork. Another issue is that, will these signatures expire by 4844 fork then ? Do we want people to be able to fill bls change pools before Capella? If yes, spec should define it imo. The signature verification is against the fork of the head state. Prysm does something ad-hoc to allow them to be included in Bellatrix but only if they are signed correctly I feel like bls change should work on any and all fork versions. Otherwise there might gonna be people who forget to change bls keys after 4844 and it might say that sorry, this is no longer possible. It will work on all future fork versions after capella, just not those before capella. <@412614104222531604> it seems that my PR never merged, I'll push it to the capella branch and will build you a new image no it wont, it needs to pass signature verification against the head state so we will prune the pool at future forks Can I somewhere follow what the new image name gonna be? Sure, but you could generate an operation when in deneb (or whatever) and it will work. So there's no \"no longer possible\". yeah I'll build for the first time so be patient, I'll upload them and ping you, need to install docker first If it's going to be significant effort for client teams to hold the BLS change operation for a future fork then perhaps it's simpler to keep it such that the operations are rejected until the Capella hard fork takes place. It may result in a bit of a rush of messages, but I'm not sure that there are that many people who are desperate to change their credentials within the first few seconds of the fork. (And yes there's a rough edge around hard forks, but that doesn't seem like a major issue; worst case the user re-sends the request after the hard fork.) it's trivial to accept them before capella (or any fork) as long as they are signed with the right fork version <@412614104222531604> here' s the tag in the usual place capella-6b2721 `gcr.io/prysmaticlabs/prysm/beacon-chain:capella-6b2721`? I'll try to streamline this so that I can give you a steady tag in the future, I can' t get docker to work yet none of us can 😂 I prefer hashed tags over steady tags, as this way we can ensure we run the correct image right away Yea, or versioned 😄 far easier to know when we deployed the wrong image is there any change to the validator image? ok, I'll try to get Docker running and then I'll ask you how you want these images let me know if you can submit the bls changes to prysm before the fork <@412614104222531604> Just deployed it on all prysm nodes <@412614104222531604>, go wild with the submissions ```{\"message\":\"Could not validate SignedBLSToExecutionChange: cannot process BLSToExecutionChange before Capella fork\",\"code\":400}%``` could you give it a try? I might be doing something wrong? we have a new mnemonic tho yeah give me a sec can you dm me that? yup I can try right now ip of geth/prysm: `159.89.105.117` ``` ssh -L 4000:127.0.0.1:4000 devops@159.89.105.117 ``` Then you can submit whatever you want to the beacon api by targetting localhost:4000 10 mins to go. Ohh crap I think we won't make it on time 😦 I may have merged something different in develop than capella, will try anyway I can rollback if you like? nah, doesn' t make any sense, this is a very minor thing for a devnet we can test it anytime I have tested it myself on interop so I know it works anyway okay We can test in the next devnet then. Was just curious about how the pools fill up for other client teams before capella is hit. especially when there are a large amount of validator bls changes happening all before capella. ```2022-12-22 15:17:00.010 INFO - Milestone *** Epoch: 40, Activating network upgrade: CAPELLA 2022-12-22 15:17:00.010 INFO - Epoch Event *** Epoch: 40, Justified checkpoint: 39, Finalized checkpoint: 38, Finalized root: e903df13fb290c85ed35fdd0914b7d798f5d9a2308f47a8a97253854063c755d``` 🔥 ``` Rejecting invalid block at slot 1283 with root 0x8b924b2b9e6a14758efe2b2196d9ca14d9147ebc651d1e69eb445936657bed8d because FAILED_STATE_TRANSITION.``` teku seems to be rejecting a bunch of gossip messages crap did we fork? yeah we did. I just sent the change 😦 yea 😦 fork was a 15:17 not sure when you ",
+  "excerpts": [
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "We just had genesis of the chain, we're steady at ~83% participation and no surprises so far. \n\nGet some ether here: https://faucet.withdrawalsdevnet1.ethpandaops.io/ and feel free to play around. \n\nCapella should be in ~4h from now",
+      "createdAt": "2022-12-22T11:46:43.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "We plan to do some bls changes pre capella to see what happens. Expected behaviour should be the change doesn't get triggered till we hit capella, but the pool of bls changes should fill up.",
+      "createdAt": "2022-12-22T11:50:08.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm planning to do about 2000 BLS changes, so all pools should fill up.",
+      "createdAt": "2022-12-22T11:50:21.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "When capella hits, will there be populated withdrawals or empty arrays?",
+      "createdAt": "2022-12-22T12:08:55.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is what I'm trying to find out.",
+      "createdAt": "2022-12-22T12:09:11.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "When will tx fuzzing start?",
+      "createdAt": "2022-12-22T12:09:41.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@360491619402776577> and <@199561711278227457> are working on it. Should begin shortly.",
+      "createdAt": "2022-12-22T12:10:01.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok thanks, might be offline but can check progress tomorrow. <@386930523815149571> might be able to look if anything goes bang though",
+      "createdAt": "2022-12-22T12:11:02.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "just cleaning up some things, tx-fuzz will be online in a few mins",
+      "createdAt": "2022-12-22T12:15:25.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its up and running, blocks are full",
+      "createdAt": "2022-12-22T12:21:07.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562> could you have a look at `withdrawal-devnet-1-lodestar-ethereumjs-1`?",
+      "createdAt": "2022-12-22T12:22:49.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2022-12-22T12:22:58.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "are we running blocks full with txs?",
+      "createdAt": "2022-12-22T12:25:21.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2022-12-22T12:26:12.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2022-12-22T12:26:41.223000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2022-12-22_at_13.26.35.png",
+          "content": "b2c926b007cdfbd79600ad3fbcfb1fb175335808ed0191d62c1145033ea19828"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmmm ethereumjs can't handle that, its choking on cpu core",
+      "createdAt": "2022-12-22T12:26:43.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "😅",
+      "createdAt": "2022-12-22T12:26:49.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "isn't the gas limit too low? `Gas Limit: 4,879,794` <@360491619402776577> ?",
+      "createdAt": "2022-12-22T12:27:27.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah its still going up",
+      "createdAt": "2022-12-22T12:27:53.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Could be that the gas limit in the genesis is set very low and we're slowly voting up",
+      "createdAt": "2022-12-22T12:28:24.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yea you're right, its super low at genesis",
+      "createdAt": "2022-12-22T12:30:08.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "it is synced now, do we know what is the per core speed?",
+      "createdAt": "2022-12-22T12:30:26.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "they aren't super powerful machines",
+      "createdAt": "2022-12-22T12:30:40.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "to be fair we could bump up just lodestar-ethereumjs if it helps",
+      "createdAt": "2022-12-22T12:30:54.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "would more cores help or is it single threaded?",
+      "createdAt": "2022-12-22T12:31:05.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes it would help to bump up where single core performace is high, preferably some latest intel machine",
+      "createdAt": "2022-12-22T12:31:31.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```  [Created at cpu.465]\n  Unique ID: rdCR.j8NaKXDZtZ6\n  Hardware Class: cpu\n  Arch: X86-64\n  Vendor: \"AuthenticAMD\"\n  Model: 23.49.0 \"DO-Premium-AMD\"\n  Features: fpu,vme,de,pse,tsc,msr,pae,mce,cx8,apic,sep,mtrr,pge,mca,cmov,pat,pse36,clflush,mmx,fxsr,sse,sse2,ht,syscall,nx,mmxext,fxsr_opt,pdpe1gb,rdtscp,lm,rep_good,nopl,cpuid,extd_apicid,tsc_known_freq,pni,pclmulqdq,ssse3,fma,cx16,sse4_1,sse4_2,x2apic,movbe,popcnt,aes,xsave,avx,f16c,rdrand,hypervisor,lahf_lm,cmp_legacy,svm,cr8_legacy,abm,sse4a,misalignsse,3dnowprefetch,osvw,topoext,perfctr_core,ibpb,stibp,vmmcall,fsgsbase,bmi1,avx2,smep,bmi2,rdseed,adx,smap,clflushopt,clwb,sha_ni,xsaveopt,xsavec,xgetbv1,xsaves,clzero,xsaveerptr,wbnoinvd,arat,npt,nrip_save,umip,rdpid\n  Clock: 2300 MHz\n  BogoMips: 4599.99\n  Cache: 512 kb\n  Units/Processor: 4\n  Config Status: cfg=new, avail=yes, need=no, active=unknown```",
+      "createdAt": "2022-12-22T12:31:34.379000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "single threaded",
+      "createdAt": "2022-12-22T12:31:37.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its a 2.3Ghz",
+      "createdAt": "2022-12-22T12:31:39.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its probs just some vcore magic",
+      "createdAt": "2022-12-22T12:31:57.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "some machines can turbo single core to 4.5ghz",
+      "createdAt": "2022-12-22T12:32:08.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "we can upgrade it to a 8 core cpu-optimized machine if you liek",
+      "createdAt": "2022-12-22T12:38:14.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "what would be single core performance?",
+      "createdAt": "2022-12-22T12:38:33.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "make a hot fix to make ethereumjs multi threaded 😂",
+      "createdAt": "2022-12-22T12:38:57.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "this i guess: https://pcr.cloud-mercato.com/providers/digitalocean/flavors/c-16/performance",
+      "createdAt": "2022-12-22T12:40:29.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "they look all 2.7ghz cores",
+      "createdAt": "2022-12-22T12:42:48.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "whats the blockscout url for devnet?",
+      "createdAt": "2022-12-22T12:43:44.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://explorer.withdrawalsdevnet1.ethpandaops.io/",
+      "createdAt": "2022-12-22T12:46:40.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Think lighthouse is calling V2 methods pre-capella/shanghai, whereas teku, prysm, lodestar are calling V1...maybe not an issue but might explain some of the weirdness we were seeing with lighthouse-besu before, will have to dig in more tomorrow as heading offline",
+      "createdAt": "2022-12-22T12:51:44.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you restart ethereumjs with `--loglevel debug`  and is it possible to pass an env variable to ethereumjs docker via your ansible setup?",
+      "createdAt": "2022-12-22T12:57:09.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "want to pass `DEBUG=vm:*` env variable to see where/if vm execution is the choke point",
+      "createdAt": "2022-12-22T12:58:40.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@199561711278227457>",
+      "createdAt": "2022-12-22T13:02:35.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "on it",
+      "createdAt": "2022-12-22T13:12:44.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm, taking a long time to stop the container even",
+      "createdAt": "2022-12-22T13:12:57.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes container takes some time to stop normally even, mostly to make sure all modules do clean exit",
+      "createdAt": "2022-12-22T13:13:40.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think if we can provide a 4ghz+ cpu core, ethereumjs will be able to follow along the network nicely, since it falls back on some particular block and then catches up back again",
+      "createdAt": "2022-12-22T13:14:52.778000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "so some kind of txes choke ethereumjs more than others",
+      "createdAt": "2022-12-22T13:15:22.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "check it now 😄",
+      "createdAt": "2022-12-22T13:17:04.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "were you able to add env variable to the container: `DEBUG=vm:*`?",
+      "createdAt": "2022-12-22T13:19:31.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2022-12-22T13:19:36.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmmm somehow vm run debug logs are not getting dumped",
+      "createdAt": "2022-12-22T13:21:40.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "though i can see the DEBUG variable having correct value inside container",
+      "createdAt": "2022-12-22T13:22:17.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> you sent the BLS changes signed with Capella fork or before?",
+      "createdAt": "2022-12-22T13:22:18.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Prysm will put them in its pool if they are signed with Capella, but I don't know if every client will do this, I suspect not",
+      "createdAt": "2022-12-22T13:23:03.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\n           \"Env\": [\n                \"DEBUG=vm:*\",\n                \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\",\n                \"NODE_VERSION=16.17.0\",\n                \"YARN_VERSION=1.22.19\",\n                \"NODE_OPTIONS=--max_old_space_size=6144\"\n```",
+      "createdAt": "2022-12-22T13:23:52.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "yea it has these vars",
+      "createdAt": "2022-12-22T13:23:56.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes it  can see it inside shell as well",
+      "createdAt": "2022-12-22T13:26:19.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I have so far only sent it with teku",
+      "createdAt": "2022-12-22T13:37:38.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "teku seems to have not put it in a pool",
+      "createdAt": "2022-12-22T13:37:43.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll give it a try with prysm right away",
+      "createdAt": "2022-12-22T13:37:54.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm will take them in the pool if you sign them correctly with Capella, otherwise it will reject them",
+      "createdAt": "2022-12-22T13:46:11.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "you will need to pass the genesis validator root and the fork version to ethdo",
+      "createdAt": "2022-12-22T13:46:24.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Im using the newest version and it doesn't prompt me that anymore",
+      "createdAt": "2022-12-22T13:48:02.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Lodestar reports this: ```:\"Internal Server Error\",\"message\":\"Multiple errors on submitPoolBlsToExecutionChange\\nBLS_TO_EXECUTION_CHANGE_ERROR_INVALID_SIGNATURE```",
+      "createdAt": "2022-12-22T13:49:59.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Prysm reports this: ```{\"message\":\"Could not validate SignedBLSToExecutionChange: cannot process BLSToExecutionChange before Capella fork\",\"code\":400}```",
+      "createdAt": "2022-12-22T13:50:33.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is it bc the genesis-validator-root and fork version missing?",
+      "createdAt": "2022-12-22T13:50:51.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "lighthouse reports: ```{\"code\":400,\"message\":\"BAD_REQUEST: some BLS to execution changes failed to verify\",\"failures\":[{\"index\":0,\"message\":\"invalid: BlsToExecutionChangeBadFork(Merge)\"}```",
+      "createdAt": "2022-12-22T13:51:32.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I have included in the ethdo call now the genesis_validators_root and fork-version, and even like that prysm reports that it can't process the change before capella",
+      "createdAt": "2022-12-22T14:03:04.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```curl -s 127.0.0.1:4000/eth/v1/beacon/pool/bls_to_execution_changes\n{\"message\":\"Method Not Allowed\",\"code\":501}%```",
+      "createdAt": "2022-12-22T14:03:21.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and to verify that the pool is empty, its actually says that the method is not even allowed.",
+      "createdAt": "2022-12-22T14:03:39.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I guess capella will trigger the API to allow this call.",
+      "createdAt": "2022-12-22T14:03:49.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is how I generated the change : ```  ~/ethdo --connection 127.0.0.1:4000 validator credentials set --json \\\n          --path=\"m/12381/3600/1/0/0\" \\\n          --mnemonic=\"say ... wool\" \\\n          --withdrawal-address=0xE7c180eAdA8f60D63e9671867b2e0CA2649207A8 \\\n          --fork-version=0x40000041 \\\n          --genesis-validators-root=0xf306b3f8c766086aac88147a84f7fdeb224b080922cf653e479cc0dd04009d93\n```",
+      "createdAt": "2022-12-22T14:04:39.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@755590043632140352> are you sure we supposed to be able to fill the pool even before capella is hit? We are using  `HEAD-29dfca` still.",
+      "createdAt": "2022-12-22T14:06:36.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah crap that may be old. I'm changing money right now but will be at my computer in 40 minutes to check",
+      "createdAt": "2022-12-22T14:08:54.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok, capella gonna hit in about 70 mins",
+      "createdAt": "2022-12-22T14:09:51.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "would like to fill a pool before that hits.",
+      "createdAt": "2022-12-22T14:10:01.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let me check that head",
+      "createdAt": "2022-12-22T14:10:27.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562>  is lodestar supposed to reject bls change before capella?",
+      "createdAt": "2022-12-22T14:17:17.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@554799849288105986> is lighthouse supposed to reject bls change before capella?",
+      "createdAt": "2022-12-22T14:17:37.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@680234424037670912> is teku supposed to reject bls change before capella?",
+      "createdAt": "2022-12-22T14:17:54.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think we might accept it but it will be pruned out as soon as the fork changes to capella/next one as the signature will become stale as its domain will change",
+      "createdAt": "2022-12-22T14:21:30.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "also we will only accept it if its signed with the current fork's domain",
+      "createdAt": "2022-12-22T14:22:32.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is what I got <@792822129019584562>",
+      "createdAt": "2022-12-22T14:22:56.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "so if ethdo or any other tooling will sign it with future fork, the beacon node might reject it as signature will be invalid",
+      "createdAt": "2022-12-22T14:23:03.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahh yes, see above explanation ^^^",
+      "createdAt": "2022-12-22T14:23:21.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "might make sense to fail with \"Capella is not yet triggered\" error message and not BLS invalid signature message",
+      "createdAt": "2022-12-22T14:24:23.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "it must have been signed with capella fork (which might be correct), but we only validate against the current fork which is not yet capella",
+      "createdAt": "2022-12-22T14:24:25.178000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, ideed. its been signed with a future fork id.",
+      "createdAt": "2022-12-22T14:25:00.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmmm will see how we can imprive the ux",
+      "createdAt": "2022-12-22T14:26:26.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marioevz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I had trouble with lighthouse and Teku on the hive tests signing the Bls changes with capella, while still on the bellatrix fork.\n\nAnother issue is that, will these signatures expire by 4844 fork then ?",
+      "createdAt": "2022-12-22T14:30:06.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Do we want people to be able to fill bls change pools before Capella?",
+      "createdAt": "2022-12-22T14:30:59.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "If yes, spec should define it imo.",
+      "createdAt": "2022-12-22T14:31:25.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "The signature verification is against the fork of the head state. Prysm does something ad-hoc to allow them to be included in Bellatrix but only if they are signed correctly",
+      "createdAt": "2022-12-22T14:31:51.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I feel like bls change should work on any and all fork versions.",
+      "createdAt": "2022-12-22T14:34:01.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Otherwise there might gonna be people who forget to change bls keys after 4844 and it might say that sorry, this is no longer possible.",
+      "createdAt": "2022-12-22T14:34:49.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "It will work on all future fork versions after capella, just not those before capella.",
+      "createdAt": "2022-12-22T14:35:13.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> it seems that my PR never merged, I'll push it to the capella branch and will build you a new image",
+      "createdAt": "2022-12-22T14:35:25.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "no it wont,",
+      "createdAt": "2022-12-22T14:35:38.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "it needs to pass signature verification against the head state",
+      "createdAt": "2022-12-22T14:35:50+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "so we will prune the pool at future forks",
+      "createdAt": "2022-12-22T14:35:55.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can I somewhere follow what the new image name gonna be?",
+      "createdAt": "2022-12-22T14:35:58.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sure, but you could generate an operation when in deneb (or whatever) and it will work.",
+      "createdAt": "2022-12-22T14:36:16.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "So there's no \"no longer possible\".",
+      "createdAt": "2022-12-22T14:36:26.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah I'll build for the first time so be patient, I'll upload them and ping you, need to install docker first",
+      "createdAt": "2022-12-22T14:36:26.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "If it's going to be significant effort for client teams to hold the BLS change operation for a future fork then perhaps it's simpler to keep it such that the operations are rejected until the Capella hard fork takes place.  It may result in a bit of a rush of messages, but I'm not sure that there are that many people who are desperate to change their credentials within the first few seconds of the fork.",
+      "createdAt": "2022-12-22T14:38:25.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "(And yes there's a rough edge around hard forks, but that doesn't seem like a major issue; worst case the user re-sends the request after the hard fork.)",
+      "createdAt": "2022-12-22T14:38:57.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "it's trivial to accept them before capella (or any fork) as long as they are signed with the right fork version",
+      "createdAt": "2022-12-22T14:42:52.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> here' s the tag in the usual place capella-6b2721",
+      "createdAt": "2022-12-22T14:56:23.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "`gcr.io/prysmaticlabs/prysm/beacon-chain:capella-6b2721`?",
+      "createdAt": "2022-12-22T14:56:52.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll try to streamline this so that I can give you a steady tag in the future, I can' t get docker to work yet",
+      "createdAt": "2022-12-22T14:57:04.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "none of us can 😂",
+      "createdAt": "2022-12-22T14:57:15.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I prefer hashed tags over steady tags, as this way we can ensure we run the correct image right away",
+      "createdAt": "2022-12-22T14:57:49.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yea, or versioned 😄\nfar easier to know when we deployed the wrong image",
+      "createdAt": "2022-12-22T14:58:05.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "is there any change to the validator image?",
+      "createdAt": "2022-12-22T14:58:21.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok, I'll try to get Docker running and then I'll ask you how you want these images",
+      "createdAt": "2022-12-22T14:58:38.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me know if you can submit the bls changes to prysm before the fork <@412614104222531604>",
+      "createdAt": "2022-12-22T14:58:54.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Just deployed it on all prysm nodes <@412614104222531604>, go wild with the submissions",
+      "createdAt": "2022-12-22T15:01:20.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```{\"message\":\"Could not validate SignedBLSToExecutionChange: cannot process BLSToExecutionChange before Capella fork\",\"code\":400}%```",
+      "createdAt": "2022-12-22T15:01:28.856000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you give it a try? I might be doing something wrong?",
+      "createdAt": "2022-12-22T15:03:28.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have a new mnemonic tho",
+      "createdAt": "2022-12-22T15:03:39.661000+00:00",
+      "attachments": []
+    }
+  ]
+}

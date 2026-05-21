@@ -1,0 +1,1036 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2023-06-08",
+  "messageCount": 195,
+  "sourceHash": "9afc1467ef43103bccca685140b430b55e3787f77a09e2dbfc2a6f12517e24f4",
+  "searchText": "besu EnginePayload param (and BlockHeader) missing the dataGasUsed field - we are preparing a fix. ok, let me know when you have the fix ready. Can build the img and deploy it. <@412614104222531604> another issue i see is that teku is exposing metrics on 5054 but docker is configured to expose 8008 you can also definitely remove `--Xee-version=kilnv2` , very old param can you instead add `--Xmetrics-blob-sidecars-storage-enabled=true` ? which exposes some interesting metrics for testing ``` - --metrics-interface=0.0.0.0 - --metrics-port={{ teku_ports_metrics }}``` and teku_port_metrics are set to 8008 how can I change teku to expose ports on different port than 5054? removed. and added oh I do see that we have an override somewhere setting that port. Barnabas, it's running on the right port. Do a docker inspect and check the command it's actually running. It's 5054. The ethereum_node role overrides it here: https://github.com/ethpandaops/ansible-collection-general/blob/master/roles/ethereum_node/tasks/setup_cl.yaml#L25 Yes indeed. no prob for us but maybe there is some metrics infra expecting it to be 5054? you can just expose 5054 or simply map 8008 to 5054 We have prometheus scraping the right port. It's scraping 5054. The export that you see on 8008 is because the image itself exposes 8008 ( https://github.com/ConsenSys/teku/blob/master/docker/jdk17/Dockerfile#L38 ) . But we don't use that port because we changed it via a flag. We don't need to additionally \"expose\" the 5054 port (which is our override). It's available by default within the container network and prometheus which runs on the same docker network, is scraping it successfully. we might need to look into actually exposing this, in case anyone else wanna look at those metrics tho Especially if its a metric that we are not collecting yet. You don't need to \"expose\" it. You can directly curl the container via its IP address. E.g. `curl $(docker inspect teku | jq -r '.[0].NetworkSettings.Networks.shared.IPAddress'):5054/metrics` posted blob tx ez one liner 😂 I'll get tooling up and running today. ahh ok thanks, was assuming cant interact with the internal docker ip address lodestar<>ethereumjs/nethermind seems to be in sync could you confirm other pairs working as well https://forkmon.4844-devnet-6.ethpandaops.io forkmon says yes ok post 20 some rejection s lodestar<>nethermind on lodestar ethereumjs as well yea same block 5279 has a problem too but seems like no blobs actually these blobs have been posted I enabled tracing and we consider the block-blobs completed but no blobs let me check in lodestar debug logs let me check the block content well 5278 should have no blobs yes this is my believe. why ELs expects versionedHashes? updated list for blobs so yes confirmed that that block was having 0 blobs another interesting one this is teku<>ethereumjs right? yes rejected by teku-nethermind-1 as well lodestar<>nethermind has rejected most of blobs 5305 was accepted by nethermind 836e79202f2e733848f13207c39105c5dd416bb0dde63cb53452e45b71636f2a so far i see only EL issues yea, lodestar <>nethermind CL also sees blobs correctly let me debug into ethereumjs logs and see what mess is there 😅 I think ethereumjs packed a blob tx in slot=5278, blocknumber=3311 and didn't forward a blob in blobs bundle to CL because 5278 has 1 tx and cleanly no blobs found couple of issues, building a fix <@412614104222531604> can you deploy this: `g11tech/ethereumjs:devnet6-9b2af` on ethereumjs nodes, no need to wipe data, just replace image that image doesn't exists. <@792822129019584562> how is it coming along? forgot to push, check now Hi <@412614104222531604> will there be also a node to test Teku VC -> BN compatibility for devnet-6? It should be all good there, but good to test. i will send txs to teku node as well will test txs to all pairs who can build done ok sending a batch of 20 go! boom 4 blob block published Jun-08 09:50:12.616[] info: Published block slot=5951, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4 i still saw Invalid ExecutionPayload: Error verifying versionedHashes: expected=1 received=0 which slot? 5950 which node proposed 5950 teku etherumjs node dont know ethereumjs not uupdated there? <@412614104222531604> let me also ssh i saw it restarting so i guess so 5950 slot if teku<>ethereumjs produced, it got tx by EL gossip lodestar<>ethereumjs started new batch from 5951 `428ee271b784 g11tech/ethereumjs:devnet6-9b2af \"node /usr/app/node_…\" 11 minutes ago Up 11 minutes 127.0.0.1:8545->8545/tcp, 127.0.0.1:8551->8551/tcp, 0.0.0.0:30303->30303/tcp, 0.0.0.0:30303->30303/udp ethereumjs` its updated. 20 blobs ```typescript Jun-08 09:50:12.616[] info: Published block slot=5951, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4 Jun-08 09:51:00.517[] info: Published block slot=5955, validator=0xa5e9…5c1d, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4 Jun-08 09:51:12.327[] info: Published block slot=5956, validator=0xa836…7a37, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=2, withdrawals=0, blobs=2 Jun-08 09:51:24.158[] info: Published block slot=5957, validator=0x906d…1cf1, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=1, withdrawals=0, blobs=1 Jun-08 09:51:36.268[] info: Published block slot=5958, validator=0x94fd…b8f1, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=2, withdrawals=0, blobs=2 Jun-08 09:54:48.596[] info: Published block slot=5974, validator=0x850a…fb00, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4 Jun-08 09:55:24.377[] info: Published block slot=5977, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=3, withdrawals=0, blobs=3 ``` none of these had any issues i think <@504202741933932544> can you confirm these slots were accepted fine?, then let me send batch of 20 directly to teku<>ethereumjs node lodestar<>nethermind seems to be fine with these slots (i'm in a call, I'll be back soon) ok send 1 blob tx to teku<>etherumjs no same error ``` Jun-08 10:00:12.097[rest] error: Req req-1bm publishBlock error code=BLOCK_ERROR_EXECUTION_ERROR, execStatus=INVALID, errorMessage=Error verifying versionedHashes: expected=1 received=0 Error: BLOCK_ERROR_EXECUTION_ERROR at verifyBlockExecutionPayload (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlocksExecutionPayloads.ts:314:25) at processTicksAndRejections (node:internal/process/task_queues:95:5) at verifyBlocksExecutionPayload (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlocksExecutionPayloads.ts:157:28) at async Promise.all (index 0) at BeaconChain.verifyBlocksInEpoch (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlock.ts:90:70) at BeaconChain.processBlocks (file:///usr/app/packages/beacon-node/src/chain/blocks/index.ts:75:68) at JobItemQueue.runJob (file:///usr/app/packages/beacon-node/src/util/queue/i ``` <@504202741933932544> can you verify if you received blobs in blobs bundle from ethereumjs i think this is 6001 slot which teku might have produced may be teku isn't seeing the blob or not forwarding the blob tesing nethermind same. expected versionedHash but block has no blobs who produced 6001 i think teku only, because i send that tx to teku<>ethereumjs node not the two boxes i'm logged in now let me check also 6040? yes <@412614104222531604> do we have beacon explorer to check not yet working on it ah nvm 640 produced by teku-etherumjs We can't do it without erigon/lh 6040 error is correct that block had a tx, but the producing node didn't forward blobs lodestar<>ethereumjs seems to be working fine so ethereumjs should be giving blobs to teku can you validate if you got any blobs in getpayloadv3 from ethereumjs for this slot if you want me to send tx again to teku<>ethereumjs i can resend let me increase logging level 1sec ah damn we dont log those just add a log in docker image if you know `docker cp` no but we dont log blobsBundle at all I have to update it gimme 10 mins i can add log to ethereumjs k.. but i think i'll add it to teku too, for consistency from the current logs, it seems that ethereumjs should have given you blobs I was caught in another thing. Let me add the logs cose we are not printing those correctly merging and building new image.. will take a while <@412614104222531604> can you refresh teku with latest develop? sure <@792822129019584562> can you replay the issue? sending tx ``` |12:00:36] INFO [ CL ] Pending: Built block number=4170 txs=1 withdrawals=0 blobs=1 skippedByAddErrors=0 hash=7a524b5e43f59ffe98ca3d47b1ee113dcc36fc4006ac93d65fb6c2258d1a7b21 ``` looks to be fine no errors anywher sending more i think there could be an issue in the txs recieved via EL gossip without blobs, let me add some validations and filtering in ethereumjs for those direct txs produced by teku<>ethereumjs don't seem to have problem as of now I havent changed anything, just added trace logging for the getPayload response Maybe it breaks after the burst of 20? let me close out the gossiped tx issue then we can stress test it without possibility of this scenario oky! Just got the EF tests passing on this branch https://github.com/realbigsean/lighthouse/pull/32 I'm working on testing it today. Feel free to deploy it. building img have added the fix, running CI to see everything good <@412614104222531604> can you deploy: `g11tech/ethereumjs:devnet6-14788` , no wipe needed firing blobs <@412614104222531604> could you update geth to the newest commit? Probably still won't work but maybe a step closer sure my suspicion was correct, gossiped txs without blobs were getting in the txpool after adding the filter, everything is now going good even with a bust of 20 blobs geth/ethereumjs restarted. Lighthouse is running <@804047680195395675> <@654267572107083777> got a nimbus image ready to go for 'pre-devnet-6' ? ok, so I turned off getPayload response dumps, cose dumps too many data in logs. If we'll see problems again I can turn it on again What box? I'd like to check the logs `devops@ligthhouse-<el>-1.srv.4844-devnet-6.ethpandaops.io` current running els: `besu,ethereumjs,geth,nethermind` besu/geth is expected to not work at this point. still not working. Seeing something? Hi all 👋 EL-Client Devs: On your current 4844 implementations, do you support non-zero values for `excessDataGas` and `dataGasUsed` in the genesis? This is because it might be easier for us to write tests where these fields start from specific pre-configured values for each test case. look like lh has been able to sync with etheruemjs I'm going to dig into some `WARN`s i'm seeing, that might be leading to some poor peering not yet, shouldn't be difficult to add (ethereumjs) Ah, problem is probably the lack of checkpoint sync for LH. I’ll add it in a few mins right now no, I think it might be missing two things before it's baseline viable, will check those and let you know but regardless proposals aren't ready, so it shouldn't delay things Thanks! just wanted to get a feeling whether this is the reasonable thing to expect, or whether we should workaround it in the tests. can you guys point me to one of these 1Mb blocks that were sent on mainnet? you can find the details here https://notes.eth",
+  "excerpts": [
+    {
+      "author": "macfarla",
+      "category": "Testing",
+      "parent": "",
+      "content": "besu EnginePayload param (and BlockHeader) missing the dataGasUsed field - we are preparing a fix.",
+      "createdAt": "2023-06-08T04:55:28.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok, let me know when you have the fix ready. Can build the img and deploy it.",
+      "createdAt": "2023-06-08T07:14:24.205000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> another issue i see is that teku is exposing metrics on 5054 but docker is configured to expose 8008",
+      "createdAt": "2023-06-08T07:15:38.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can also definitely remove `--Xee-version=kilnv2` , very old param",
+      "createdAt": "2023-06-08T07:16:19.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you instead add `--Xmetrics-blob-sidecars-storage-enabled=true` ? which exposes some interesting metrics for testing",
+      "createdAt": "2023-06-08T07:17:55.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```  - --metrics-interface=0.0.0.0\n  - --metrics-port={{ teku_ports_metrics }}``` and teku_port_metrics are set to 8008",
+      "createdAt": "2023-06-08T07:20:53.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "how can I change teku to expose ports on different port than 5054?",
+      "createdAt": "2023-06-08T07:21:23.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "removed. and added",
+      "createdAt": "2023-06-08T07:21:32.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh I do see that we have an override somewhere setting that port.",
+      "createdAt": "2023-06-08T07:22:40.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Testing",
+      "parent": "",
+      "content": "Barnabas, it's running on the right port. Do a docker inspect and check the command it's actually running. It's 5054.",
+      "createdAt": "2023-06-08T07:22:44.222000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Testing",
+      "parent": "",
+      "content": "The ethereum_node role overrides it here: https://github.com/ethpandaops/ansible-collection-general/blob/master/roles/ethereum_node/tasks/setup_cl.yaml#L25",
+      "createdAt": "2023-06-08T07:23:33.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes indeed.",
+      "createdAt": "2023-06-08T07:23:41.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "no prob for us but maybe there is some metrics infra expecting it to be 5054?",
+      "createdAt": "2023-06-08T07:23:47.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can just expose 5054 or simply map 8008 to 5054",
+      "createdAt": "2023-06-08T07:24:10.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Testing",
+      "parent": "",
+      "content": "We have prometheus scraping the right port. It's scraping 5054.",
+      "createdAt": "2023-06-08T07:24:17.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Testing",
+      "parent": "",
+      "content": "The export that you see on 8008 is because the image itself exposes 8008 ( https://github.com/ConsenSys/teku/blob/master/docker/jdk17/Dockerfile#L38 ) . But we don't use that port because we changed it via a flag. We don't need to additionally \"expose\" the 5054 port (which is our override). It's available by default within the container network and prometheus which runs on the same docker network, is scraping it successfully.",
+      "createdAt": "2023-06-08T07:27:44.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we might need to look into actually exposing this, in case anyone else wanna look at those metrics tho",
+      "createdAt": "2023-06-08T07:28:35.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Especially if its a metric that we are not collecting yet.",
+      "createdAt": "2023-06-08T07:29:04.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "skylenet",
+      "category": "Testing",
+      "parent": "",
+      "content": "You don't need to \"expose\" it. You can directly curl the container via its IP address. E.g. `curl $(docker inspect teku | jq -r '.[0].NetworkSettings.Networks.shared.IPAddress'):5054/metrics`",
+      "createdAt": "2023-06-08T07:30:50.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "posted blob tx",
+      "createdAt": "2023-06-08T07:30:51.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ez one liner 😂",
+      "createdAt": "2023-06-08T07:31:13.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll get tooling up and running today.",
+      "createdAt": "2023-06-08T07:31:59.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahh ok thanks, was assuming cant interact with the internal docker ip address",
+      "createdAt": "2023-06-08T07:32:28.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>ethereumjs/nethermind seems to be in sync",
+      "createdAt": "2023-06-08T07:32:39.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you confirm other pairs working as well",
+      "createdAt": "2023-06-08T07:32:58.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://forkmon.4844-devnet-6.ethpandaops.io",
+      "createdAt": "2023-06-08T07:33:27.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "forkmon says yes",
+      "createdAt": "2023-06-08T07:33:30.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok post 20",
+      "createdAt": "2023-06-08T07:33:41.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "some rejection",
+      "createdAt": "2023-06-08T07:36:14.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "s",
+      "createdAt": "2023-06-08T07:36:15.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>nethermind",
+      "createdAt": "2023-06-08T07:36:19.009000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "97a4042fa5e3f34e20bf181e53a3ecd161cf5d86aec9c7f7c4085bd9730dccef"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "on lodestar ethereumjs as well",
+      "createdAt": "2023-06-08T07:37:17.155000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "a67276c1761594b91e46ad901e0a9da7642a01d7575e19d0ae42cf9b6632fe34"
+        }
+      ]
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-06-08T07:37:21.812000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "6165f8e645302de401f1cd2d860493bf10db320fefccebb0fac62b604942bab7"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "yea same block",
+      "createdAt": "2023-06-08T07:37:46.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "5279 has a problem too",
+      "createdAt": "2023-06-08T07:38:13.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "but seems like no blobs actually",
+      "createdAt": "2023-06-08T07:38:43.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "these blobs have been posted",
+      "createdAt": "2023-06-08T07:39:38.734000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "22f7c74762ed59e0732e71e9c88a61128aed38e8f7e7fc12f4147c898a6a13b6"
+        }
+      ]
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "I enabled tracing and we consider the block-blobs completed",
+      "createdAt": "2023-06-08T07:39:40.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "but no blobs",
+      "createdAt": "2023-06-08T07:39:45.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me check in lodestar debug logs",
+      "createdAt": "2023-06-08T07:40:05.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me check the block content",
+      "createdAt": "2023-06-08T07:40:36.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "well 5278 should have no blobs",
+      "createdAt": "2023-06-08T07:45:24.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes this is my believe.",
+      "createdAt": "2023-06-08T07:45:40.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "why ELs expects versionedHashes?",
+      "createdAt": "2023-06-08T07:45:54.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-06-08T07:46:02.764000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "8da04891980a0d2191a4957f128902932073c5b9a9fa49a45252b9c22c341b0a"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "updated list for blobs",
+      "createdAt": "2023-06-08T07:48:27.419000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "007a450a959b492cd28b9f9499eea19d826bc3bcd19e47b1d67d8490dcc5e093"
+        }
+      ]
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "so yes confirmed that that block was having 0 blobs",
+      "createdAt": "2023-06-08T07:48:58.662000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "7bd0a1d355a1925561e5d68c19a6bc8482b795171a3f6143a3e210a2a3c8a242"
+        }
+      ]
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "another interesting one",
+      "createdAt": "2023-06-08T07:52:54.368000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "a280aa6fdc26ff7a73a8ce100d108e0186c46aaca3c59343177e6076388d6def"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is teku<>ethereumjs right?",
+      "createdAt": "2023-06-08T07:53:19.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2023-06-08T07:53:23.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "rejected by teku-nethermind-1 as well",
+      "createdAt": "2023-06-08T07:53:33.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>nethermind has rejected most of blobs",
+      "createdAt": "2023-06-08T07:53:34.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "5305 was accepted by nethermind",
+      "createdAt": "2023-06-08T07:54:12.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "836e79202f2e733848f13207c39105c5dd416bb0dde63cb53452e45b71636f2a",
+      "createdAt": "2023-06-08T07:54:22.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "so far i see only EL issues",
+      "createdAt": "2023-06-08T07:55:19.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "yea, lodestar <>nethermind CL also sees blobs correctly",
+      "createdAt": "2023-06-08T08:00:34.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-06-08T08:01:09.734000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "983f99f5f4035d178597b058bdbfc2cda904409ff481491cded008bf6e3d5fbb"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me debug into ethereumjs logs and see what mess is there 😅",
+      "createdAt": "2023-06-08T08:02:00.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think ethereumjs packed a blob tx in slot=5278, blocknumber=3311 and didn't forward a blob in blobs bundle to CL",
+      "createdAt": "2023-06-08T08:08:15.937000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "17d5e98a95989278a32c4be492fc997f63f03df3a23d16ac32255efede60df6b"
+        }
+      ]
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "because 5278 has 1 tx and cleanly no blobs",
+      "createdAt": "2023-06-08T08:08:49.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "found couple of issues, building a fix",
+      "createdAt": "2023-06-08T08:22:27.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> can you deploy this: `g11tech/ethereumjs:devnet6-9b2af` on ethereumjs nodes, no need to wipe data, just replace image",
+      "createdAt": "2023-06-08T09:21:33.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "that image doesn't exists.",
+      "createdAt": "2023-06-08T09:23:48.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@792822129019584562>",
+      "createdAt": "2023-06-08T09:29:16.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "how is it coming along?",
+      "createdAt": "2023-06-08T09:31:39.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "forgot to push, check now",
+      "createdAt": "2023-06-08T09:38:55.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hi <@412614104222531604> will there be also a node to test Teku VC -> BN compatibility for devnet-6? It should be all good there, but good to test.",
+      "createdAt": "2023-06-08T09:41:15.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i will send txs to teku node as well",
+      "createdAt": "2023-06-08T09:41:51.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "will test txs to all pairs who can build",
+      "createdAt": "2023-06-08T09:42:38.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "done",
+      "createdAt": "2023-06-08T09:45:51.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok sending a batch of 20",
+      "createdAt": "2023-06-08T09:47:20.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "go!",
+      "createdAt": "2023-06-08T09:48:22.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "boom",
+      "createdAt": "2023-06-08T09:49:58.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "4 blob block published",
+      "createdAt": "2023-06-08T09:50:30.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "Jun-08 09:50:12.616[]                 info: Published block slot=5951, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4",
+      "createdAt": "2023-06-08T09:50:40.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "i still saw Invalid ExecutionPayload: Error verifying versionedHashes: expected=1 received=0",
+      "createdAt": "2023-06-08T09:53:14.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "which slot?",
+      "createdAt": "2023-06-08T09:53:46.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "5950",
+      "createdAt": "2023-06-08T09:53:46.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "which node proposed 5950",
+      "createdAt": "2023-06-08T09:54:04.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "teku etherumjs node",
+      "createdAt": "2023-06-08T09:54:07.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "dont know",
+      "createdAt": "2023-06-08T09:54:11.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ethereumjs not uupdated there? <@412614104222531604>",
+      "createdAt": "2023-06-08T09:54:21.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me also ssh",
+      "createdAt": "2023-06-08T09:54:29.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "i saw it restarting",
+      "createdAt": "2023-06-08T09:54:41.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "so i guess so",
+      "createdAt": "2023-06-08T09:54:46.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "5950 slot if teku<>ethereumjs produced, it got tx by EL gossip",
+      "createdAt": "2023-06-08T09:55:43.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>ethereumjs started new batch from 5951",
+      "createdAt": "2023-06-08T09:56:15.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`428ee271b784   g11tech/ethereumjs:devnet6-9b2af               \"node /usr/app/node_…\"   11 minutes ago   Up 11 minutes   127.0.0.1:8545->8545/tcp, 127.0.0.1:8551->8551/tcp, 0.0.0.0:30303->30303/tcp, 0.0.0.0:30303->30303/udp   ethereumjs`",
+      "createdAt": "2023-06-08T09:56:48.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its updated.",
+      "createdAt": "2023-06-08T09:56:52.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "20 blobs ```typescript\nJun-08 09:50:12.616[]                 info: Published block slot=5951, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4\nJun-08 09:51:00.517[]                 info: Published block slot=5955, validator=0xa5e9…5c1d, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4\nJun-08 09:51:12.327[]                 info: Published block slot=5956, validator=0xa836…7a37, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=2, withdrawals=0, blobs=2\nJun-08 09:51:24.158[]                 info: Published block slot=5957, validator=0x906d…1cf1, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=1, withdrawals=0, blobs=1\nJun-08 09:51:36.268[]                 info: Published block slot=5958, validator=0x94fd…b8f1, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=2, withdrawals=0, blobs=2\nJun-08 09:54:48.596[]                 info: Published block slot=5974, validator=0x850a…fb00, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=4, withdrawals=0, blobs=4\nJun-08 09:55:24.377[]                 info: Published block slot=5977, validator=0x90c1…85cc, graffiti=lodestar/ethereumjs, source=engine, blockValue=0.0 ETH, feeRecipient=0xf97e180c050e5ab072211ad2c213eb5aee4df134, transactions=3, withdrawals=0, blobs=3\n```",
+      "createdAt": "2023-06-08T09:56:56.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "none of these had any issues i think",
+      "createdAt": "2023-06-08T09:57:20.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@504202741933932544> can you confirm these slots were accepted fine?, then let me send batch of 20 directly to teku<>ethereumjs node",
+      "createdAt": "2023-06-08T09:57:48.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>nethermind seems to be fine with these slots",
+      "createdAt": "2023-06-08T09:58:02.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "(i'm in a call, I'll be back soon)",
+      "createdAt": "2023-06-08T09:58:05.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok send 1 blob tx to teku<>etherumjs",
+      "createdAt": "2023-06-08T09:59:12.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "no same error",
+      "createdAt": "2023-06-08T10:00:22.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\nJun-08 10:00:12.097[rest]            error: Req req-1bm publishBlock error  code=BLOCK_ERROR_EXECUTION_ERROR, execStatus=INVALID, errorMessage=Error verifying versionedHashes: expected=1 received=0\nError: BLOCK_ERROR_EXECUTION_ERROR\n    at verifyBlockExecutionPayload (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlocksExecutionPayloads.ts:314:25)\n    at processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at verifyBlocksExecutionPayload (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlocksExecutionPayloads.ts:157:28)\n    at async Promise.all (index 0)\n    at BeaconChain.verifyBlocksInEpoch (file:///usr/app/packages/beacon-node/src/chain/blocks/verifyBlock.ts:90:70)\n    at BeaconChain.processBlocks (file:///usr/app/packages/beacon-node/src/chain/blocks/index.ts:75:68)\n    at JobItemQueue.runJob (file:///usr/app/packages/beacon-node/src/util/queue/i\n```",
+      "createdAt": "2023-06-08T10:00:32.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@504202741933932544> can you verify if you received blobs in blobs bundle from ethereumjs",
+      "createdAt": "2023-06-08T10:01:09.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think this is 6001 slot",
+      "createdAt": "2023-06-08T10:01:25.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "which teku might have produced",
+      "createdAt": "2023-06-08T10:01:32.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "may be teku isn't seeing the blob or not forwarding the blob",
+      "createdAt": "2023-06-08T10:02:03.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "tesing nethermind",
+      "createdAt": "2023-06-08T10:02:27.908000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2023-06-08T10:07:54.572000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "d5284f3532392e737615ce7ecdc8df10640bb318bfcb518bcb543a8d2c35920d"
+        }
+      ]
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "same. expected versionedHash but block has no blobs",
+      "createdAt": "2023-06-08T10:08:25.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "who produced 6001",
+      "createdAt": "2023-06-08T10:08:41.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think teku only, because i send that tx to teku<>ethereumjs node",
+      "createdAt": "2023-06-08T10:09:15.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "not the two boxes i'm logged in now",
+      "createdAt": "2023-06-08T10:09:37.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "let me check",
+      "createdAt": "2023-06-08T10:09:39.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "also 6040?",
+      "createdAt": "2023-06-08T10:10:27.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2023-06-08T10:11:26.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> do we have beacon explorer to check",
+      "createdAt": "2023-06-08T10:11:29.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "not yet",
+      "createdAt": "2023-06-08T10:11:36.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "working on it",
+      "createdAt": "2023-06-08T10:11:38.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah nvm",
+      "createdAt": "2023-06-08T10:11:51.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "640 produced by teku-etherumjs",
+      "createdAt": "2023-06-08T10:11:53.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "We can't do it without erigon/lh",
+      "createdAt": "2023-06-08T10:12:00.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "6040",
+      "createdAt": "2023-06-08T10:12:03.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "error is correct that block had a tx, but the producing node didn't forward blobs",
+      "createdAt": "2023-06-08T10:12:11.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar<>ethereumjs seems to be working fine",
+      "createdAt": "2023-06-08T10:12:18.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "g11tech",
+      "category": "Testing",
+      "parent": "",
+      "content": "so ethereumjs should be giving blobs to teku",
+      "createdAt": "2023-06-08T10:12:35.166000+00:00",
+      "attachments": []
+    }
+  ]
+}

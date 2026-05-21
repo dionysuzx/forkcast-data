@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "rayonism☀",
+  "date": "2021-05-14",
+  "messageCount": 256,
+  "sourceHash": "9e73290f0488cbe361a1d9ea4b1bf10b064549cdad02884a41b2dd871d8f60e8",
+  "searchText": "navigating the blocks is quite difficult, it's all messed up, perhaps we should check the eth1 data vote before accepting blocks, there are consecutive blocks voting for the same eth1 hash, but with a different deposit count and deposit root. Like https://nocturne.rayonism.io/block/6140 and it's previous block I've been reading the choice of eth1 data vote in Teku and I think that particular section is fine, it's just adds a little slack to the votes that you cache just to deal with some edge cases. If I understood correctly you keep a list of valid votes and then when requesting an eth1 data to vote you grab the current state, list all the current eth1 data and find the valid one with most votes. If that's empty you choose the last valid one. I wonder if the eth1 block 4697 (included in 6144) or the Eth1 block 6332 (included in 8192) were considered valid or not. Because those are exactly at the boundary of your check in https://github.com/txrx-research/teku/blob/8b2d8fa7e6021de2fa360e391304d7b4258c9510/validator/coordinator/src/main/java/tech/pegasys/teku/validator/coordinator/Eth1DataCache.java#L95 In these two periods the previous votes to Teku proposed blocks were either invalid (the genesis block is outside the lower bound set there) or exactly in the upper boundary Ah crap, already in bed and I can't remove embeds with the cell... The two `true` values in that call to `subMap` indicates both ends are inclusive. Ah thanks, then it's a mistery from reading that file why those blocks weren't voted instead of voting on previous ones. I'll read in more detail over the weekend (Fridays I'm stuck teaching online) There still may be an issue with timings cause as opposed to mainnet where the eth 1 block is available before the eth2 block, now the eth 1 block is only synced after it's been processed by the beacon chain We'd be using the timestamp from the eth1 block for everything so when it appears in the client doesn't matter. But we calculate the follow distance off what the eth1 node reports as its current head block which is obviously an area that's changed a lot with the merge. Don't know if it could have affected this or not, but it does sound like somehow the deposit just wasn't in the cache yet. Oh, but the deposits were already there way before. The deposit count of all these hashes are the same (except genesis of course). I think follow distance also doesn't play any role here since the deposits where very sporadic and where included way before. I've been following the debug messages of update follow head And it's fine So I think the follow distance is working as it should be on my Teku node at least But it's not voting right anyway Sorry I meant to say the block may not be in the cache. It seems like it's that or the end of the voting period wasn't calculated correctly somehow. But there was too much to catch up on overnight so I haven't actually read all the detail of what's going on. join Nocturne as a validator, should i make 20200 keys? i mean.. eth2-val-tools keystores \\ --out-loc \"$TESTNET_NAME/private/$VALIDATOR_NODE_NAME\" \\ --prysm-pass=\"foobar\" \\ --source-min=0 \\ --source-max=20200 \\ --source-mnemonic=\"lumber kind orange gold firm achieve tree robust peasant april very word ordinary before treat way ivory jazz cereal debate juice evil flame sadness\" should i set source-max 20200? `8192` was considered as valid and default vote as I wrote previously. That was the case for a `300` slots after the beginning of the period. What I will try today is to look at eth1 votes at the beginning of the voting period. But it doesn't seem trivial to reproduce for debug purposes. If you haven't received a mnemonic from Proto from the beginning the only way for you seems to be to get test ETH and go through deposit procedure to get onboarded. Unfortunately, there is an issue with eth1 data voting and deposited validators are stuck now and not enabled on the beacon chain. We're working on resolving this issue now. ok i see thanks I see that we get forked blocks produced at slots 13340, 13360, 13375, 13410. Apparently, they are produced by the same Teku node run by Besu team. Curious what is happening there, probably this node is struggling to follow the head of the chain. cc <@!524738020033691659> do we have office-hours today? we have if <@!203220829473996800> will appear and open the stage 🙂 Even though Teku votes are weird they are legal and doesn't prevent us from reaching majority of votes. Is this correct? Ok I guess not, no worries update from Nethermind: we have 2 bug reports we will look into soon(ish) Do you want to share details? One is yours about StateRoot mismatch after importing a block, other from <@!203220829473996800> about incorrect behaviour of eth_syncing I see, thanks! Oh hey, no wasn't planning to do office hour. We have this chat for debugging, and we just went through the project yesterday on the Merge call Right, if prysm wasn't voting on the genesis hash we may get there Here we are: ``` 2021-05-14 04:57:48 GMT+0000 -- block with the vote produced https://nocturne.rayonism.io/block/12289 2021-05-14 06:34:11.254+00:00 | pool-18-thread-104 | DEBUG | DepositFetcher | Requesting deposits between 7959 and 7959. Batch size: 10000 -- Correct block fetched by Teku ``` So, If I am not mistaken the right Eth1 block has been fetched ~1.5hours later than this vote has been made. Which is roughly the difference between timestamps of the right Eth1 block and the block Teku has been voting for Investigating deeper into block fetcher I see that by block 10255 (only 15 into the period) Teku's vote `0xe128aa0184` it was already tied with the block included in 8192. at three votes each. The first vote for it was in 10248 only 8 into the period after that the default vote would have been this. Oh now I see what you mean, you mean that you checked 300 slots later that Teku's `defaultVote` as computed here https://github.com/txrx-research/teku/blob/master/validator/coordinator/src/main/java/tech/pegasys/teku/validator/coordinator/Eth1DataCache.java#L81 was still showing the block included in 8192? not only showing that it was valid but also that it was the last entry in the list right? Bizarre. right, but it wasn't picked due to majority voted for the other block `Requesting deposits between 7959 and 7959. Batch size: 10000` how is that size correct for those limits? O 10000 deposits per batch I don't understand, in that block 12289 the eth1 data vote was for the block `0xdc80b18b64e0` which is number `7558`, not in that range The timestamp for that block is `Thu May 13 08:30:48 PM` This is a number of Eth1 block oh the range 7959 refers to eth2 blocks? 10k is the cap on a block range that is gonna be requested oh, wait. It's Eth1 number, not Eth2. I misread yeah, so The vote in the block you linked was for eth1 block 7558 which came at 8:30 PM fo the previous day And wasn't requested in the range you mention I guess The timing is also correct roughly as it is about 8:30 hs between the block and the vote I think the Eth1FollowHead in Teku is correct Correct vote is for `7959`, right? which is right here, https://nocturne.rayonism.io/block/12291 Oh I just woke up for the beginning of the period! the vote at the beginning of the period in slot 12280 is for the eth1 block `7959` which was included in block https://nocturne.rayonism.io/block/10239 this is the right vote being the last one in the period (since the boundary one 10240 was missed) what does that block 12291 have to do here? (that one I produced) It is voted for the right Eth1 block ah yeah, my prysm+Catalyst is always voting correctly while the previous vote by Teku again was for the odd Eth1 block which is ~1.5hours behind the right one it is Terence's and proto's that are not voting right, I don't know why And this is because Teku fetches blocks with a 1.5hours delay for some reason. If I am not mistaken in my investigation ``` $ python ~/votes.py Voting summary for slot: 14011 Voting period starts:12288 ends:14336 0x1ea2f2ce8b7d280ef3812e6ecd216d7f9cd8b0b1235d610304fc4a3b2182ab89 : 236 0xdc80b18b64e0bb6116b03e09fc70211c2f2db2d11ca4dff10e7a4320aa5da53f : 662 0xf936f4395596714b84f731c2aec62047547c77fecc786b71ce587c628f0e51a4 : 433 ``` So if we join the last two hashes we will be fine. It is a bit dissappointing that the right vote is the least voted hash. So either we make prysm vote for the wrong but valid hash to get majority or we need to fix both bugs, but fixing only Teku's won't work it seems yeah, we need others voting correctly as well I would encourage everybody to check their eth1 data votes and request for help if they see any issues and can't deal with it. First two hashes are considered correct Ok I think I just understood your comment then: the proposer of `12289` should have voted for `7959`, it had it as a valid vote cause it had appeared before in the period. But it didn't vote for it cause it hadn't included the deposits for the block still, and it didn't happen for another 1:30hs. This sounds very promissing, cause then the bug is not in the voting logic Yes, looking into it more deep to understand if I am right or wrong. From logs I see Teku fetches Eth1 blocks with respect to a follow distance, i.e. `2048` block behind the head Ha! and here we have skipped slots in game yeah, the asynchronicity could come from that but the followdistance refers to eth2 blocks and it is updating correctly it must be only in the transation to eth1 blocks that the error lies Teku fetches and caches Eth1 blocks by subtracting `2048` from the head. Then eth1 data voting logic starts working which is based on Eth1 timestamps rather than numbers. So, the logic works correctly while the fetcher doesn't account for skipped slots and comes with older blocks than the voting supposed to see oh so the translation is directly wrong using the same number for eth2 blocks than eth1? I thought that it was subtracting 2048 from the head. Then taking the eth1 block with the timestamp from that eth2 block It checks Eth1 head each `SECONDS_PER_ETH1_BLOCK`, then subtracts `ETH1_FOLLOW_DISTANCE` from it and feeds subtracted number to the fetcher ah yeah that's bad Then fetcher does its job and adds new block(s) to the cache. So, no time is in account so far. And then eth1 data votes logic uses timestamps of cached blocks I see that `fetchDepositsInRange` takes block numbers as arguments https://github.com/ConsenSys/teku/blob/master/pow/src/main/java/tech/pegasys/teku/pow/Eth1HeadTracker.java#L81 So, for Mainnet if time between block would be increased we would likely see the same problem yeah I saw that last night and assumed it was correct cause it was giving the right eth2 block If real seconds per eth1 block would be greater than the config variable OTOH, this logic is written correct lywith respect to the safe distance from head in the PoW chain I think the spec states it needs to be 2048 eth1 blocks not eth2 blocks translated to timestamps so perhaps this IS the right vote what Teku is doing ohh no, is timestamp based ``` Eth1 blocks must only be considered once they are at least SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE seconds old (i.e. eth1_timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE <= current_unix_time). Due to this constraint, if GENESIS_DELAY < SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE, then the genesis_time can happen before the time/state is first known. Values should be configured to avoid this case. ``` But it says: `at least` Yes, it's timestamp based: ``` def is_candidate_block(block: Eth1Block, period_start: uint64) -> bool: return ( block.timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE <= period_start and block.timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE * 2 >= period_start )``` this is the filter for all blocks in `eth1_chain` In any case a quick fix for Teku here is to just request the block at the given timestamp there in the `newHeadAtFollowDistance` I'll",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "navigating the blocks is quite difficult, it's all messed up, perhaps we should check the eth1 data vote before accepting blocks, there are consecutive blocks voting for the same eth1 hash, but with a different deposit count and deposit root.",
+      "createdAt": "2021-05-14T01:28:13.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Like https://nocturne.rayonism.io/block/6140 and it's previous block",
+      "createdAt": "2021-05-14T01:28:50.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I've been reading the choice of eth1 data vote in Teku and I think that particular section is fine, it's just adds a little slack to the votes that you cache just to deal with some edge cases. If I understood correctly you keep a list of valid votes and then when requesting an eth1 data to vote you grab the current state, list all the current eth1 data and find the valid one with most votes. If that's empty you choose the last valid one. I wonder if the eth1 block 4697 (included in 6144)  or the Eth1 block 6332 (included in 8192) were considered valid or not. Because those are exactly at the boundary of your check in https://github.com/txrx-research/teku/blob/8b2d8fa7e6021de2fa360e391304d7b4258c9510/validator/coordinator/src/main/java/tech/pegasys/teku/validator/coordinator/Eth1DataCache.java#L95\n In these two periods the previous votes to Teku proposed blocks were either invalid (the genesis block is outside the lower bound set there) or exactly in the upper boundary",
+      "createdAt": "2021-05-14T02:29:00.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah crap, already in bed and I can't remove embeds with the cell...",
+      "createdAt": "2021-05-14T02:29:35.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The two `true` values in that call to `subMap` indicates both ends are inclusive.",
+      "createdAt": "2021-05-14T02:36:03.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah thanks, then it's a mistery from reading that file why those blocks weren't voted instead of voting on previous ones. I'll read in more detail over the weekend (Fridays I'm stuck teaching online)",
+      "createdAt": "2021-05-14T02:38:21.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There still may be an issue with timings cause as opposed to mainnet where the eth 1 block is available before the eth2 block, now the eth 1 block is only synced after it's been processed by the beacon chain",
+      "createdAt": "2021-05-14T02:40:20.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "We'd be using the timestamp from the eth1 block for everything so when it appears in the client doesn't matter.  But we calculate the follow distance off what the eth1 node reports as its current head block which is obviously an area that's changed a lot with the merge.  Don't know if it could have affected this or not, but it does sound like somehow the deposit just wasn't in the cache yet.",
+      "createdAt": "2021-05-14T02:42:40.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh, but the deposits were already there way before. The deposit count of all these hashes are the same (except genesis of course). I think follow distance also doesn't play any role here since the deposits where very sporadic and where included way before.",
+      "createdAt": "2021-05-14T02:45:21.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I've been following the debug messages of update follow head",
+      "createdAt": "2021-05-14T02:46:09.577000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And it's fine",
+      "createdAt": "2021-05-14T02:46:13.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So I think the follow distance is working as it should be on my Teku node at least",
+      "createdAt": "2021-05-14T02:46:38.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But it's not voting right anyway",
+      "createdAt": "2021-05-14T02:46:48.012000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Sorry I meant to say the block may not be in the cache. It seems like it's that or the end of the voting period wasn't calculated correctly somehow.  But there was too much to catch up on overnight so I haven't actually read all the detail of what's going on.",
+      "createdAt": "2021-05-14T02:47:55.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "riva_07",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "join Nocturne as a validator, should i make 20200 keys?",
+      "createdAt": "2021-05-14T07:29:55.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "riva_07",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "i mean.. eth2-val-tools keystores \\\n  --out-loc \"$TESTNET_NAME/private/$VALIDATOR_NODE_NAME\" \\\n  --prysm-pass=\"foobar\" \\\n  --source-min=0 \\\n  --source-max=20200 \\\n  --source-mnemonic=\"lumber kind orange gold firm achieve tree robust peasant april very word ordinary before treat way ivory jazz cereal debate juice evil flame sadness\"",
+      "createdAt": "2021-05-14T07:30:45.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "riva_07",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "should i set source-max 20200?",
+      "createdAt": "2021-05-14T07:31:04.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`8192` was considered as valid and default vote as I wrote previously. That was the case for a `300` slots after the beginning of the period. What I will try today is to look at eth1 votes at the beginning of the voting period. But it doesn't seem trivial to reproduce for debug purposes.",
+      "createdAt": "2021-05-14T08:02:38.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If you haven't received a mnemonic from Proto from the beginning the only way for you seems to be to get test ETH and go through deposit procedure to get onboarded. Unfortunately, there is an issue with eth1 data voting and deposited validators are stuck now and not enabled on the beacon chain. We're working on resolving this issue now.",
+      "createdAt": "2021-05-14T08:08:52.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "riva_07",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ok i see thanks",
+      "createdAt": "2021-05-14T08:20:17.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see that we get forked blocks produced at slots 13340, 13360, 13375, 13410. Apparently, they are produced by the same Teku node run by Besu team. Curious what is happening there, probably this node is struggling to follow the head of the chain. cc <@!524738020033691659>",
+      "createdAt": "2021-05-14T08:46:48.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "do we have office-hours today?",
+      "createdAt": "2021-05-14T09:02:03.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "we have if <@!203220829473996800> will appear and open the stage 🙂",
+      "createdAt": "2021-05-14T09:03:46.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Even though Teku votes are weird they are legal and doesn't prevent us from reaching majority of votes. Is this correct?",
+      "createdAt": "2021-05-14T09:04:56.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok I guess not, no worries",
+      "createdAt": "2021-05-14T09:09:45.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "update from Nethermind: we have 2 bug reports we will look into soon(ish)",
+      "createdAt": "2021-05-14T09:10:26.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Do you want to share details?",
+      "createdAt": "2021-05-14T09:11:04.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "One is yours about StateRoot mismatch after importing a block, other from <@!203220829473996800>  about incorrect behaviour of eth_syncing",
+      "createdAt": "2021-05-14T09:11:47.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see, thanks!",
+      "createdAt": "2021-05-14T09:12:38.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh hey, no wasn't planning to do office hour. We have this chat for debugging, and we just went through the project yesterday on the Merge call",
+      "createdAt": "2021-05-14T10:04:22.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Right, if prysm wasn't voting on the genesis hash we may get there",
+      "createdAt": "2021-05-14T10:05:54.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Here we are:\n```\n2021-05-14 04:57:48 GMT+0000 -- block with the vote produced https://nocturne.rayonism.io/block/12289\n\n2021-05-14 06:34:11.254+00:00 | pool-18-thread-104 | DEBUG | DepositFetcher | Requesting deposits between 7959 and 7959. Batch size: 10000 -- Correct block fetched by Teku\n```",
+      "createdAt": "2021-05-14T10:18:42.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So, If I am not mistaken the right Eth1 block has been fetched ~1.5hours later than this vote has been made. Which is roughly the difference between timestamps of the right Eth1 block and the block Teku has been voting for",
+      "createdAt": "2021-05-14T10:21:18.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Investigating deeper into block fetcher",
+      "createdAt": "2021-05-14T10:21:47.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see that by  block 10255 (only 15 into the period) Teku's vote `0xe128aa0184` it was already tied with the block included in 8192. at three votes each. The first vote for it was in 10248 only 8 into the period after that the default vote would have been this.\nOh now I see what you mean, you mean that you checked 300 slots later that Teku's `defaultVote` as computed here\nhttps://github.com/txrx-research/teku/blob/master/validator/coordinator/src/main/java/tech/pegasys/teku/validator/coordinator/Eth1DataCache.java#L81\nwas still showing the block included in 8192? not only showing that it was valid but also that it was the last entry in the list right? Bizarre.",
+      "createdAt": "2021-05-14T10:28:25.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "right, but it wasn't picked due to majority voted for the other block",
+      "createdAt": "2021-05-14T10:29:44.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "`Requesting deposits between 7959 and 7959. Batch size: 10000` how is that size correct for those limits?",
+      "createdAt": "2021-05-14T10:30:29.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "O 10000 deposits per batch",
+      "createdAt": "2021-05-14T10:30:43.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I don't understand, in that block 12289 the eth1 data vote was for the block `0xdc80b18b64e0` which is number `7558`, not in that range",
+      "createdAt": "2021-05-14T10:34:29.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The timestamp for that block is `Thu May 13 08:30:48 PM`",
+      "createdAt": "2021-05-14T10:35:36.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "This is a number of Eth1 block",
+      "createdAt": "2021-05-14T10:35:45.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh the range 7959 refers to eth2 blocks?",
+      "createdAt": "2021-05-14T10:36:16.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "10k is the cap on a block range that is gonna be requested",
+      "createdAt": "2021-05-14T10:36:19.235000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh, wait. It's Eth1 number, not Eth2. I misread",
+      "createdAt": "2021-05-14T10:37:07.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, so The vote in the block you linked",
+      "createdAt": "2021-05-14T10:37:25.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "was for eth1 block 7558",
+      "createdAt": "2021-05-14T10:37:34.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "which came at 8:30 PM fo the previous day",
+      "createdAt": "2021-05-14T10:38:05.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And wasn't requested in the range you mention I guess",
+      "createdAt": "2021-05-14T10:38:26.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "The timing is also correct roughly as it is about 8:30 hs between the block and the vote",
+      "createdAt": "2021-05-14T10:39:13.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the Eth1FollowHead in Teku is correct",
+      "createdAt": "2021-05-14T10:39:25.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Correct vote is for `7959`, right?",
+      "createdAt": "2021-05-14T10:40:11.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "which is right here, https://nocturne.rayonism.io/block/12291",
+      "createdAt": "2021-05-14T10:41:56.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Oh I just woke up for the beginning of the period!  the vote at the beginning of the period in slot 12280 is for the eth1 block `7959` which was included in block https://nocturne.rayonism.io/block/10239  this is the right vote being the last one in the period (since the boundary one 10240 was missed)",
+      "createdAt": "2021-05-14T10:47:07.222000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what does that block 12291 have to do here? (that one I produced)",
+      "createdAt": "2021-05-14T10:48:05.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It is voted for the right Eth1 block",
+      "createdAt": "2021-05-14T10:48:24.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah yeah, my prysm+Catalyst is always voting correctly",
+      "createdAt": "2021-05-14T10:48:42.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "while the previous vote by Teku again was for the odd Eth1 block which is ~1.5hours behind the right one",
+      "createdAt": "2021-05-14T10:48:48.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it is Terence's and proto's that are not voting right, I don't know why",
+      "createdAt": "2021-05-14T10:48:58.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "And this is because Teku fetches blocks with a 1.5hours delay for some reason. If I am not mistaken in my investigation",
+      "createdAt": "2021-05-14T10:49:22.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "```\n$ python ~/votes.py \nVoting summary for slot: 14011\nVoting period starts:12288  ends:14336\n0x1ea2f2ce8b7d280ef3812e6ecd216d7f9cd8b0b1235d610304fc4a3b2182ab89 : 236\n0xdc80b18b64e0bb6116b03e09fc70211c2f2db2d11ca4dff10e7a4320aa5da53f : 662\n0xf936f4395596714b84f731c2aec62047547c77fecc786b71ce587c628f0e51a4 : 433\n```\nSo if we join the last two hashes we will be fine. It is a bit dissappointing that the right vote is the least voted hash. So either we make prysm vote for the wrong but valid hash to get majority or we need to fix both bugs, but fixing only Teku's won't work it seems",
+      "createdAt": "2021-05-14T10:51:31.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, we need others voting correctly as well",
+      "createdAt": "2021-05-14T10:52:42.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I would encourage everybody to check their eth1 data votes and request for help if they see any issues and can't deal with it. First two hashes are considered correct",
+      "createdAt": "2021-05-14T10:54:07.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok I think I just understood your comment then: the proposer of `12289` should have voted for `7959`, it had it as a valid vote cause it had appeared before in the period. But it didn't vote for it cause it hadn't included the deposits for the block still, and it didn't happen for another 1:30hs. This sounds very promissing, cause then the bug is not in the voting logic",
+      "createdAt": "2021-05-14T11:02:02.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, looking into it more deep to understand if I am right or wrong. From logs I see Teku fetches Eth1 blocks with respect to a follow distance, i.e. `2048` block behind the head",
+      "createdAt": "2021-05-14T11:04:14.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ha! and here we have skipped slots in game",
+      "createdAt": "2021-05-14T11:05:12.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah, the asynchronicity could come from that",
+      "createdAt": "2021-05-14T11:06:01.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "but the followdistance refers to eth2 blocks",
+      "createdAt": "2021-05-14T11:06:13.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "and it is updating correctly",
+      "createdAt": "2021-05-14T11:06:17.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "it must be only in the transation to eth1 blocks that the error lies",
+      "createdAt": "2021-05-14T11:06:30.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Teku fetches and caches Eth1 blocks by subtracting `2048` from the head. Then eth1 data voting logic starts working which is based on Eth1 timestamps rather than numbers. So, the logic works correctly while the fetcher doesn't account for skipped slots and comes with older blocks than the voting supposed to see",
+      "createdAt": "2021-05-14T11:08:34.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh so the translation is directly wrong using the same number for eth2 blocks than eth1? I thought that it was subtracting 2048 from the head. Then taking the eth1 block with the timestamp from that eth2 block",
+      "createdAt": "2021-05-14T11:11:15.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It checks Eth1 head each `SECONDS_PER_ETH1_BLOCK`, then subtracts `ETH1_FOLLOW_DISTANCE` from it and feeds subtracted number to the fetcher",
+      "createdAt": "2021-05-14T11:12:33.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ah yeah that's bad",
+      "createdAt": "2021-05-14T11:13:51.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Then fetcher does its job and adds new block(s) to the cache. So, no time is in account so far. And then eth1 data votes logic uses timestamps of cached blocks",
+      "createdAt": "2021-05-14T11:14:02.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I see that `fetchDepositsInRange` takes block numbers as arguments",
+      "createdAt": "2021-05-14T11:14:13.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/ConsenSys/teku/blob/master/pow/src/main/java/tech/pegasys/teku/pow/Eth1HeadTracker.java#L81",
+      "createdAt": "2021-05-14T11:15:17.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "So, for Mainnet if time between block would be increased we would likely see the same problem",
+      "createdAt": "2021-05-14T11:16:24.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah I saw that last night and assumed it was correct cause it was giving the right eth2 block",
+      "createdAt": "2021-05-14T11:16:58.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "If real seconds per eth1 block would be greater than the config variable",
+      "createdAt": "2021-05-14T11:17:09.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "OTOH, this logic is written correct lywith respect to the safe distance from head in the PoW chain",
+      "createdAt": "2021-05-14T11:19:03.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I think the spec states it needs to be 2048 eth1 blocks",
+      "createdAt": "2021-05-14T11:19:49.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "not eth2 blocks translated to timestamps",
+      "createdAt": "2021-05-14T11:20:02.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so perhaps this IS the right vote",
+      "createdAt": "2021-05-14T11:20:08.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "what Teku is doing",
+      "createdAt": "2021-05-14T11:20:11.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "ohh no, is timestamp based\n```\nEth1 blocks must only be considered once they are at least SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE seconds old (i.e. eth1_timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE <= current_unix_time). Due to this constraint, if GENESIS_DELAY < SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE, then the genesis_time can happen before the time/state is first known. Values should be configured to avoid this case.\n```",
+      "createdAt": "2021-05-14T11:20:57.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "But it says: `at least`",
+      "createdAt": "2021-05-14T11:21:11.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Yes, it's timestamp based:\n```\ndef is_candidate_block(block: Eth1Block, period_start: uint64) -> bool:\n    return (\n        block.timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE <= period_start\n        and block.timestamp + SECONDS_PER_ETH1_BLOCK * ETH1_FOLLOW_DISTANCE * 2 >= period_start\n    )```",
+      "createdAt": "2021-05-14T11:21:47.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "this is the filter for all blocks in `eth1_chain`",
+      "createdAt": "2021-05-14T11:22:15.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "In any case a quick fix for Teku here is to just request the block at the given timestamp there in the `newHeadAtFollowDistance`",
+      "createdAt": "2021-05-14T11:25:01.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll test it in a few hours, now I'll suck in class cause I didn't prepare and I have only 30 minutes 🙂",
+      "createdAt": "2021-05-14T11:25:51.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I would say there is no easy fix for the general case which would be production ready. I'll try to make a fix just to make it work properly and file an issue",
+      "createdAt": "2021-05-14T12:03:26.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "btw, if we get more than `ETH1_FOLLOW_DINSTANCE` skipped slots then the follow distance will be reduced to `0` if we count it in blocks",
+      "createdAt": "2021-05-14T12:33:28.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Which makes it complicated. If there are forks at the beginning of the voting period and follow distance is zero then eth1 block cache might not be able to do re-orgs and do proper eth1 votes",
+      "createdAt": "2021-05-14T12:47:44.450000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I have a fix, testing",
+      "createdAt": "2021-05-14T13:33:22.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "About Rayonism: I think we'll close the Nocturne devnet around Tue next week. We can do one more office hour on Monday, to discuss any final tests, but besides resolving the eth1-data voting bug, I think we're done. There will be an Eth2 specs release today for Altair that clients can focus on next week, Merge transition work continues in the <#692062809701482577> channel, and I think we'll make a post-rayonism channel (or rename this channel) for sharding and withdrawals work.",
+      "createdAt": "2021-05-14T13:40:02.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm requesting the block at follow distance seconds from head and taking the block number",
+      "createdAt": "2021-05-14T14:16:01.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Are you doing something different?",
+      "createdAt": "2021-05-14T14:16:13.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I am requesting it at regular distance first, then go block by block towards head and adjust the distance by checking block timestamps.",
+      "createdAt": "2021-05-14T15:00:45.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "How do you do this?",
+      "createdAt": "2021-05-14T15:01:04.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "is there a way to query eth1 blocks by timestamp?",
+      "createdAt": "2021-05-14T15:01:22.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ah then it's probably similar, I adapted a function in prysm to find the earliest block by timestamp",
+      "createdAt": "2021-05-14T15:01:35.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "There is a neat implementation in prysm, that is giving me headaches cause I never ever wrote Java, give me a sec, feeding a baby, will send it soon",
+      "createdAt": "2021-05-14T15:02:53.112000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/prysmaticlabs/prysm/blob/merge/beacon-chain/powchain/block_reader.go#L110",
+      "createdAt": "2021-05-14T15:06:40.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "trying to adapt that implementation which is a bit more efficient than simply going up",
+      "createdAt": "2021-05-14T15:07:13.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://github.com/txrx-research/teku/commit/39587240bfe298e2e7397bad60b6467f7c9efd4a",
+      "createdAt": "2021-05-14T15:08:46.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "It adjusts the distance to reuse all the rest code that processed deposits. Not the best implementation but that should work",
+      "createdAt": "2021-05-14T15:10:22.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I will update my teku nodes to check the beginning of the next voting period",
+      "createdAt": "2021-05-14T15:10:51.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "yeah I think it's the same approach, the above linked function will do something similar but going by larger buffers to avoid going block by block",
+      "createdAt": "2021-05-14T15:11:26.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Testing my patch will be tough cause it's rather impossible that I'll be the first Teku node on the period",
+      "createdAt": "2021-05-14T15:28:31.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Will probably test on a local testnet",
+      "createdAt": "2021-05-14T15:28:43.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "You should get <@!203220829473996800> to move his Teku nodes to use your patch cause otherwise the risk is that we lose another period",
+      "createdAt": "2021-05-14T15:29:22.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'll run yours in nocturne to check that it can propose",
+      "createdAt": "2021-05-14T15:29:39.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "so that we don't lose finality, but since we can't screw up eth1 data vote anymore, I'd suggest EF deploys all Teku nodes with the patch. Still won't be enough probably. We need to fix all random votes, or the genesis case of prysm that I don't know why it doesn't happen in my node",
+      "createdAt": "2021-05-14T15:30:45.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "protolambda",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Name a docker image and I'll roll out teku updates",
+      "createdAt": "2021-05-14T15:31:16.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "oh testing on a local testnet is also not trivial cause I need to miss several blocks 🙂 will set it up now",
+      "createdAt": "2021-05-14T15:31:32.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "exactly",
+      "createdAt": "2021-05-14T15:31:48.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "Ok, your patch is producing blocks fine in nocturne",
+      "createdAt": "2021-05-14T15:40:20.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "https://nocturne.rayonism.io/block/15499",
+      "createdAt": "2021-05-14T15:40:39.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I've pushed separate docker image with a fix `mkalinin/teku:rayonism-eth1-vote-fix`. Wanna try it out first.",
+      "createdAt": "2021-05-14T15:41:00.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Channel Graveyard",
+      "parent": "",
+      "content": "I'm testing mine on a local testnet with tons of missed slots",
+      "createdAt": "2021-05-14T15:41:30.316000+00:00",
+      "attachments": []
+    }
+  ]
+}

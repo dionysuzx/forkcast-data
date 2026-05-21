@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2022-03-20",
+  "messageCount": 186,
+  "sourceHash": "b1f45087853844fe2b420b0229a2f796cd1b709b575811c74503a86b362f47f7",
+  "searchText": "anyway i have a couple of questions for this discussion over here so, the CL gives us blocks until the head but how does it actually validates them if it does not have the state does that mean that CL can sync without EL then Yes the cl will sync validating just the consensus part of the block and will not act on any block until the El tells it that it's validated the execution part okay, another question (completely non-related), how much does it usually take to sync an ETH 2 node on mainnet? i heard that teku can snapshot-sync in a less than a minute but is such sync still usable post-merge? Yes, you can bootstrap a node with a state that you assume to be valid in less than a minute oh but it requires state, if you do not have state then that would not work i imagine I think lighthouse supports this as well and prysm already has an open PR for this This is the beacon state It's much smaller than the execution one so you can just download it through p2p and bootstrap the node really fast right? anyway i did some testing about how fast CL supplies EL with blocks as Syncing is returned and it turns out it is 43 blk/sec on my machine, that does not seem really good, on top of the fact that it is not EL-related Yes exactly So in the normal case, CL will start near head. You can then use that to reverse header sync and use whatever full sync you want from there The rate limit in the block insertion from CL shouldn't really be your bound on getting sync done With optimistic sync you can sync the EL however you do now, and just near the head you will get blocks one by one by the cl so everyone is going to use snapshot-sync by default Yes. It's actually the only safe way due to weak subjectivity in pos. That or at least show up with a recent block root and full sync to that If CL starts insertions from Genesis, as EL you have two option nd okay, but if we are getting supplied blocks at a rate of 43 blk/sec, it would not matter much 1. Execute in lockstep 2. Wait until info near head and do your own sync okay, i understand so again we would all need to be in snapshot-sync and if we are not then we would have to sync slowly As long as it's faster than 1 per 12 seconds you should be fine. You only need the current blocks being spoon fed, perhaps I'm not understanding the just l issue you're facing Yes the El will use whatever mean they just use currently to catch up, and after that they'll be fed new blocks as they come that is really slow, my problem with that would be what if you are not running snapshot-sync what if you need the full history to comply legal matters with your government for example about your staking as a node operator for example or because of whatever reason that is just an example How do you sync currently to head? Why wouldn't you be able to sync the same way? for now, we are not running snapshot-sync at least from CL side so we are going by executing block as they come in we are in the process of optimizing it of course but thing is that if we still get info so slowly that does matter Ok so most probably here is that I don't know the differences between fast, full, snapshot or whatever sync the EL uses: my understanding was that you would get information about your current head from the CL, then you will try to sync to that head by whatever means you **currently** use to sync, so this assumes that you can catch up head right now. While you're catching up to that head the CL will be updating it by telling you that new blocks arrived. These will be only 1 each 12 seconds. our mean so far is linear sync, so in order to be competitive all clients will need a snapshot-sync implementation which of course is slow i think geth is slow as well though What I'm asking is what changes in the merge on your way of syncing. Optimistic sync is there so that the EL does not need to change their way of syncing. Whatever works for you now should continue working after the merge we either go step by step or reverse sync after the merge is the snapshot sync for CL enshrined in the p2p protocol or is it implemented out-of-band? Trying to search for it Here you mean the snapshot sync purely on the beacon chain side right? Yes I just know that snapshot sync on near-empty state is easy, but when state grows, it becomes a hard engineering problem. I am just wondering how this is designed for CL the CL state is very small, and it has a cap except perhaps to the number of validators. It's not expected to grow much, so it's not the same problem as in the EL. Validators are required to have and to serve all history blocks, so even if you do a snapshot sync, you need to download all blocks back to genesis, and this takes time anyway. The difference is that you can do this while still validating but am I right in thinking that each CL implementation has its own mechanism for snapshotting the state? (so far I only found article for Teku downloading snapshots from Infura via Https, but I could not find for others yet) Yes indeed, Lighthouse has a flag `--checkpoint-sync-url` to point from where to download the snapthot state. Prysm has something similar Only past 4 months https://github.com/prysmaticlabs/prysm/pull/10386 that's right, I keep forgetting about WS, we still keep them all as far as I know though, haven't pruned yet I found it for lighthouse: https://lighthouse-book.sigmaprime.io/checkpoint-sync.html There's an attempt at defining a common uri scheme for it so you can get it generically from various providers and different protocols (https, portal, etc) Not sure where that is atm But the format is an ssz state Ok, I think I understand it better now, thank you Some notes I wrote about beacon state distribution methods https://notes.ethereum.org/Mp5Iv4N0Qb-d6KZvNuBspg?both Thank you! For the record Teku literally just needs a url to the SSZ state (or a path to the state as a local file). We don’t need to query anything else which makes distribution of the state extremely easy. The current challenge is that only Infura provide public access to a state but it would be grat to start seeing block explorers and other infrastructure providers expose the current finalised state (at minimum) so things become less centralised. hello, i did a little benchmark for the sync up and as it turns both geth and erigon with lighthouse sync at roughly 14 blk/sec it would take almost an hour to fully sync an empty chain perhaps something needs to be optimized CLs don't spend much time optimising sync speed since we have checkpoint sync checkpoint sync is a very small version of it though what if people needs the data in the future for whatever reason: tax compliance or just mere statistics Once we checkpoint sync we go and backfill all the old blocks So we have the entire history Backfill is much faster that syncing forwards this honestly feels very duct-taped okay, we can just copy-paste something instead of optimizing but that does not feel right like we could do like BSC, raise gas, make it work somehow but then? Proof-of-stake has the \"weak subjectivity\" problem, so we need some form of checkpoint sync anyway. Syncing from genesis doesn't guarantee we land on the correct chain Perhaps asking questions is more helpful than throwing stones my point is that Ethereum cannot go in production with something that is inneficient, with so much complexity in running it and it is sub-optimized i am not throwing stones, would you call what BSC is doing not duct-taped, because this is very similar in its own way maybe it was bad-phrased sorry but i hope this gets the point in, i think that needing an infura key all the time is not also really optimal infura or whatever it works okay, but it does not look ready for production at least in my opinion Alrighty, so first point is this: It is unsafe to sync a beacon chain of any reasonable age (e.g., a few weeks) without receiving a recent checkpoint from a trusted peer. Do you agree with this and understand it? (a checkpoint being, at the very least, a block root) okay, yes i understand that why not using it if we already have it Ok good. So syncing from a recent checkpoint to the head of the chain isn't a duct-tape fix. We MUST sync with reference to some recent checkpoint, and syncing forwards from that to the head before doing a backfill is a very appealing optimisation and UX improvement. I understand that doesn't address the question of \"why don't we make sync faster\", but it does address the point that checkpoint sync is just a duct-tape fix. Do you agree? It is duct-taped in the sense, that you cannot port an unoptimized, make it rely on something else and then release it to the second largest cryptocurrency in the world i agree with it yes, it is not duct-taped in that sense Ok good, let's address the \"unoptimised\" claim then. another thing, how is needing to have an infura key an UX improvement? as far as i know you need one in order to checkpoint-sync at least for now The term \"unoptimised\" is a bit unclear. I would imagine it means either: 1. \"No one has bothered to improve it\", or 2. \"It's not fast enough for our purposes\" When it comes to (1), it's clearly not the case when looking at the history of beacon chain development. One primary time-sink is BLS verification; we've gone through several BLS libraries over the years and have settled on a purpose-build library written in hand-crafted assembly by domain experts (this library is BLST). The EF funded this and all teams have implemented. Another time-sink is computing the merkle-root of the beacon state. All the teams have implemented a form of \"tree hash caching\", to ensure that we only update nodes which have changed. This reduced times by an order of magnitude and we're basically at the point where we need faster a SHA2 to get faster. When it comes to (2), I would argue that it is suitable for our purposes. We can go from nothing to the head in a matter of minutes (or less) with checkpoint sync, which we agreed isn't inherently a duck-tape solution. We can then do a backfill which might take several hours for mainnet now. We might differ in opinion, but I think those numbers are viable for production and involve no duct-taping. You don't need infura, you just need either: 1. Another beacon node running and accessible via HTTP. 2. The ability to download the necessary information as files (e.g., torrents). yeah you either need a torrent or another node, most people will use an infura since as far as i can see it is the most used, at least so far. I will be honest 100%, it does not convince, what we get so far is too little period. but i might be wrong, i understand this goes more at the core-level of the CL specs, but time will tell if that is the case or not. People's tendency to use Infura when a more-decentralized but higher-friction alternative is available is not unique to the beacon chain. Furthermore, I don't think it has anything to do with whether or not beacon chain sync is optimal enough for production. we will see if it will make it to prod only time will tell Also worth noting that before Infura started exposing the state via an API the most common way people acquired states for checkpoint sync was by me putting one in a github repo for them. There's been a real chicken-and-egg scenario with checkpoint sync. It was put off being implemented because it was too hard to get an initial state. Teku bit the bullet and implemented it but it was awkward to get the state. Infura started making the state available and then it finally started seeing some real traction. As other clients have supported checkpoint sync it's become more and more the expected way to sync. I'm hopeful that the next step is that other providers see there is in fact demand for access to the finalized state and that it's actually quite easy to provide, so we'll see multiple sources for those states. But if we had waiting for a lot of providers to provide the state before starting to implement and use checkpoint sync we'd",
+  "excerpts": [
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "anyway i have a couple of questions for this discussion over here",
+      "createdAt": "2022-03-20T17:29:50.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "so, the CL gives us blocks until the head but how does it actually validates them if it does not have the state",
+      "createdAt": "2022-03-20T17:30:46.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "does that mean that CL can sync without EL then",
+      "createdAt": "2022-03-20T17:31:15.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes the cl will sync validating just the consensus part of the block and will not act on any block until the El tells it that it's validated the execution part",
+      "createdAt": "2022-03-20T17:33:12.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, another question (completely non-related), how much does it usually take to sync an ETH 2 node on mainnet? i heard that teku can snapshot-sync in a less than a minute but is such sync still usable post-merge?",
+      "createdAt": "2022-03-20T17:35:33.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes, you can bootstrap a node with a state that you assume to be valid in less than a minute",
+      "createdAt": "2022-03-20T17:36:17.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh but it requires state, if you do not have state then that would not work i imagine",
+      "createdAt": "2022-03-20T17:37:08.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think lighthouse supports this as well and prysm already has an open PR for this",
+      "createdAt": "2022-03-20T17:37:10.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is the beacon state",
+      "createdAt": "2022-03-20T17:37:26.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It's much smaller than the execution one",
+      "createdAt": "2022-03-20T17:37:40.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "so you can just download it through p2p and bootstrap the node really fast right?",
+      "createdAt": "2022-03-20T17:39:14.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "anyway i did some testing about how fast CL supplies EL with blocks as Syncing is returned and it turns out it is 43 blk/sec on my machine, that does not seem really good, on top of the fact that it is not EL-related",
+      "createdAt": "2022-03-20T17:50:18.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes exactly",
+      "createdAt": "2022-03-20T17:56:37.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "So in the normal case, CL will start near head. You can then use that to reverse header sync and use whatever full sync you want from there",
+      "createdAt": "2022-03-20T17:57:03.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "The rate limit in the block insertion from CL shouldn't really be your bound on getting sync done",
+      "createdAt": "2022-03-20T17:57:29.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "With optimistic sync you can sync the EL however you do now, and just near the head you will get blocks one by one by the cl",
+      "createdAt": "2022-03-20T17:57:33.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "so everyone is going to use snapshot-sync by default",
+      "createdAt": "2022-03-20T17:57:33.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes. It's actually the only safe way due to weak subjectivity in pos. That or at least show up with a recent block root and full sync to that",
+      "createdAt": "2022-03-20T17:58:03.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "If CL starts insertions from Genesis, as EL you have two option nd",
+      "createdAt": "2022-03-20T17:58:20.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, but if we are getting supplied blocks at a rate of 43 blk/sec, it would not matter much",
+      "createdAt": "2022-03-20T17:58:41.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "1. Execute in lockstep\n2. Wait until info near head and do your own sync",
+      "createdAt": "2022-03-20T17:58:50.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, i understand so again we would all need to be in snapshot-sync and if we are not then we would have to sync slowly",
+      "createdAt": "2022-03-20T18:00:40.255000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "As long as it's faster than 1 per 12 seconds you should be fine. You only need the current blocks being spoon fed, perhaps I'm not understanding the just l issue you're facing",
+      "createdAt": "2022-03-20T18:00:59.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes the El will use whatever mean they just use currently to catch up, and after that they'll be fed new blocks as they come",
+      "createdAt": "2022-03-20T18:02:02.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "that is really slow, my problem with that would be what if you are not running snapshot-sync",
+      "createdAt": "2022-03-20T18:05:03.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "what if you need the full history to comply legal matters with your government for example about your staking as a node operator for example",
+      "createdAt": "2022-03-20T18:06:09.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "or because of whatever reason that is just an example",
+      "createdAt": "2022-03-20T18:06:19.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "How do you sync currently to head? Why wouldn't you be able to sync the same way?",
+      "createdAt": "2022-03-20T18:06:45.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "for now, we are not running snapshot-sync at least from CL side so we are going by executing block as they come in",
+      "createdAt": "2022-03-20T18:07:36.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "we are in the process of optimizing it of course",
+      "createdAt": "2022-03-20T18:07:47.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "but thing is that if we still get info so slowly that does matter",
+      "createdAt": "2022-03-20T18:08:07.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok so most probably here is that I don't know the differences between fast, full, snapshot or whatever sync the EL uses: my understanding was that you would get information about your current head from the CL, then you will try to sync to that head by whatever means you **currently** use to sync, so this assumes that you can catch up head right now. While you're catching up to that head the CL will be updating it by telling you that new blocks arrived. These will be only 1 each 12 seconds.",
+      "createdAt": "2022-03-20T18:11:54.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "our mean so far is linear sync, so in order to be competitive all clients will need a snapshot-sync implementation",
+      "createdAt": "2022-03-20T18:14:20.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "which of course is slow",
+      "createdAt": "2022-03-20T18:14:51.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think geth is slow as well though",
+      "createdAt": "2022-03-20T18:14:57.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "What I'm asking is what changes in the merge on your way of syncing. Optimistic sync is there so that the EL does not need to change their way of syncing. Whatever works for you now should continue working after the merge",
+      "createdAt": "2022-03-20T18:16:11.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "we either go step by step or reverse sync after the merge",
+      "createdAt": "2022-03-20T18:18:32.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "is the snapshot sync for CL enshrined in the p2p protocol or is it implemented out-of-band? Trying to search for it",
+      "createdAt": "2022-03-20T18:19:20.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Here you mean the snapshot sync purely on the beacon chain side right?",
+      "createdAt": "2022-03-20T18:20:11.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2022-03-20T18:22:53.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "I just know that snapshot sync on near-empty state is easy, but when state grows, it becomes a hard engineering problem. I am just wondering how this is designed for CL",
+      "createdAt": "2022-03-20T18:23:30.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "the CL state is very small, and it has a cap except perhaps to the number of validators. It's not expected to grow much, so it's not the same problem as in the EL.",
+      "createdAt": "2022-03-20T18:24:50.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Validators are required to have and to serve all history blocks, so even if you do a snapshot sync, you need to download all blocks back to genesis, and this takes time anyway. The difference is that you can do this while still validating",
+      "createdAt": "2022-03-20T18:25:47.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "but am I right in thinking that each CL implementation has its own mechanism for snapshotting the state? (so far I only found article for Teku downloading snapshots from Infura via Https, but I could not find for others yet)",
+      "createdAt": "2022-03-20T18:35:55.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yes indeed, Lighthouse has a flag `--checkpoint-sync-url` to point from where to download the snapthot state. Prysm has something similar",
+      "createdAt": "2022-03-20T18:37:29.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Only past 4 months",
+      "createdAt": "2022-03-20T18:37:31.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/prysmaticlabs/prysm/pull/10386",
+      "createdAt": "2022-03-20T18:37:50.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "that's right, I keep forgetting about WS, we still keep them all as far as I know though, haven't pruned yet",
+      "createdAt": "2022-03-20T18:38:16.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "I found it for lighthouse: https://lighthouse-book.sigmaprime.io/checkpoint-sync.html",
+      "createdAt": "2022-03-20T18:39:06.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "There's an attempt at defining a common uri scheme for it so you can get it generically from various providers and different protocols (https, portal, etc)\n\nNot sure where that is atm",
+      "createdAt": "2022-03-20T18:40:40.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "But the format is an ssz state",
+      "createdAt": "2022-03-20T18:40:48.222000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok, I think I understand it better now, thank you",
+      "createdAt": "2022-03-20T18:42:35.975000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Some notes I wrote about beacon state distribution methods\n\nhttps://notes.ethereum.org/Mp5Iv4N0Qb-d6KZvNuBspg?both",
+      "createdAt": "2022-03-20T18:44:52.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "Deleted User",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thank you!",
+      "createdAt": "2022-03-20T18:49:18.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "For the record Teku literally just needs a url to the SSZ state (or a path to the state as a local file). We don’t need to query anything else which makes distribution of the state extremely easy. The current challenge is that only Infura provide public access to a state but it would be grat to start seeing block explorers and other infrastructure providers expose the current finalised state (at minimum) so things become less centralised.",
+      "createdAt": "2022-03-20T20:59:52.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "hello, i did a little benchmark for the sync up and as it turns both geth and erigon with lighthouse sync at roughly 14 blk/sec",
+      "createdAt": "2022-03-20T22:28:54.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "it would take almost an hour to fully sync an empty chain",
+      "createdAt": "2022-03-20T22:29:09.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "perhaps something needs to be optimized",
+      "createdAt": "2022-03-20T22:29:19.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "CLs don't spend much time optimising sync speed since we have checkpoint sync",
+      "createdAt": "2022-03-20T22:29:41.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "checkpoint sync is a very small version of it though",
+      "createdAt": "2022-03-20T22:30:21.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "what if people needs the data in the future",
+      "createdAt": "2022-03-20T22:30:29.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "for whatever reason: tax compliance or just mere statistics",
+      "createdAt": "2022-03-20T22:30:43.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Once we checkpoint sync we go and backfill all the old blocks",
+      "createdAt": "2022-03-20T22:30:56.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "So we have the entire history",
+      "createdAt": "2022-03-20T22:31:01.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Backfill is much faster that syncing forwards",
+      "createdAt": "2022-03-20T22:31:13.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "this honestly feels very duct-taped",
+      "createdAt": "2022-03-20T22:32:03.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, we can just copy-paste something instead of optimizing but that does not feel right",
+      "createdAt": "2022-03-20T22:32:28.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "like we could do like BSC, raise gas, make it work somehow but then?",
+      "createdAt": "2022-03-20T22:32:48.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Proof-of-stake has the \"weak subjectivity\" problem, so we need some form of checkpoint sync anyway.",
+      "createdAt": "2022-03-20T22:32:52.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Syncing from genesis doesn't guarantee we land on the correct chain",
+      "createdAt": "2022-03-20T22:33:05.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Perhaps asking questions is more helpful than throwing stones",
+      "createdAt": "2022-03-20T22:34:00.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "my point is that Ethereum cannot go in production with something that is inneficient, with so much complexity in running it and it is sub-optimized",
+      "createdAt": "2022-03-20T22:34:40.007000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "i am not throwing stones, would you call what BSC is doing not duct-taped, because this is very similar in its own way",
+      "createdAt": "2022-03-20T22:35:19.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "maybe it was bad-phrased sorry",
+      "createdAt": "2022-03-20T22:35:38.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "but i hope this gets the point in, i think that needing an infura key all the time is not also really optimal",
+      "createdAt": "2022-03-20T22:36:44.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "infura or whatever",
+      "createdAt": "2022-03-20T22:36:49.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "it works okay, but it does not look ready for production",
+      "createdAt": "2022-03-20T22:37:02.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "at least in my opinion",
+      "createdAt": "2022-03-20T22:37:30.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Alrighty, so first point is this:\n\nIt is unsafe to sync a beacon chain of any reasonable age (e.g., a few weeks) without receiving a recent checkpoint from a trusted peer.\n\nDo you agree with this and understand it?",
+      "createdAt": "2022-03-20T22:38:09.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "(a checkpoint being, at the very least, a block root)",
+      "createdAt": "2022-03-20T22:39:21.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "okay, yes i understand that why not using it if we already have it",
+      "createdAt": "2022-03-20T22:42:38.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok good. So syncing from a recent checkpoint to the head of the chain isn't a duct-tape fix. We MUST sync with reference to some recent checkpoint, and syncing forwards from that to the head before doing a backfill is a very appealing optimisation and UX improvement.",
+      "createdAt": "2022-03-20T22:44:32.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "I understand that doesn't address the question of \"why don't we make sync faster\", but it does address the point that checkpoint sync is just a duct-tape fix. Do you agree?",
+      "createdAt": "2022-03-20T22:46:12.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "It is duct-taped in the sense, that you cannot port an unoptimized, make it rely on something else and then release it to the second largest cryptocurrency in the world",
+      "createdAt": "2022-03-20T22:47:59.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "i agree with it yes, it is not duct-taped in that sense",
+      "createdAt": "2022-03-20T22:48:26.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok good, let's address the \"unoptimised\" claim then.",
+      "createdAt": "2022-03-20T22:48:36.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "another thing, how is needing to have an infura key an UX improvement?",
+      "createdAt": "2022-03-20T22:58:09.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "as far as i know you need one in order to checkpoint-sync at least for now",
+      "createdAt": "2022-03-20T22:58:30.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "The term \"unoptimised\" is a bit unclear. I would imagine it means either:\n\n1. \"No one has bothered to improve it\", or\n2. \"It's not fast enough for our purposes\"\n\nWhen it comes to (1), it's clearly not the case when looking at the history of beacon chain development. One primary time-sink is BLS verification; we've gone through several BLS libraries over the years and have settled on a purpose-build library written in hand-crafted assembly by domain experts (this library is BLST). The EF funded this and all teams have implemented. Another time-sink is computing the merkle-root of the beacon state. All the teams have implemented a form of \"tree hash caching\", to ensure that we only update nodes which have changed. This reduced times by an order of magnitude and we're basically at the point where we need faster a SHA2 to get faster.\n\nWhen it comes to (2), I would argue that it is suitable for our purposes. We can go from nothing to the head in a matter of minutes (or less) with checkpoint sync, which we agreed isn't inherently a duck-tape solution. We can then do a backfill which might take several hours for mainnet now. We might differ in opinion, but I think those numbers are viable for production and involve no duct-taping.",
+      "createdAt": "2022-03-20T23:00:46.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "You don't need infura, you just need either:\n\n1. Another beacon node running and accessible via HTTP.\n2. The ability to download the necessary information as files (e.g., torrents).",
+      "createdAt": "2022-03-20T23:01:39.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah you either need a torrent or another node, most people will use an infura since as far as i can see it is the most used, at least so far.",
+      "createdAt": "2022-03-20T23:02:51.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "I will be honest 100%, it does not convince, what we get so far is too little period. but i might be wrong, i understand this goes more at the core-level of the CL specs, but time will tell if that is the case or not.",
+      "createdAt": "2022-03-20T23:04:57.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "People's tendency to use Infura when a more-decentralized but higher-friction alternative is available is not unique to the beacon chain. Furthermore, I don't think it has anything to do with whether or not beacon chain sync is optimal enough for production.",
+      "createdAt": "2022-03-20T23:05:00.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "funnygiulio",
+      "category": "Testing",
+      "parent": "",
+      "content": "we will see if it will make it to prod only time will tell",
+      "createdAt": "2022-03-20T23:05:10.366000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also worth noting that before Infura started exposing the state via an API the most common way people acquired states for checkpoint sync was by me putting one in a github repo for them. There's been a real chicken-and-egg scenario with checkpoint sync. It was put off being implemented because it was too hard to get an initial state. Teku bit the bullet and implemented it but it was awkward to get the state.  Infura started making the state available and then it finally started seeing some real traction. As other clients have supported checkpoint sync it's become more and more the expected way to sync.\nI'm hopeful that the next step is that other providers see there is in fact demand for access to the finalized state and that it's actually quite easy to provide, so we'll see multiple sources for those states. But if we had waiting for a lot of providers to provide the state before starting to implement and use checkpoint sync we'd have never gotten anywhere.",
+      "createdAt": "2022-03-20T23:08:30.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "Did we ever create a standard beacon API call for fetching these checkpoint states (and, separately, their roots)?",
+      "createdAt": "2022-03-20T23:12:00.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "We've just been pulling the latest finalized state via the existing API methods.",
+      "createdAt": "2022-03-20T23:13:57.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes and no. 🙂 There was an agreed format for specifying the ws checkpoint epoch and root which for a while was supported by beaconscan but got very little use and seems to have been removed again.\nFor checkpoint sync, the standard REST API includes everything required. For Teku you just need the state as SSZ, other clients require the state and block and some have some additional conditions and so use more of the standard REST API.",
+      "createdAt": "2022-03-20T23:14:30.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "Two thoughts on the current API:\n  - fetching state is currently in the `/debug` group, which doesn't make it feel like a critical endpoint\n  - using a state ID of `finalized` can change relatively frequently, and so that makes it harder for external services (_i.e._ not beacon nodes) to provide the info\n\nTwo specific endpoints, one to fetch the current `wss` state and one its root, may help for decentralization.  It would allow a client to start up, pick from a subset of well-known providers that could return roots, and then obtain a root from one of said providers.  And the `wss` state could change a lot less frequently, for example every 256 epochs, which would allow different implementations to remain broadly in sync with each other using external processes (_e.g._ pushing the root and state to a CDN, or some other \"out of beacon node\" system).",
+      "createdAt": "2022-03-20T23:19:30.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Tbh, I don't think this goes in the rest API",
+      "createdAt": "2022-03-20T23:19:53.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "The rest API is a user api",
+      "createdAt": "2022-03-20T23:19:58.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is instead for public endpoints",
+      "createdAt": "2022-03-20T23:20:09.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I agree on the mod 256 and agree it should be specified",
+      "createdAt": "2022-03-20T23:20:38.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "But shoving it into beacon API seems slightly wrong? Or at least should be in its own namespace",
+      "createdAt": "2022-03-20T23:21:05.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think you want two endpoints btw\n\nget_root(epoch)\nget_state(epoch)",
+      "createdAt": "2022-03-20T23:21:33.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "As discussed here\nhttps://notes.ethereum.org/Mp5Iv4N0Qb-d6KZvNuBspg?both",
+      "createdAt": "2022-03-20T23:21:50.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "So you can query N for the root and one for the state",
+      "createdAt": "2022-03-20T23:22:00.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "paulhauner",
+      "category": "Testing",
+      "parent": "",
+      "content": "Syncing up another beacon node when you already have one running would be a reasonable \"user\" action IMO.",
+      "createdAt": "2022-03-20T23:22:43.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hm fair. I worry that leads accidentally opening up user apis to the internet",
+      "createdAt": "2022-03-20T23:23:22.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'd say it's very useful to have in the standard REST API because then you can use any node to checkpoint sync from.  But I also agree it makes sense to have a subset of the API that can be exposed more simply and safely by providers. That's a big part of why we went to the extra effort of only requiring the state - it means no real \"API\" is required, you just need any URL that returns a suitable starting state.",
+      "createdAt": "2022-03-20T23:23:23.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "But I can certainly be convinced",
+      "createdAt": "2022-03-20T23:23:30.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "Why include the `epoch` parameter?  Wouldn't it always be latest wss checkpoint?",
+      "createdAt": "2022-03-20T23:24:03.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "What's the inefficiency in syncing in 1 minute?",
+      "createdAt": "2022-03-20T23:24:19.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "Race conditions?\n\nEpoch or \"period\"",
+      "createdAt": "2022-03-20T23:24:47.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'd also say that users would prefer getting the latest finalized state rather than a significantly older wss checkpoint if providers are happy to provide it.",
+      "createdAt": "2022-03-20T23:25:01.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "Perhaps it isn't a part of the beacon API, but beacon nodes would support it in addition to the existing API and then you could have lightweight processes that just served the root/state.",
+      "createdAt": "2022-03-20T23:25:02.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "And if leave none, then current",
+      "createdAt": "2022-03-20T23:25:03.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "djrtwo",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think you make the job of ws provider and content delivery network and torrents and portal and and easier/better if you serve mod 256",
+      "createdAt": "2022-03-20T23:25:42.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jgm",
+      "category": "Testing",
+      "parent": "",
+      "content": "That's a tricky one.  If you're fetching data from one or two other active beacon nodes then that would work, but what if you wanted to fetch from multiple sources or from third-party systems?  The time delay in setting them up could mean that some are never usefully in sync.",
+      "createdAt": "2022-03-20T23:26:09.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ajsutton",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think it's worth having the option to serve something old.  I suspect users will significantly prefer something more recent.",
+      "createdAt": "2022-03-20T23:26:25.788000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2022-12-23",
+  "messageCount": 181,
+  "sourceHash": "02f65aac18617b7fb893f495cb525d45561a6c281ed1f3e5e1f91a0b5a8d69d9",
+  "searchText": "<@412614104222531604> <@199561711278227457> Besu withdrawals-devnet-1 fix is tested locally and published: `docker pull siladu/besu:22.10.3-SNAPSHOT-openjdk-11-debug-withdrawals-evm-0455b22` (built from https://github.com/hyperledger/besu/pull/4818) Could you please update on the devnet? https://github.com/ethpandaops/withdrawals-testnet/pull/10 just stop and replace or wipe and replace? stop and replace didn't work I think replace and restart will be enough but we’ll find out soon enough so wiped and replaced. was getting ```2022-12-23 09:09:47.098+00:00 | vert.x-worker-thread-0 | INFO | MainnetBlockValidator | Optional[Unable to copy Layered Worldstate for 0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db]. Block 1587 (0x8589f0e34573d726eaff9fd78f32105c9efc0b7077107249daabffcd18e109f3), caused by org.hyperledger.besu.plugin.services.exception.StorageException: Unable to copy Layered Worldstate for 0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db``` Shouldn’t take too long to sync back up Eek yeh that’s the bonsai regression I was worried about before. That’s a wipe job <@755590043632140352> When I tried to use your image I get ```fatal: [withdrawal-devnet-1-prysm-besu-1]: FAILED! => {\"changed\": false, \"msg\": \"Error pulling image gcr.io/prylabs-dev/beacon-chain:96981a07b9 - 500 Server Error for http+docker://localhost/v1.41/images/create?tag=96981a07b9&fromImage=gcr.io%2Fprylabs-dev%2Fbeacon-chain: Internal Server Error (\\\"unauthorized: You don't have the needed permissions to perform this operation, and you may have invalid credentials. To authenticate your request, follow the steps in: https://cloud.google.com/container-registry/docs/advanced-authentication\\\")\"}``` So maybe you have to make the image public. chain seems to be syncing now Awesome will check out the logs in a few mins <@476250636548308992> maybe potuz isn't awake yet, could you pls change the permissions on that image? i will need to check, give me sec Hmm I've got no clue about these things. Pinging the mastermind <@399309815517544451> but he'll be awake in like 5 hours Did you just do one box or all? all. Looks like LH/besu still broken. ```2022-12-23 09:17:32.088+00:00 | nioEventLoopGroup-3-4 | INFO | MainnetBlockValidator | Optional[World State Root does not match expected value, header 0xedefafa2fb63e376a575fd9d08b79c19b8c49a63690f6192111bdeb75095e491 calculated 0xdc6b97779aca4e97545a0a84f9778026676aa8290a0b8cfbf9a32e54f6c644d0]. Block 1907 (0xffd994223ac32b0e9484b2d48e9f379b44d0a502eaa38a14ef477378ba4d360e), caused by java.lang.RuntimeException: World State Root does not match expected value, header 0xedefafa2fb63e376a575fd9d08b79c19b8c49a63690f6192111bdeb75095e491 calculated 0xdc6b97779aca4e97545a0a84f9778026676aa8290a0b8cfbf9a32e54f6c644d0``` LH also seem to have an issue with nethermind tho. So it might be a LH related thing. yeah def. besu/lighthouse have some bad blocks. yeh looks like different issue, world state root mismatch rather than receipts this time I think that happened with LH before we hit the push0 issue before too Can't see any running containers on withdrawal-devnet-1-prysm-besu-1 LH/Nethermind <@758579010027782144> <@554799849288105986> : ```2022-12-23 09:21:08.6997|Downloaded 1121 / 1817 | current 0.00bps | total 0.02bps 2022-12-23 09:21:09.0852|Executing JSON RPC call eth_getBlockByNumber with params [latest, False] 2022-12-23 09:21:09.0866|Executing JSON RPC call eth_getLogs with params [{ \"address\": [ \"0x2015057225888012544938332075675653128770\" ], \"fromBlock\": \"0x462\", \"toBlock\": \"0x461\", \"topics\": null }] 2022-12-23 09:21:09.0866|Error when handling ID 18124, eth_getLogs({ \"address\": [ \"0x2015057225888012544938332075675653128770\" ], \"fromBlock\": \"0x462\", \"toBlock\": \"0x461\", \"topics\": null }) | {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"'From' block '1122' is later than 'to' block '1121'.\"},\"id\":18124}``` lodestar-besu and teku-besu in sync I couldn't start up prysm, bc I got permission issue with the new container image I can revert back to the old image so just it would be in sync ok You can use the old one <@412614104222531604> yeah we are post capella anyways That works fine still, the only difference with the new one is the option to send changes earlier Ok. Starting prysm/besu one back up now. By the way, for a future devnet and possibly hive (and our e2e <@476250636548308992> ) it would be good to send the same list of changes (for example all validators) to different peers and check that they get included To test that we are removing from the pool the already included objects tx explorer and https://beaconchain.withdrawalsdevnet1.ethpandaops.io/ look borked yeah because it pulls all stuff from LH/nethermind 😂 you mean check that peers are removing the correct exec changes from the pool ? how do we do that <@755590043632140352> i am not aware of any api method that lets us inspect the exec changes pool of a node api call for bls pool, save result into a file, then make diff 😂 Yeah we have an endpoint ah ok yeah that can be done But simply checking that all validators are changed is good enough too for e2e could try to wipe and restart the nethermind/lh one. as LH was able to sync with geth but unable with besu, I have a feeling something might be broken on the LH side. Three things I've noticed with LH compared to others: 1. Seems to call engine_*V2 pre-capella 2. Forces besu to backward sync and get blocks from other peers instead of feeding besu the blocks from genesis 3. World state error mismatch its my hope that i can call v2 pre-capella... i just haven't removed my hacks... so geth might be fixed now to allow that i guess... agree...besu intends to (and I think should) support that but it's possibly untested in a devnet until now. Not sure how Nethermind handles of course, if LH aren't feeding us blocks from genesis then maybe it's actually not calling V2 pre-capella ...and the problem with 2. is that we seem to struggle to get peers to sync prysm-besu catching up slowly, with some regular reorgs of 30+ blocks along the way, but it got past the push0 block... ``` 2022-12-23 09:38:47.130+00:00 | vert.x-worker-thread-0 | INFO | EngineNewPayloadV2 | Imported #1,586 / 136 tx / base fee 8 wei / 7,612,590 (67.5%) gas / (0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db) in 1.136s. Peers: 3 ``` <@412614104222531604> should nimbus-besu be working? It looks like nimbus has never called besu but its own logs are quite busy nimbus does not work (yet) also 2. could mean the problem is with our sync (or other EL peers' responses) rather than with LH itself prysm besu seems incredibly slow to sync With 3/4 peers it should sync faster I thought. Might be a hw anomaly prysm log ``` time=\"2022-12-23 09:46:09\" level=debug msg=\"Could not handle p2p RPC\" error=\"rate limited\" peer=16Uiu2HAmUJ8MQrkdWWkn8ughW1DnxpGimuJFNJf3ejAKGJCfwedY prefix=sync topic=\"/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy\" ``` not sure what the rate limiting is about I have previously saw rate limit issues with lodestar nodes being the bootnode. Never saw it with teku limiting. <@912415191067676693> will check it on our side 🙂 I guess it might be Nethermind syncing bug. I passed all the context needed to <@912415191067676693> prysm have over 20 peers so it def not number of peer issue. could you switch to nethermind <> teku for example? Not really. LH have some specific endpoints that beaconchain is using LH <> Geth? and erigon would be ideal for EL side, but we don't have that working yet. We tried Geth, and it wasn't working well either. points 1 and 2 here are correct LH calls V2 before Capella _and_ avoids sending newPayload messages for finalized blocks (so we can sync faster) would you be able to check on the LH nodes besu/nethermind both seem to struggle. Hard for me to say if its EL problem or CL problem. I’m on leave now sorry, Besu/Nethermind devs might be able to get to the bottom of it or we can reconvene in the new year happy holidays <@360491619402776577> are you around today? yes tx fuzzer seems to be killing our bootnode ain't no rest for the wicked Haha oh I just stopped it manually now Too many calls? Maybe we can take it private? Sure <@412614104222531604> okay, I fixed lh <> nethermind I can have a quick look but will run out of time tonight soon and then unavailable tomorrow. Are we able to do anything to improve sync between the ELs? Is prysm being slow to sync with geth or Nethermind? what was the issue? we haven't needed it resync prysm with geth/nethermind I could nuke them and see if they can catch up. syncing problem with Nethermind 😉 Yeah that would be helpful thanks. If we are having trouble only with Besu this will help Besu as well can you keep an eye on them? Or should I ? now I see lots of request to Nethermind, so I guess explorer is indexing data thats possible indeed. did you edit something with nethermind, or how did you fix the sync issue? <@755590043632140352> I just restarted geth/nethermind + prysm. They are all now syncing and slowing down for rate limiting. but actually they seem to go a lot quicker still than with besu. I changed one thing in the code and created a new image. I'm running hive tests now on new image Ping me if you have the new image, so I can use that for the other nodes <@755590043632140352> geth/prysm:```time=\"2022-12-23 10:42:51\" level=debug msg=\"Requesting blocks\" capacity=16 count=64 peer=16Uiu2HAkuc5vGzGAb2wTDrTwpVGxpomVu1yc7zJJ45CQZpeeCtkU prefix=initial-sync score=\"[10.0%, raw: 0.10, blocks: 64/640]\" start=3329 step=1 time=\"2022-12-23 10:42:51\" level=debug msg=\"Slowing down for rate limit\" peer=16Uiu2HAkuc5vGzGAb2wTDrTwpVGxpomVu1yc7zJJ45CQZpeeCtkU prefix=initial-sync time=\"2022-12-23 10:43:05\" level=info msg=\"Peer summary\" activePeers=30 inbound=5 outbound=25 prefix=p2p time=\"2022-12-23 10:43:05\" level=debug msg=\"Unable to cache headers for execution client votes\" error=\"cacheHeadersForEth1DataVote: determineEarliestVotingBlock=1817: (1671780300 > 1671740652): provided time is later than the current eth1 head\" prefix=powchain time=\"2022-12-23 10:43:09\" level=info msg=\"Processing block batch of size 53 starting from 0x8646bff2... 2881/7110 - estimated time remaining 26m35s\" blocksPerSecond=2.6 peers=30 prefix=initial-sync``` nethermind/prysm: ```time=\"2022-12-23 10:43:36\" level=debug msg=\"Slowing down for rate limit\" peer=16Uiu2HAmTTtJhVYBFPsRKDpcosEAicuTYpccRXNWZuPfFLSK4LZF prefix=initial-sync time=\"2022-12-23 10:43:37\" level=debug msg=\"Latest eth1 chain event\" blockHash=0x5ff2da4719150a5d0d3e4b6987cde6f51f273fa523e80505d9ee743abd85afe5 blockNumber=3007 prefix=powchain time=\"2022-12-23 10:43:37\" level=warning msg=\"Execution client is not syncing\" prefix=powchain time=\"2022-12-23 10:43:38\" level=info msg=\"Peer summary\" activePeers=28 inbound=2 outbound=26 prefix=p2p time=\"2022-12-23 10:43:49\" level=debug msg=\"Latest eth1 chain event\" blockHash=0x5ff2da4719150a5d0d3e4b6987cde6f51f273fa523e80505d9ee743abd85afe5 blockNumber=3007 prefix=powchain time=\"2022-12-23 10:43:49\" level=warning msg=\"Execution client is not syncing\" prefix=powchain time=\"2022-12-23 10:43:54\" level=info msg=\"Processing block batch of size 54 starting from 0x1f1b4b7c... 4161/7114 - estimated time remaining 18m13s\" blocksPerSecond=2.7 peers=28 prefix=initial-sync time=\"2022-12-23 10:43:55\" level=info msg=\"Saved state in DB\" diff=31 endSlot=2047 prefix=state-gen root=b0bc45b557f0 slot=409``` rate limit might be present on the prysm side of things? both geth and nethermind with prysm have caught up to the block of besu. So besu is significantly slower than the other two ELs. are geth and nethermind reporting reorgs with prysm? There seems to be a reorg every 50 blocks or so on besu... ``` 2022-12-23 10:49:18.978+00:00 | vert.x-worker-thread-0 | WARN | DefaultBlockchain | Chain Reorganization +52 new / -0 old Old - hash: 0xe33d163fcb5d3cd5249422e91f2023d9c723c860d556bab673fe31f5eaa78ee9, height: 35",
+  "excerpts": [
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> <@199561711278227457> Besu withdrawals-devnet-1 fix is tested locally and published: \n`docker pull siladu/besu:22.10.3-SNAPSHOT-openjdk-11-debug-withdrawals-evm-0455b22`\n(built from https://github.com/hyperledger/besu/pull/4818)\n\nCould you please update on the devnet?",
+      "createdAt": "2022-12-23T01:51:28.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ethpandaops/withdrawals-testnet/pull/10",
+      "createdAt": "2022-12-23T04:26:20.093000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "just stop and replace or wipe and replace?",
+      "createdAt": "2022-12-23T09:07:16.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "stop and replace didn't work",
+      "createdAt": "2022-12-23T09:10:49.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think replace and restart will be enough but we’ll find out soon enough",
+      "createdAt": "2022-12-23T09:10:53.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "so wiped and replaced.",
+      "createdAt": "2022-12-23T09:10:53.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "was getting ```2022-12-23 09:09:47.098+00:00 | vert.x-worker-thread-0 | INFO  | MainnetBlockValidator | Optional[Unable to copy Layered Worldstate for 0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db]. Block 1587 (0x8589f0e34573d726eaff9fd78f32105c9efc0b7077107249daabffcd18e109f3), caused by org.hyperledger.besu.plugin.services.exception.StorageException: Unable to copy Layered Worldstate for 0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db```",
+      "createdAt": "2022-12-23T09:11:11.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Shouldn’t take too long to sync back up",
+      "createdAt": "2022-12-23T09:11:14.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Eek yeh that’s the bonsai regression I was worried about before. That’s a wipe job",
+      "createdAt": "2022-12-23T09:11:45.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@755590043632140352> When I tried to use your image I get ```fatal: [withdrawal-devnet-1-prysm-besu-1]: FAILED! => {\"changed\": false, \"msg\": \"Error pulling image gcr.io/prylabs-dev/beacon-chain:96981a07b9 - 500 Server Error for http+docker://localhost/v1.41/images/create?tag=96981a07b9&fromImage=gcr.io%2Fprylabs-dev%2Fbeacon-chain: Internal Server Error (\\\"unauthorized: You don't have the needed permissions to perform this operation, and you may have invalid credentials. To authenticate your request, follow the steps in: https://cloud.google.com/container-registry/docs/advanced-authentication\\\")\"}```",
+      "createdAt": "2022-12-23T09:11:47.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "So maybe you have to make the image public.",
+      "createdAt": "2022-12-23T09:12:00.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "chain seems to be syncing now",
+      "createdAt": "2022-12-23T09:12:27.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Awesome will check out the logs in a few mins",
+      "createdAt": "2022-12-23T09:12:56.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@476250636548308992> maybe potuz isn't awake yet, could you pls change the permissions on that image?",
+      "createdAt": "2022-12-23T09:13:40.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "i will need to check, give me  sec",
+      "createdAt": "2022-12-23T09:14:36.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm I've got no clue about these things. Pinging the mastermind <@399309815517544451> but he'll be awake in like 5 hours",
+      "createdAt": "2022-12-23T09:15:44.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Did you just do one box or all?",
+      "createdAt": "2022-12-23T09:17:51.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "all.",
+      "createdAt": "2022-12-23T09:17:58.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Looks like LH/besu still broken.",
+      "createdAt": "2022-12-23T09:18:06.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```2022-12-23 09:17:32.088+00:00 | nioEventLoopGroup-3-4 | INFO  | MainnetBlockValidator | Optional[World State Root does not match expected value, header 0xedefafa2fb63e376a575fd9d08b79c19b8c49a63690f6192111bdeb75095e491 calculated 0xdc6b97779aca4e97545a0a84f9778026676aa8290a0b8cfbf9a32e54f6c644d0]. Block 1907 (0xffd994223ac32b0e9484b2d48e9f379b44d0a502eaa38a14ef477378ba4d360e), caused by java.lang.RuntimeException: World State Root does not match expected value, header 0xedefafa2fb63e376a575fd9d08b79c19b8c49a63690f6192111bdeb75095e491 calculated 0xdc6b97779aca4e97545a0a84f9778026676aa8290a0b8cfbf9a32e54f6c644d0```",
+      "createdAt": "2022-12-23T09:18:14.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "LH also seem to have an issue with nethermind tho.",
+      "createdAt": "2022-12-23T09:18:38.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "So it might be a LH related thing.",
+      "createdAt": "2022-12-23T09:18:45.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah def. besu/lighthouse have some bad blocks.",
+      "createdAt": "2022-12-23T09:19:25.580000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2022-12-23_at_10.19.13.png",
+          "content": "9f5e02cdf732e86115b820244f1b4b7b36ea11725d9dc31156c8902c54849f0c"
+        }
+      ]
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeh looks like different issue, world state root mismatch rather than receipts this time",
+      "createdAt": "2022-12-23T09:20:35.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think that happened with LH before we hit the push0 issue before too",
+      "createdAt": "2022-12-23T09:20:51.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can't see any running containers on withdrawal-devnet-1-prysm-besu-1",
+      "createdAt": "2022-12-23T09:21:16.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "LH/Nethermind <@758579010027782144> <@554799849288105986> : ```2022-12-23 09:21:08.6997|Downloaded 1121 / 1817 | current     0.00bps | total     0.02bps\n2022-12-23 09:21:09.0852|Executing JSON RPC call eth_getBlockByNumber with params [latest, False]\n2022-12-23 09:21:09.0866|Executing JSON RPC call eth_getLogs with params [{\n  \"address\": [\n    \"0x2015057225888012544938332075675653128770\"\n  ],\n  \"fromBlock\": \"0x462\",\n  \"toBlock\": \"0x461\",\n  \"topics\": null\n}]\n2022-12-23 09:21:09.0866|Error when handling ID 18124, eth_getLogs({\n  \"address\": [\n    \"0x2015057225888012544938332075675653128770\"\n  ],\n  \"fromBlock\": \"0x462\",\n  \"toBlock\": \"0x461\",\n  \"topics\": null\n}) | {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"'From' block '1122' is later than 'to' block '1121'.\"},\"id\":18124}```",
+      "createdAt": "2022-12-23T09:21:22.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar-besu and teku-besu in sync",
+      "createdAt": "2022-12-23T09:21:39.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I couldn't start up prysm, bc I got permission issue with the new container image",
+      "createdAt": "2022-12-23T09:21:39.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can revert back to the old image so just it would be in sync",
+      "createdAt": "2022-12-23T09:21:57.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2022-12-23T09:21:57.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "You can use the old one <@412614104222531604>",
+      "createdAt": "2022-12-23T09:22:06.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah we are post capella anyways",
+      "createdAt": "2022-12-23T09:22:29.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "That works fine still, the only difference with the new one is the option to send changes earlier",
+      "createdAt": "2022-12-23T09:22:30.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok.",
+      "createdAt": "2022-12-23T09:22:43.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Starting prysm/besu one back up now.",
+      "createdAt": "2022-12-23T09:22:56.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "By the way, for a future devnet and possibly hive (and our e2e <@476250636548308992> ) it would be good to send the same list of changes (for example all validators) to different peers and check that they get included",
+      "createdAt": "2022-12-23T09:23:50.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "To test that we are removing from the pool the already included objects",
+      "createdAt": "2022-12-23T09:24:29.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "tx explorer and https://beaconchain.withdrawalsdevnet1.ethpandaops.io/ look borked",
+      "createdAt": "2022-12-23T09:25:12.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah because it pulls all stuff from LH/nethermind 😂",
+      "createdAt": "2022-12-23T09:25:32.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "you mean check that peers are removing the correct exec changes from the pool ?",
+      "createdAt": "2022-12-23T09:25:32.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "how do we do that <@755590043632140352>",
+      "createdAt": "2022-12-23T09:25:39.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "i am not aware of any api method that lets us inspect the exec changes pool of a node",
+      "createdAt": "2022-12-23T09:26:16.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "api call for bls pool, save result into a file, then make diff 😂",
+      "createdAt": "2022-12-23T09:26:40.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah we have an endpoint",
+      "createdAt": "2022-12-23T09:26:47.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah ok",
+      "createdAt": "2022-12-23T09:26:48.245000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nishant0",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah that can be done",
+      "createdAt": "2022-12-23T09:27:02.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "But simply checking that all validators are changed is good enough too for e2e",
+      "createdAt": "2022-12-23T09:27:07.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "could try to wipe and restart the nethermind/lh one.",
+      "createdAt": "2022-12-23T09:29:45.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "as LH was able to sync with geth but unable with besu, I have a feeling something might be broken on the LH side.",
+      "createdAt": "2022-12-23T09:30:07.007000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "Three things I've noticed with LH compared to others:\n1. Seems to call engine_*V2 pre-capella\n2. Forces besu to backward sync and get blocks from other peers instead of feeding besu the blocks from genesis\n3. World state error mismatch",
+      "createdAt": "2022-12-23T09:34:49.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "its my hope that i can call v2 pre-capella... i just haven't removed my hacks...",
+      "createdAt": "2022-12-23T09:35:20.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "so geth might be fixed now to allow that i guess...",
+      "createdAt": "2022-12-23T09:36:18.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "agree...besu intends to (and I think should) support that but it's possibly untested in a devnet until now. Not sure how Nethermind handles",
+      "createdAt": "2022-12-23T09:36:25.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "of course, if LH aren't feeding us blocks from genesis then maybe it's actually not calling V2 pre-capella",
+      "createdAt": "2022-12-23T09:37:35.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "...and the problem with 2. is that we seem to struggle to get peers to sync",
+      "createdAt": "2022-12-23T09:38:24.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm-besu catching up slowly, with some regular reorgs of 30+ blocks along the way, but it got past the push0 block...\n```\n2022-12-23 09:38:47.130+00:00 | vert.x-worker-thread-0 | INFO  | EngineNewPayloadV2 | Imported #1,586 / 136 tx / base fee 8 wei / 7,612,590 (67.5%) gas / (0x8ba7fb6168c2052dee05beb79fce3c7fe46bd253ae435059bf44fd54183723db) in 1.136s. Peers: 3\n```",
+      "createdAt": "2022-12-23T09:39:40.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> should nimbus-besu be working? It looks like nimbus has never called besu but its own logs are quite busy",
+      "createdAt": "2022-12-23T09:41:20.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "nimbus does not work (yet)",
+      "createdAt": "2022-12-23T09:41:36.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "also 2. could mean the problem is with our sync (or other EL peers' responses) rather than with LH itself",
+      "createdAt": "2022-12-23T09:46:16.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm besu seems incredibly slow to sync",
+      "createdAt": "2022-12-23T09:46:56.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "With 3/4 peers it should sync faster I thought.",
+      "createdAt": "2022-12-23T09:47:19.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Might be a hw anomaly",
+      "createdAt": "2022-12-23T09:47:49.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm log\n```\ntime=\"2022-12-23 09:46:09\" level=debug msg=\"Could not handle p2p RPC\" error=\"rate limited\" peer=16Uiu2HAmUJ8MQrkdWWkn8ughW1DnxpGimuJFNJf3ejAKGJCfwedY prefix=sync topic=\"/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy\"\n```",
+      "createdAt": "2022-12-23T09:47:59.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "not sure what the rate limiting is about",
+      "createdAt": "2022-12-23T09:48:41.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I have previously saw rate limit issues with lodestar nodes being the bootnode. Never saw it with teku limiting.",
+      "createdAt": "2022-12-23T09:49:06.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@912415191067676693> will check it on our side 🙂 I guess it might be Nethermind syncing bug. I passed all the context needed to <@912415191067676693>",
+      "createdAt": "2022-12-23T09:49:19.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm have over 20 peers so it def not number of peer issue.",
+      "createdAt": "2022-12-23T09:49:53.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you switch to nethermind <> teku for example?",
+      "createdAt": "2022-12-23T09:52:30.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Not really.",
+      "createdAt": "2022-12-23T09:52:51.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "LH have some specific endpoints that beaconchain is using",
+      "createdAt": "2022-12-23T09:53:02.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "LH <> Geth?",
+      "createdAt": "2022-12-23T09:53:14.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and erigon would be ideal for EL side, but we don't have that working yet.",
+      "createdAt": "2022-12-23T09:53:19.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "We tried Geth, and it wasn't working well either.",
+      "createdAt": "2022-12-23T09:53:34.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "points 1 and 2 here are correct\n\nLH calls V2 before Capella _and_ avoids sending newPayload messages for finalized blocks (so we can sync faster)",
+      "createdAt": "2022-12-23T09:53:48.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "would you be able to check on the LH nodes besu/nethermind both seem to struggle. Hard for me to say if its EL problem or CL problem.",
+      "createdAt": "2022-12-23T09:55:31.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "I’m on leave now sorry, Besu/Nethermind devs might be able to get to the bottom of it",
+      "createdAt": "2022-12-23T10:16:21.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Testing",
+      "parent": "",
+      "content": "or we can reconvene in the new year",
+      "createdAt": "2022-12-23T10:16:30.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "happy holidays",
+      "createdAt": "2022-12-23T10:16:41.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@360491619402776577> are you around today?",
+      "createdAt": "2022-12-23T10:28:21.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2022-12-23T10:30:51.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "tx fuzzer seems to be killing our bootnode",
+      "createdAt": "2022-12-23T10:31:05.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "ain't no rest for the wicked",
+      "createdAt": "2022-12-23T10:31:07.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Haha oh",
+      "createdAt": "2022-12-23T10:31:14.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I just stopped it manually now",
+      "createdAt": "2022-12-23T10:31:17.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Too many calls?",
+      "createdAt": "2022-12-23T10:31:23.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Maybe we can take it private?",
+      "createdAt": "2022-12-23T10:31:28.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "",
+      "content": "Sure",
+      "createdAt": "2022-12-23T10:31:34.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> okay, I fixed lh <> nethermind",
+      "createdAt": "2022-12-23T10:33:01.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can have a quick look but will run out of time tonight soon and then unavailable tomorrow.\n\nAre we able to do anything to improve sync between the ELs?",
+      "createdAt": "2022-12-23T10:33:02.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is prysm being slow to sync with geth or Nethermind?",
+      "createdAt": "2022-12-23T10:34:01.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "what was the issue?",
+      "createdAt": "2022-12-23T10:34:22.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we haven't needed it resync prysm with geth/nethermind",
+      "createdAt": "2022-12-23T10:34:56.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I could nuke them and see if they can catch up.",
+      "createdAt": "2022-12-23T10:35:06.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "syncing problem with Nethermind 😉",
+      "createdAt": "2022-12-23T10:35:44.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yeah that would be helpful thanks. If we are having trouble only with Besu this will help Besu as well",
+      "createdAt": "2022-12-23T10:36:08.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you keep an eye on them?",
+      "createdAt": "2022-12-23T10:36:28.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Or should I ?",
+      "createdAt": "2022-12-23T10:36:32.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "now I see lots of request to Nethermind, so I guess explorer is indexing data",
+      "createdAt": "2022-12-23T10:36:53.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "thats possible indeed.",
+      "createdAt": "2022-12-23T10:37:04.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "did you edit something with nethermind, or how did you fix the sync issue?",
+      "createdAt": "2022-12-23T10:38:04.112000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@755590043632140352> I just restarted geth/nethermind + prysm. They are all now syncing and slowing down for rate limiting.",
+      "createdAt": "2022-12-23T10:41:28.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "but actually they seem to go a lot quicker still than with besu.",
+      "createdAt": "2022-12-23T10:42:03.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "I changed one thing in the code and created a new image. I'm running hive tests now on new image",
+      "createdAt": "2022-12-23T10:42:30.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ping me if you have the new image, so I can use that for the other nodes",
+      "createdAt": "2022-12-23T10:42:56.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@755590043632140352> geth/prysm:```time=\"2022-12-23 10:42:51\" level=debug msg=\"Requesting blocks\" capacity=16 count=64 peer=16Uiu2HAkuc5vGzGAb2wTDrTwpVGxpomVu1yc7zJJ45CQZpeeCtkU prefix=initial-sync score=\"[10.0%, raw: 0.10,  blocks: 64/640]\" start=3329 step=1\ntime=\"2022-12-23 10:42:51\" level=debug msg=\"Slowing down for rate limit\" peer=16Uiu2HAkuc5vGzGAb2wTDrTwpVGxpomVu1yc7zJJ45CQZpeeCtkU prefix=initial-sync\ntime=\"2022-12-23 10:43:05\" level=info msg=\"Peer summary\" activePeers=30 inbound=5 outbound=25 prefix=p2p\ntime=\"2022-12-23 10:43:05\" level=debug msg=\"Unable to cache headers for execution client votes\" error=\"cacheHeadersForEth1DataVote: determineEarliestVotingBlock=1817: (1671780300 > 1671740652): provided time is later than the current eth1 head\" prefix=powchain\ntime=\"2022-12-23 10:43:09\" level=info msg=\"Processing block batch of size 53 starting from  0x8646bff2... 2881/7110 - estimated time remaining 26m35s\" blocksPerSecond=2.6 peers=30 prefix=initial-sync```",
+      "createdAt": "2022-12-23T10:43:35.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "nethermind/prysm: ```time=\"2022-12-23 10:43:36\" level=debug msg=\"Slowing down for rate limit\" peer=16Uiu2HAmTTtJhVYBFPsRKDpcosEAicuTYpccRXNWZuPfFLSK4LZF prefix=initial-sync\ntime=\"2022-12-23 10:43:37\" level=debug msg=\"Latest eth1 chain event\" blockHash=0x5ff2da4719150a5d0d3e4b6987cde6f51f273fa523e80505d9ee743abd85afe5 blockNumber=3007 prefix=powchain\ntime=\"2022-12-23 10:43:37\" level=warning msg=\"Execution client is not syncing\" prefix=powchain\ntime=\"2022-12-23 10:43:38\" level=info msg=\"Peer summary\" activePeers=28 inbound=2 outbound=26 prefix=p2p\ntime=\"2022-12-23 10:43:49\" level=debug msg=\"Latest eth1 chain event\" blockHash=0x5ff2da4719150a5d0d3e4b6987cde6f51f273fa523e80505d9ee743abd85afe5 blockNumber=3007 prefix=powchain\ntime=\"2022-12-23 10:43:49\" level=warning msg=\"Execution client is not syncing\" prefix=powchain\ntime=\"2022-12-23 10:43:54\" level=info msg=\"Processing block batch of size 54 starting from  0x1f1b4b7c... 4161/7114 - estimated time remaining 18m13s\" blocksPerSecond=2.7 peers=28 prefix=initial-sync\ntime=\"2022-12-23 10:43:55\" level=info msg=\"Saved state in DB\" diff=31 endSlot=2047 prefix=state-gen root=b0bc45b557f0 slot=409```",
+      "createdAt": "2022-12-23T10:44:01.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "rate limit might be present on the prysm side of things?",
+      "createdAt": "2022-12-23T10:44:13.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "both geth and nethermind with prysm have caught up to the block of besu. So besu is significantly slower than the other two ELs.",
+      "createdAt": "2022-12-23T10:45:27.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "are geth and nethermind reporting reorgs with prysm? There seems to be a reorg every 50 blocks or so on besu...\n```\n2022-12-23 10:49:18.978+00:00 | vert.x-worker-thread-0 | WARN  | DefaultBlockchain | Chain Reorganization +52 new / -0 old\n       Old - hash: 0xe33d163fcb5d3cd5249422e91f2023d9c723c860d556bab673fe31f5eaa78ee9, height: 3504\n       New - hash: 0xf7cde82ea1aa6425ff9313492c6650eebf6e60a36282e06d9825ee04b21da397, height: 3556\n  Ancestor - hash: 0xe33d163fcb5d3cd5249422e91f2023d9c723c860d556bab673fe31f5eaa78ee9, height: 3504\n```",
+      "createdAt": "2022-12-23T10:49:42.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "just got lighthouse-besu in sync after a variety of restarts 🙂",
+      "createdAt": "2022-12-23T10:50:13.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> done, it is the same image. Fix is needed only for syncing nodes",
+      "createdAt": "2022-12-23T10:50:20.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "not a single reorg in geth/prysm.",
+      "createdAt": "2022-12-23T10:50:55.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "geth/prysm is up to head now .",
+      "createdAt": "2022-12-23T10:51:17.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok so this looks fine on my end. Rate limiting is fine, we start requesting blocks on the higher end",
+      "createdAt": "2022-12-23T10:52:10.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marekm3498",
+      "category": "Testing",
+      "parent": "",
+      "content": "after quick look to lodestar<>nethermind -> no reorgs",
+      "createdAt": "2022-12-23T10:52:11.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah there is def. something fishy here, as there hasn't been this many reorgs.",
+      "createdAt": "2022-12-23T10:52:50.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can take a look at the Besu node",
+      "createdAt": "2022-12-23T10:53:07.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "siladu",
+      "category": "Testing",
+      "parent": "",
+      "content": "if besu is dealing with lots of forks then it tends to thrash bonsai world state back and forth so that might be why it's slow since bonsai only keeps current world state and has to calculate/play diffs as it moves between forks",
+      "createdAt": "2022-12-23T10:54:04.832000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "what would make besu think there are lots of forks tho?",
+      "createdAt": "2022-12-23T10:54:40.041000+00:00",
+      "attachments": []
+    }
+  ]
+}

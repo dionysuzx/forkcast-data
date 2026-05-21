@@ -25,6 +25,20 @@ const normalizedMessage = (message: DiscordMessage) => ({
 const compactText = (value: string, length: number): string =>
   value.replace(/\s+/g, " ").trim().slice(0, length);
 
+const pathSlug = (value: string): string => {
+  let output = "";
+  for (const char of value.toLowerCase()) {
+    if (/[a-z0-9]/.test(char)) output += char;
+    else if (char === "-" || char === "_" || /\s/.test(char)) {
+      if (!output.endsWith("-")) output += "-";
+    } else {
+      if (!output.endsWith("-")) output += "-";
+      output += `u${char.codePointAt(0)?.toString(16) ?? "unknown"}-`;
+    }
+  }
+  return output.replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+};
+
 export const ingestDiscordArchive = async (repoRoot: string, archiveRoot: string, limit = 12, generatedAt = nowIso()): Promise<RecordManifest[]> => {
   if (!(await pathExists(archiveRoot))) return [];
   const candidateFiles = (await listFiles(archiveRoot))
@@ -43,7 +57,10 @@ export const ingestDiscordArchive = async (repoRoot: string, archiveRoot: string
     const searchText = compactText(normalized.map((message) => message.content).join(" "), 12000);
     const sourceText = await import("node:fs/promises").then((fs) => fs.readFile(file, "utf8"));
     const sourceHash = sha256(sourceText);
-    const channelPath = channel.split("/").map((part) => slugify(part) || "unknown").join("/");
+    const channelParts = channel.split("/");
+    const channelPath = channelParts
+      .map((part, index) => index === 0 ? pathSlug(part) : slugify(part) || "unknown")
+      .join("/");
     let record = newRecord({
       id: `discord-archive/${channelPath}/${date}`,
       kind: "thread",
