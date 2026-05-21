@@ -1,7 +1,6 @@
 import type { Config } from "@netlify/functions";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { adminSecretStatus, isAuthorized } from "./_shared/admin-auth.js";
+import { readLatestJson } from "./_shared/static-data.js";
 
 type AdminAction = "ingestCanonical" | "ingestFull" | "evals" | "snapshot" | "dataDeploy" | "astroRebuild";
 
@@ -17,11 +16,7 @@ const controls = (authed: boolean) => ({
 });
 
 const readStaticJson = async <T>(path: string, fallback: T): Promise<T> => {
-  try {
-    return JSON.parse(await readFile(join(process.cwd(), "dist", "latest", path), "utf8")) as T;
-  } catch {
-    return fallback;
-  }
+  return readLatestJson(path, fallback);
 };
 
 const dispatchWorkflow = async (repo: string, workflow: string, inputs: Record<string, string | boolean>): Promise<Response> => {
