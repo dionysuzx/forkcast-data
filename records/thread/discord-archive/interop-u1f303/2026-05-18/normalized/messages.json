@@ -1,0 +1,612 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2026-05-18",
+  "messageCount": 73,
+  "sourceHash": "b8c5f2a0fc79d781bb64a76594c275214448f695e5acd6e51d5dde379287dfbe",
+  "searchText": "i pushed a new commit and triggered a new build that should hopefully fix it.. i still have trouble testing locally, stuck with: ``` Waiting for at most '30m0s' for service 'el-1-ethrex-prysm' to reach a certain state ⡿ ████████████████████ Execution in progress ``` something is wrong with my setup done! its now merged ``` 2026-05-18T07:40:09.217407Z DEBUG ethrex_p2p::rlpx::connection::server: Failed Handshake on RLPx connection Io Error: early eof ``` <@316280621783580673> can you help with that? I am already confused about our branches too much... What are +796 changes? https://github.com/ethereum/execution-apis/pull/796 There as glamsterdam-devnet-4 Hi, you probably need to add these `el_extra_params: [\"--syncmode=full\", \"--http.api=eth,net,web3,debug,admin,txpool\"]` to the ethrex config in the .yaml Soon <@281967554572976128> will share you his config. Also pushed a new image https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/26030779938 Thanks Edgar! This is the config I used: ```yaml participants: - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-4-tmp-minimal vc_type: prysm vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-4-tmp-minimal el_type: ethrex el_image: ethpandaops/ethrex:glamsterdam-devnet-4 el_extra_params: - --http.api=eth,net,web3,admin # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392 count: 2 validator_count: 128 supernode: true network_params: preset: minimal seconds_per_slot: 6 genesis_delay: 30 fulu_fork_epoch: 0 gloas_fork_epoch: 1 genesis_gaslimit: 150000000 gas_limit: 150000000 ethereum_genesis_generator_params: image: ethpandaops/ethereum-genesis-generator:6.0.6 ``` thanks, adding the extra params worked! looking into the issue now 🙂 The extra params no longer needed running the latest main As a side note, i'm investigating it but it looks like from the EL side we receive a finalized block hash of 0x0 always 2026-05-18T13:16:02.064160Z DEBUG ethrex_rpc::engine::fork_choice: New fork choice update version=v4 head=0x2163adbbaba604f0b9d0cbc8c6481d228e41e53c6a3ceb7445225664b6825091 safe=0x99182098db56fe5bb538624687e3a2e379a377f4b2fcc6aae9499605be9875bd finalized=v0x0000000000000000000000000000000000000000000000000000000000000000 also looked into this, its a harmless log, not the issue (i improved it in the last pushed image) looks fine.. we can finalize with ethrex for devnet4: ``` [cl-1-prysm-ethrex] [2026-05-18 13:34:41.07] INFO blockchain: Synced new block block=0x93dfc6ea... blockHash=0xc580fd67e135 builderIndex=18446744073709551615 chainServiceProcessedTime=13.256812ms epoch=4 finalizedEpoch=2 ``` just to confirm, the tag is `glamsterdam-devnet-4-tmp-minimal` right? this is my config, i built the images locally but let me try to docker images to confirm: ``` participants_matrix: el: - el_type: ethrex el_image: ethpandaops/ethrex:glamsterdam-devnet-4 el_extra_params: - --http.api=eth,net,web3,admin # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392 cl: - cl_type: prysm cl_image: gcr.io/offchainlabs/prysm/beacon-chain:latest vc_type: prysm vc_image: gcr.io/offchainlabs/prysm/validator:latest count: 2 network_params: gloas_fork_epoch: 1 preset: minimal withdrawal_type: \"0x01\" validator_balance: 40000 genesis_gaslimit: 150000000 gas_limit: 150000000 additional_services: - dora - assertoor - spamoor - checkpointz spamoor_params: image: ethpandaops/spamoor:master assertoor_params: run_stability_check: false run_block_proposal_check: false tests: - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/gloas-dev/builder-lifecycle.yaml\" } snooper_enabled: false global_log_level: debug port_publisher: additional_services: enabled: true checkpointz_params: image: ethpandaops/checkpointz:gloas-latest ``` if you check ethrex logs does it report correctly the finalized hash on your end? hm its 0s.. but this is already finalized epoch =4.. not sure if we should still be sending 0s.. ill check: ``` [el-1-ethrex-prysm] 2026-05-18T13:37:29.165526Z DEBUG ethrex_rpc::engine::fork_choice: New fork choice update version=v4 head=0x553137577683ae6399ee8a34f65faa9ca5df8e53a549a1a1a2d3920052be7555 safe=0x193dfd872214c5cc0c9f5258676800bc938b86e6b03955f53da65decfa71c2fd finalized=v0x0000000000000000000000000000000000000000000000000000000000000000 ``` finalized is in Gloas right? this probably points to some pruning problem in Forkchoice if we are in fact sending zero in that case <@&1417820113981145228> could you guys be so kind of providing me with images with `ATTESTATION_DUE_BPS=1666` and `PAYLOAD_DUE_BPS=5000`? I want to start locally testing forkchoice scenarios they are config values you can override them This is a config. You could just change them yourself. not sure we handle them at all lol if not, its a bug 😄 do every CL client handle that without a problem? we can I don't think we do dual deadlines at all! you mean handling the config or dual deadline we read the config value.. and adjust.. and yes we dont have dual deadline Well, I want to test forkchoice, I need the above values to be handled `PAYLOAD_DUE_BPS` is only one deadline though.. so what you are asking is really blob due deadline? is that spec even merged? should be fine for us, but never tested these with lower values PAYLOAD_DUE_BPS != PAYLOAD_ATTESTATION_DUE_BPS so the important thing is to send the attestation at 7500 but deciding what to put at 5000 <@592004585506340885> is to blame for this confusion, I wanted to include directly different values I need clients to handle the above numbers so that actually I can give some hard numbers to bench people Hey I found `PAYLOAD_AVAILABILITY_DUE_BPS` confusing too 😄 I don't care about names, I care about values, change the name to whatever you want 🙂 Ah yes. I am to blame for that. Oh wait ignore me I thought PAYLOAD_ATTESTATION_DUE_BPS, we haven't implemented yet https://github.com/ethereum/consensus-specs/pull/5212 for the next glamsterdam devnet, will all clients be able to accept external p2p bids? in devnet-3, lighthouse, lodestar and nimbus didn't accept p2p bids ah, you need to implement this for prysm then, we for sure dont have that yeah I'll do that today we'll be able to accept external p2p bids <@654267572107083777> <@1035747431461167125> we have one more opened PR that needs to be merged for us (Nimbus) to accept p2p bids we're able to interop with prysm w/ the alpha 8 spec changes & were passing the spec tests, ill spin up a LH glamsterdam-devnet-4 branch shortly one of the assertoor test cases failed but i think thats an EL related test case We already have a open PR for it. If there is appetite, my team can prioritize reviewing that PR and should be ready for next devnet you can click on it and check the logs can you handle blobs? yeah i think it will be good to have that, we can test external bids across all clients in the next devnet yea we can do blobs it was el logs ``` 6:56:51 PM [INF] submitted withdrawal transaction (source pubkey: 0xa5b26fc7c32f72f278f78ece5067c8f213562975fbe9dd27b6700e29d132d47d0ac2ba1f3583ad3abf71fedf18a7a30f, amount: 0, nonce: 6) client: 2-ethrex-lighthouse 6:56:58 PM [INF] withdrawal 0x04b29f845cee202c884f9d11aa6daaf16abe43608fac62b764d252e1236ceb67 confirmed (nonce: 6, status: 0) 6:56:58 PM [ERR] withdrawal transaction failed: 0x04b29f845cee202c884f9d11aa6daaf16abe43608fac62b764d252e1236ceb67 ``` let’s aim to do some blobs then in devnet 4 Let us know if we have an issue there. Or tell me how can I reproduce this did you test with lodestar as well? I had a image already on saturday (see https://discord.com/channels/595666850260713488/892088344438255616/1505339907449552956), I can't test myself right now will test it out rn running this kurtosis yaml, was able to recreate the issue multiple times. need to let kurtosis run for like 15min the lighthouse docker image is my local one ethpandaops/lighthouse:glamsterdam-devnet-4 image is building rn, should be ready in 30min ``` participants_matrix: el: - el_type: ethrex el_image: ethpandaops/ethrex:glamsterdam-devnet-4 el_extra_params: - --http.api=eth,net,web3,admin # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392 cl: - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-4-tmp vc_type: prysm vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-4-tmp - cl_type: lighthouse cl_image: eserilev/lighthouse:glamsterdam-devnet-4 count: 1 network_params: gloas_fork_epoch: 1 withdrawal_type: \"0x01\" seconds_per_slot: 6 validator_balance: 40000 genesis_gaslimit: 150000000 gas_limit: 150000000 additional_services: - dora - assertoor - spamoor - checkpointz spamoor_params: image: ethpandaops/spamoor:master assertoor_params: run_stability_check: false run_block_proposal_check: false tests: - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/gloas-dev/builder-lifecycle.yaml\" } snooper_enabled: false global_log_level: debug port_publisher: additional_services: enabled: true checkpointz_params: image: ethpandaops/checkpointz:gloas-latest ``` lodestar w/ prysm and LH looks good seems like we can launch tomorrow Can we fix the geth bug, I assume the geth image just didn't have the change to allow reorg on same branch so might just be a branch issue <@360491619402776577> I don’t think there is bandwidth to do this But happy to be proven wrong",
+  "excerpts": [
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "i pushed a new commit and triggered a new build that should hopefully fix it..\ni still have trouble testing locally, stuck with:\n```\nWaiting for at most '30m0s' for service 'el-1-ethrex-prysm' to reach a certain state\n⡿   ████████████████████ Execution in progress\n```\nsomething is wrong with my setup",
+      "createdAt": "2026-05-18T03:28:49.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Testing",
+      "parent": "",
+      "content": "done!",
+      "createdAt": "2026-05-18T06:02:42.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "its now merged",
+      "createdAt": "2026-05-18T07:38:29.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```\n2026-05-18T07:40:09.217407Z DEBUG ethrex_p2p::rlpx::connection::server: Failed Handshake on RLPx connection Io Error: early eof\n```",
+      "createdAt": "2026-05-18T07:43:28.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lukaszrozmej",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@316280621783580673> can you help with that? I am already confused about our branches too much...",
+      "createdAt": "2026-05-18T10:11:51.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ben_a_adams",
+      "category": "Testing",
+      "parent": "",
+      "content": "What are +796 changes?",
+      "createdAt": "2026-05-18T10:16:00.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/ethereum/execution-apis/pull/796",
+      "createdAt": "2026-05-18T10:16:30.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ben_a_adams",
+      "category": "Testing",
+      "parent": "",
+      "content": "There as glamsterdam-devnet-4",
+      "createdAt": "2026-05-18T10:22:43.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hi, you probably need to add these `el_extra_params: [\"--syncmode=full\", \"--http.api=eth,net,web3,debug,admin,txpool\"]` to the ethrex config in the .yaml\nSoon <@281967554572976128> will share you his config.",
+      "createdAt": "2026-05-18T11:36:47.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "Also pushed a new image https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/26030779938",
+      "createdAt": "2026-05-18T11:37:22.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks Edgar! This is the config I used:\n```yaml\nparticipants:\n- cl_type: prysm\n  cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-4-tmp-minimal\n  vc_type: prysm\n  vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-4-tmp-minimal\n  el_type: ethrex\n  el_image: ethpandaops/ethrex:glamsterdam-devnet-4\n  el_extra_params:\n  - --http.api=eth,net,web3,admin   # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392\n  count: 2\n  validator_count: 128\n  supernode: true\n\nnetwork_params:\n  preset: minimal\n  seconds_per_slot: 6\n  genesis_delay: 30\n  fulu_fork_epoch: 0\n  gloas_fork_epoch: 1\n  genesis_gaslimit: 150000000\n  gas_limit: 150000000\n\nethereum_genesis_generator_params:\n  image: ethpandaops/ethereum-genesis-generator:6.0.6\n```",
+      "createdAt": "2026-05-18T11:45:50.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "thanks, adding the extra params worked! looking into the issue now 🙂",
+      "createdAt": "2026-05-18T13:31:27.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "The extra params no longer needed running the latest main",
+      "createdAt": "2026-05-18T13:31:41.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "As a side note, i'm investigating it but it looks like from the EL side we receive a finalized block hash of 0x0 always\n\n2026-05-18T13:16:02.064160Z DEBUG ethrex_rpc::engine::fork_choice: New fork choice update version=v4 head=0x2163adbbaba604f0b9d0cbc8c6481d228e41e53c6a3ceb7445225664b6825091 safe=0x99182098db56fe5bb538624687e3a2e379a377f4b2fcc6aae9499605be9875bd finalized=v0x0000000000000000000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-05-18T13:32:18.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "also looked into this, its a harmless log, not the issue",
+      "createdAt": "2026-05-18T13:33:30.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "(i improved it in the last pushed image)",
+      "createdAt": "2026-05-18T13:33:46.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks fine.. we can finalize with ethrex for devnet4:\n```\n[cl-1-prysm-ethrex] [2026-05-18 13:34:41.07]  INFO blockchain: Synced new block block=0x93dfc6ea... blockHash=0xc580fd67e135 builderIndex=18446744073709551615 chainServiceProcessedTime=13.256812ms epoch=4 finalizedEpoch=2\n```",
+      "createdAt": "2026-05-18T13:35:43.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "just to confirm, the tag is `glamsterdam-devnet-4-tmp-minimal` right?",
+      "createdAt": "2026-05-18T13:36:45.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is my config, i built the images locally but let me try to docker images to confirm:\n```\nparticipants_matrix:\n  el:\n    - el_type: ethrex\n      el_image: ethpandaops/ethrex:glamsterdam-devnet-4\n      el_extra_params:\n         - --http.api=eth,net,web3,admin   # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392\n  cl:\n    - cl_type: prysm\n      cl_image: gcr.io/offchainlabs/prysm/beacon-chain:latest\n      vc_type: prysm\n      vc_image: gcr.io/offchainlabs/prysm/validator:latest\n  count: 2\n\nnetwork_params:\n  gloas_fork_epoch: 1\n  preset: minimal\n  withdrawal_type: \"0x01\"\n  validator_balance: 40000\n  genesis_gaslimit: 150000000\n  gas_limit: 150000000\n\nadditional_services:\n  - dora\n  - assertoor\n  - spamoor\n  - checkpointz\nspamoor_params:\n  image: ethpandaops/spamoor:master\n\nassertoor_params:\n  run_stability_check: false\n  run_block_proposal_check: false\n  tests:\n    - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/gloas-dev/builder-lifecycle.yaml\" }\n\nsnooper_enabled: false\nglobal_log_level: debug\n\nport_publisher:\n  additional_services:\n    enabled: true\n\ncheckpointz_params:\n  image: ethpandaops/checkpointz:gloas-latest\n```",
+      "createdAt": "2026-05-18T13:39:12.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "if you check ethrex logs does it report correctly the finalized hash on your end?",
+      "createdAt": "2026-05-18T13:42:05.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "hm its 0s.. but this is already finalized epoch =4.. not sure if we should still be sending 0s.. ill check:\n```\n[el-1-ethrex-prysm] 2026-05-18T13:37:29.165526Z DEBUG ethrex_rpc::engine::fork_choice: New fork choice update version=v4 head=0x553137577683ae6399ee8a34f65faa9ca5df8e53a549a1a1a2d3920052be7555 safe=0x193dfd872214c5cc0c9f5258676800bc938b86e6b03955f53da65decfa71c2fd finalized=v0x0000000000000000000000000000000000000000000000000000000000000000\n```",
+      "createdAt": "2026-05-18T13:47:41.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "finalized is in Gloas right?",
+      "createdAt": "2026-05-18T14:24:35.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "this probably points to some pruning problem in Forkchoice if we are in fact sending zero in that case",
+      "createdAt": "2026-05-18T14:24:53.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@&1417820113981145228> could you guys be so kind of providing me with images with `ATTESTATION_DUE_BPS=1666` and  `PAYLOAD_DUE_BPS=5000`?",
+      "createdAt": "2026-05-18T14:43:39.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I want to start locally testing forkchoice scenarios",
+      "createdAt": "2026-05-18T14:43:50.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "they are config values",
+      "createdAt": "2026-05-18T14:43:57.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can override them",
+      "createdAt": "2026-05-18T14:43:59.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "This is a config. You could just change them yourself.",
+      "createdAt": "2026-05-18T14:44:02.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "not sure we handle them at all",
+      "createdAt": "2026-05-18T14:44:15.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "lol",
+      "createdAt": "2026-05-18T14:44:16.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "if not, its a bug 😄",
+      "createdAt": "2026-05-18T14:44:25.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "do every CL client handle that without a problem?",
+      "createdAt": "2026-05-18T14:44:28.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "we can",
+      "createdAt": "2026-05-18T14:44:29.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't think we do dual deadlines at all!",
+      "createdAt": "2026-05-18T14:44:47.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "you mean handling the config or dual deadline",
+      "createdAt": "2026-05-18T14:44:58.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "we read the config value.. and adjust.. and yes we dont have dual deadline",
+      "createdAt": "2026-05-18T14:45:08.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Well, I want to test forkchoice, I need the above values to be handled",
+      "createdAt": "2026-05-18T14:45:13.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "`PAYLOAD_DUE_BPS` is only one deadline though.. so what you are asking is really blob due deadline?",
+      "createdAt": "2026-05-18T14:47:12.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "is that spec even merged?",
+      "createdAt": "2026-05-18T14:47:16.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "should be fine for us, but never tested these with lower values",
+      "createdAt": "2026-05-18T14:50:02.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "PAYLOAD_DUE_BPS != PAYLOAD_ATTESTATION_DUE_BPS",
+      "createdAt": "2026-05-18T14:50:07.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "so the important thing is to send the attestation at 7500 but deciding what to put at 5000",
+      "createdAt": "2026-05-18T14:50:32.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@592004585506340885> is to blame for this confusion, I wanted to include directly different values",
+      "createdAt": "2026-05-18T14:50:48.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I need clients to handle the above numbers so that actually I can give some hard numbers to bench people",
+      "createdAt": "2026-05-18T14:51:09.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hey I found `PAYLOAD_AVAILABILITY_DUE_BPS` confusing too 😄",
+      "createdAt": "2026-05-18T14:51:17.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't care about names, I care about values, change the name to whatever you want 🙂",
+      "createdAt": "2026-05-18T14:51:43.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah yes. I am to blame for that.",
+      "createdAt": "2026-05-18T14:51:49.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh wait ignore me I thought PAYLOAD_ATTESTATION_DUE_BPS, we haven't implemented yet https://github.com/ethereum/consensus-specs/pull/5212",
+      "createdAt": "2026-05-18T14:52:03.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "for the next glamsterdam devnet, will all clients be able to accept external  p2p bids? in devnet-3, lighthouse, lodestar and nimbus didn't accept p2p bids",
+      "createdAt": "2026-05-18T14:56:46.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah, you need to implement this for prysm then, we for sure dont have that",
+      "createdAt": "2026-05-18T14:57:33.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah I'll do that today",
+      "createdAt": "2026-05-18T14:58:31.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "we'll be able to accept external p2p bids",
+      "createdAt": "2026-05-18T14:58:42.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@654267572107083777> <@1035747431461167125>",
+      "createdAt": "2026-05-18T15:02:37.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Testing",
+      "parent": "",
+      "content": "we have one more opened PR that needs to be merged for us (Nimbus) to accept p2p bids",
+      "createdAt": "2026-05-18T15:03:47.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "we're able to interop with prysm w/ the alpha 8 spec changes & were passing the spec tests, ill spin up a LH glamsterdam-devnet-4 branch shortly",
+      "createdAt": "2026-05-18T15:57:53.647000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "3564ed845001899c0eda0d333f4789d95d8f743fd89e8a1725a630d8516af29f"
+        }
+      ]
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "one of the assertoor test cases failed but i think thats an EL related test case",
+      "createdAt": "2026-05-18T15:59:24.610000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "a4aa39d8509dd7aa66edefad50c2adb3e46d635e00962b3d1cafef63ba36d1c9"
+        }
+      ]
+    },
+    {
+      "author": "nc1234",
+      "category": "Testing",
+      "parent": "",
+      "content": "We already have a open PR for it. If there is appetite, my team can prioritize reviewing that PR and should be ready for next devnet",
+      "createdAt": "2026-05-18T16:01:35.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can click on it and check the logs",
+      "createdAt": "2026-05-18T17:18:15.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "can you handle blobs?",
+      "createdAt": "2026-05-18T17:18:46.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah i think it will be good to have that, we can test external bids across all clients in the next devnet",
+      "createdAt": "2026-05-18T17:21:06.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "yea we can do blobs",
+      "createdAt": "2026-05-18T17:36:14.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "it was el logs\n\n```\n6:56:51 PM\n[INF]\nsubmitted withdrawal transaction (source pubkey: 0xa5b26fc7c32f72f278f78ece5067c8f213562975fbe9dd27b6700e29d132d47d0ac2ba1f3583ad3abf71fedf18a7a30f, amount: 0, nonce: 6)\nclient: 2-ethrex-lighthouse\n6:56:58 PM\n[INF]\nwithdrawal 0x04b29f845cee202c884f9d11aa6daaf16abe43608fac62b764d252e1236ceb67 confirmed (nonce: 6, status: 0)\n6:56:58 PM\n[ERR]\nwithdrawal transaction failed: 0x04b29f845cee202c884f9d11aa6daaf16abe43608fac62b764d252e1236ceb67\n```",
+      "createdAt": "2026-05-18T17:36:26.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "let’s aim to do some blobs then in devnet 4",
+      "createdAt": "2026-05-18T17:43:50.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Testing",
+      "parent": "",
+      "content": "Let us know if we have an issue there. Or tell me how can I reproduce this",
+      "createdAt": "2026-05-18T17:52:07.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "did you test with lodestar as well? I had a image already on saturday (see https://discord.com/channels/595666850260713488/892088344438255616/1505339907449552956), I can't test myself right now",
+      "createdAt": "2026-05-18T17:55:07.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "will test it out rn",
+      "createdAt": "2026-05-18T17:55:30.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "running this kurtosis yaml, was able to recreate the issue multiple times. need to let kurtosis run for like 15min\n\nthe lighthouse docker image is my local one\nethpandaops/lighthouse:glamsterdam-devnet-4 image is building rn, should be ready in 30min\n```\nparticipants_matrix:\n  el:\n    - el_type: ethrex\n      el_image: ethpandaops/ethrex:glamsterdam-devnet-4\n      el_extra_params:\n         - --http.api=eth,net,web3,admin   # workaround for kurtosis enode probe, see https://github.com/ethpandaops/ethereum-package/pull/1392\n  cl:\n    - cl_type: prysm\n      cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-4-tmp\n      vc_type: prysm\n      vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-4-tmp\n    - cl_type: lighthouse\n      cl_image: eserilev/lighthouse:glamsterdam-devnet-4\n  count: 1\n\nnetwork_params:\n  gloas_fork_epoch: 1\n  withdrawal_type: \"0x01\"\n  seconds_per_slot: 6\n  validator_balance: 40000\n  genesis_gaslimit: 150000000\n  gas_limit: 150000000\n\nadditional_services:\n  - dora\n  - assertoor\n  - spamoor\n  - checkpointz\nspamoor_params:\n  image: ethpandaops/spamoor:master\n\nassertoor_params:\n  run_stability_check: false\n  run_block_proposal_check: false\n  tests:\n    - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/gloas-dev/builder-lifecycle.yaml\" }\n\nsnooper_enabled: false\nglobal_log_level: debug\n\nport_publisher:\n  additional_services:\n    enabled: true\n\ncheckpointz_params:\n  image: ethpandaops/checkpointz:gloas-latest\n```",
+      "createdAt": "2026-05-18T17:57:16.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "lodestar w/ prysm and LH looks good",
+      "createdAt": "2026-05-18T18:16:21.734000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "dea7a23ed9b54bab7afd1efc687d8c9261103e18e8d142443d5dab53a4bb7767"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "seems like we can launch tomorrow",
+      "createdAt": "2026-05-18T18:28:24.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "Can we fix the geth bug, I assume the geth image just didn't have the change to allow reorg on same branch so might just be a branch issue",
+      "createdAt": "2026-05-18T18:48:54.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@360491619402776577>",
+      "createdAt": "2026-05-18T18:49:23.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don’t think there is bandwidth to do this",
+      "createdAt": "2026-05-18T18:49:34.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "But happy to be proven wrong",
+      "createdAt": "2026-05-18T18:49:55.797000+00:00",
+      "attachments": []
+    }
+  ]
+}

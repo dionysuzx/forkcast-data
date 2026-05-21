@@ -1,0 +1,554 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-03-31",
+  "messageCount": 68,
+  "sourceHash": "e7ab2d2ec0f8e7a02ec6160abe173e4e4abb0812512894631f4ed6623694c7f1",
+  "searchText": "probs wont be ready today, working through some bugs were seeing locally Forkchoice isn't part of the testing right? We don't have a full fc either, we haven't added the equivocation guard and I don't even know how to add it killing devnet-0 now, and launching prysm only devnet-1 in a few hours. Unfortunately <@358120958726373381> as you won't be ready today, you will have to implement checkpoint sync in order to be able to join this network. Initializing the new network now I also don't think full fc is required for today so if you wanna try without that do let me know I have a branch in like 10 minutes if you wanna wait it’s all good, we should be able to checkpoint sync pretty quickly. Pawan has a working range sync impl and I believe a working checkpoint sync impl that just needs a bit more testing Id rather test with our “full” fc impl than what we had for devnet 0 (which was a complete hack job by me). and by “full” i mean what were actually planning on merging into our trunk branch. I don’t think we’re handling equivocations correctly yet either if you wanna try something hacky, I can put 2 machines and a few valis for lighthouse not enough to rock the boat but enough to see when things are working just push things to epbs-devnet-1 branch please pushed `epbs-devnet-1` just now pushed `epbs-devnet-1` just now https://dora.epbs-devnet-1.ethpandaops.io T-10mins we had genesis gloas is in 25mins looks like gloas didn't went too smoothly `[2026-03-31 12:45:12.01] ERROR client: Could not submit aggregate selection proof to beacon node error=rpc error: code = DeadlineExceeded desc = context deadline exceeded slot=225` looks like lodestar is carrying the network now <@755590043632140352> <@363800010518822915> I have not seen this error on kt at all. Validator client is struggling <@586161934425128960> error on validator monitor onceEveryEndOfEpoch Do we have beacon API endpoint specifications already to prepare a bid? so that the validator client signs it? cc <@1386598056320831509> <@884836500037066862> <@586161934425128960> I see the endpoint to publish the already signed one But I mean if there's any spec to prepare it https://github.com/ethereum/beacon-APIs/pull/552 there is `GET /eth/v1/validator/execution_payload_bid/{slot}/{builder_index}` but it seems wrong that this is a validator api, it should be in the `/builder` namespace there's no builder namespace yet right? I'll implement it in the validator namespace for now, we can change this later thanks for the link, tried looking for it and couldn't see it there was builder namespace which had a single api to get expected withdralwals but this one was deprecated and removed https://github.com/ethereum/beacon-APIs/pull/584 re-introduces it ok, navigating that repo is impossible for me. What is the endpoint to request the payload envelope to sign? if the bid is in the validator namespace, I was expecting to see a similar one for the envelope I'm fine moving them both to a builder namespace, but whatever we do we need obviously at least these two endpoints to request a bid and an envelope to sign you mean a local build or as external builder, the later is what is defined in #584 I linked above local builder and external builder should not be different, but yes I mean external builder, so we do not have anything merged yet for the payload? we have something merged for he bid? local assumes the payload is build by the node itself, while the one for external builders doesn't, it just for the builder the get a envelope with the correct state root so they don't need to re-implement state transition https://github.com/ethereum/beacon-APIs/pull/580 is for local builds we may be talking different things then, do we have an endpoint for a local builder that is prepareing a bid/envelope to act as an external builder? I want my validator client to act as a builder, what endpoint will it call? https://github.com/ethereum/beacon-APIs/pull/580/changes#diff-70f7de196e41377e66d64da0bb5025d42f118937ee89bf86f8d2e78efa6610d0 should work for that case so it is the same as for local build and none of this is merged yet right? but no, this doesn't work, the beacon node does not need to cache an envelope for every validator it serves that decides to act as a builder it needs to cache just the payload and the state transition function, but the builder index etc needs to be passed to the endpoint so is there no working version now? I'll work on the internal grpc version for PRysm then that I can do whatever I want looks like we removed it here https://github.com/ethereum/beacon-APIs/pull/580/changes/0c458594da02947f60bf6c7f4cae876ed2cdb1f8 problem is nobody actually has gotten there yet to implement these endpoints, and before that's the case there is also no point merging these PRs I'm completely lost with that repo, I'm implementing the whole pipeline now for Prysm of all these endpoints, but the problem is that it looks that our internal implementation (grpc) will be very different than the beacon API (that as far as I can tell is not completely worked out to allow validator clients to act as builders). We were hoping to deprecate the grpc implementation, but it seems harder when we deviate from the beacon API ok, but actually it's fine not to have the builder index in that call as long as the beacon node has the beacon block already with the committed signed bid if that endpoint assumes the beacon has cached the envelope for the external builder or local proposer that is already committed in the bid, that endpoint as is will work fine ahh no, that thing is in `produceBlock` not in the getPayloadEnvelope I'll stick to grpc should be the same args either way that you need to pass, but I don't think anyone looked at implementing the \"act as a builder\" flow, I don't think I want to couple that with the validators client in lodestar and rather have a separate process that just uses some sse events, and might use the beaocn node to build the payload, just not sure yet how that flow will look like but we should make the standard beacon-api in a way that allows this to be easy to implement yeah perhaps it's that I had a very clear picture of what this beacon API would be, and assumed that this was the current status of that API: The builder namespace requires two endpoints - Get a bid to sign right now: The beacon is in charge of caching a payload, the fee recipient, etc. The endpoint gets the builder index as a parameter. - Get an envelope to sign right now: the beacon is in charge of using the cached payload or alternatively the endpoint takes an entire new payload and requests. It's fine if these are different endpoints, one that uses the cched payload and another one that gets all the data. In the cached senario, if the current block has the commitment to the cached hash, return the corresponding full payload envelope. The beacon needs two endpoints to just broadcast the two signed objects. yeah I think it's good to have separate endpoint under `/builder` what's currently not defined is the case where the beacon node caches the payload, we only have #584 which supplies the payload for broadcast these should be `/beacon` endpoints anyway like we have `publishBlockV2` today so I don't think we need dedicated endpoints what doesn't work for local payloads right now is telling the EL what gas limit to use `POST /eth/v1/beacon/execution_payload_bid` already part of master to broadcast the bid `POST /eth/v1/beacon/execution_payload_envelope` is part of https://github.com/ethereum/beacon-APIs/pull/580/ idk if this is well known but the EIP and potuz's annotated spec make reference to PAYLOAD_TIMELY_THRESHOLD without defining it anywhere. I think some language around how the value is decided would be appropriate (client-configured? spec-defined?) <https://www.potuz.net/posts/gloas-annotated-forkchoice/> refers to it in `is_payload_timely` and <https://eips.ethereum.org/EIPS/eip-7732> refers to it in the `PTC equivocations` section the spec itself does define it here <https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/fork-choice.md#constants> but as `PTC_SIZE // 2` which makes little sense yeah I think it's good to have separate https://github.com/ethereum/beacon-APIs/blob/master/apis/validator/execution_payload_bid.yaml This endpoint does not allow the validator to tweak the values and `execution_payment` part of the bid, so I doubt any external builder will ever use this endpoint. I'm fine by it cause our internal implementation will make the beacon set these values, but just flagging this that it sounds to me this endpoint will be mostly useless cc <@1386598056320831509> I think we should move that to the builder namespace and make it useful for builders (and CLs that wanna act as a builder) i doubt an external builder will use that endpoint tbh. An external builder would likely create the bid themselves, sign it, then use an endpoint to create the envelope, sign the envelope and then use an endpoint to publish the envelope to the n/w",
+  "excerpts": [
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "probs wont be ready today, working through some bugs were seeing locally",
+      "createdAt": "2026-03-31T07:39:00.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Forkchoice isn't part of the testing right? We don't have a full fc either, we haven't added the equivocation guard and I don't even know how to add it",
+      "createdAt": "2026-03-31T10:24:45.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "killing devnet-0 now, and launching prysm only devnet-1 in a few hours.",
+      "createdAt": "2026-03-31T10:31:10.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Unfortunately <@358120958726373381> as you won't be ready today, you will have to implement checkpoint sync in order to be able to join this network.",
+      "createdAt": "2026-03-31T10:31:46.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Initializing the new network now",
+      "createdAt": "2026-03-31T10:44:40.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I also don't think full fc is required for today",
+      "createdAt": "2026-03-31T10:44:55.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so if you wanna try without that do let me know",
+      "createdAt": "2026-03-31T10:45:01.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have a branch in like 10 minutes if you wanna wait",
+      "createdAt": "2026-03-31T10:45:03.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it’s all good, we should be able to checkpoint sync pretty quickly. Pawan has a working range sync impl and I believe a working checkpoint sync impl that just needs a bit more testing\n\nId rather test with our “full” fc impl than what we had for devnet 0 (which was a complete hack job by me). and by “full” i mean what were actually planning on merging into our trunk branch. I don’t think we’re handling equivocations correctly yet either",
+      "createdAt": "2026-03-31T10:49:37.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if you wanna try something hacky, I can put 2 machines and a few valis for lighthouse",
+      "createdAt": "2026-03-31T10:50:18.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not enough to rock the boat but enough to see when things are working",
+      "createdAt": "2026-03-31T10:50:34.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "just push things to epbs-devnet-1 branch please",
+      "createdAt": "2026-03-31T10:50:49.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "pushed `epbs-devnet-1` just now",
+      "createdAt": "2026-03-31T10:51:09.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "pushed `epbs-devnet-1` just now",
+      "createdAt": "2026-03-31T11:09:40.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://dora.epbs-devnet-1.ethpandaops.io",
+      "createdAt": "2026-03-31T11:50:03.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "T-10mins",
+      "createdAt": "2026-03-31T11:50:14.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we had genesis",
+      "createdAt": "2026-03-31T12:04:07.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "gloas is in 25mins",
+      "createdAt": "2026-03-31T12:04:17.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "looks like gloas didn't went too smoothly",
+      "createdAt": "2026-03-31T12:45:06.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`[2026-03-31 12:45:12.01] ERROR client: Could not submit aggregate selection proof to beacon node error=rpc error: code = DeadlineExceeded desc = context deadline exceeded slot=225`",
+      "createdAt": "2026-03-31T12:45:47.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "looks like lodestar is carrying the network now",
+      "createdAt": "2026-03-31T12:46:44.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> <@363800010518822915> I have not seen this error on kt at all. Validator client is struggling",
+      "createdAt": "2026-03-31T12:51:34.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@586161934425128960> error on validator monitor onceEveryEndOfEpoch",
+      "createdAt": "2026-03-31T13:00:35.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do we have beacon API endpoint specifications already to prepare a bid? so that the validator client signs it?",
+      "createdAt": "2026-03-31T13:45:48.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc",
+      "createdAt": "2026-03-31T13:45:52.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@1386598056320831509> <@884836500037066862> <@586161934425128960>",
+      "createdAt": "2026-03-31T13:46:04.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see the endpoint to publish the already signed one",
+      "createdAt": "2026-03-31T13:46:39.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I mean if there's any spec to prepare it",
+      "createdAt": "2026-03-31T13:46:47.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/552",
+      "createdAt": "2026-03-31T13:47:57.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there is `GET /eth/v1/validator/execution_payload_bid/{slot}/{builder_index}` but it seems wrong that this is a validator api, it should be in the `/builder` namespace",
+      "createdAt": "2026-03-31T13:48:40.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there's no builder namespace yet right?",
+      "createdAt": "2026-03-31T13:49:38.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'll implement it in the validator namespace for now, we can change this later",
+      "createdAt": "2026-03-31T13:49:48.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thanks for the link, tried looking for it and couldn't see it",
+      "createdAt": "2026-03-31T13:50:05.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there was builder namespace which had a single api to get expected withdralwals but this one was deprecated and removed",
+      "createdAt": "2026-03-31T13:50:34.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/584 re-introduces it",
+      "createdAt": "2026-03-31T13:50:41.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, navigating that repo is impossible for me. What is the endpoint to request the payload envelope to sign? if the bid is in the validator namespace, I was expecting to see a similar one for the envelope",
+      "createdAt": "2026-03-31T13:55:06.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm fine moving them both to a builder namespace, but whatever we do we need obviously at least these two endpoints to request a bid and an envelope to sign",
+      "createdAt": "2026-03-31T13:55:51.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean a local build or as external builder, the later is what is defined in #584 I linked above",
+      "createdAt": "2026-03-31T13:56:32.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "local builder and external builder should not be different, but yes I mean external builder, so we do not have anything merged yet for the payload? we have something merged for he bid?",
+      "createdAt": "2026-03-31T13:57:44.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "local assumes the payload is build by the node itself, while the one for external builders doesn't, it just for the builder the get a envelope with the correct state root so they don't need to re-implement state transition",
+      "createdAt": "2026-03-31T14:00:39.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/580 is for local builds",
+      "createdAt": "2026-03-31T14:01:29.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we may be talking different things then, do we have an endpoint for a local builder that is prepareing a bid/envelope to act as an external builder?",
+      "createdAt": "2026-03-31T14:01:50.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I want my validator client to act as a builder, what endpoint will it call?",
+      "createdAt": "2026-03-31T14:02:48.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/580/changes#diff-70f7de196e41377e66d64da0bb5025d42f118937ee89bf86f8d2e78efa6610d0 should work for that case",
+      "createdAt": "2026-03-31T14:03:19.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it is the same as for local build",
+      "createdAt": "2026-03-31T14:03:30.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and none of this is merged yet right?",
+      "createdAt": "2026-03-31T14:04:00.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but no, this doesn't work, the beacon node does not need to cache an envelope for every validator it serves that decides to act as a builder",
+      "createdAt": "2026-03-31T14:04:53.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it needs to cache just the payload and the state transition function, but the builder index etc needs to be passed to the endpoint",
+      "createdAt": "2026-03-31T14:05:12.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so is there no working version now? I'll work on the internal grpc version for PRysm then that I can do whatever I want",
+      "createdAt": "2026-03-31T14:05:49.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "looks like we removed it here https://github.com/ethereum/beacon-APIs/pull/580/changes/0c458594da02947f60bf6c7f4cae876ed2cdb1f8",
+      "createdAt": "2026-03-31T14:06:43.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "problem is nobody actually has gotten there yet to implement these endpoints, and before that's the case there is also no point merging these PRs",
+      "createdAt": "2026-03-31T14:07:52.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm completely lost with that repo, I'm implementing the whole pipeline now for Prysm of all these endpoints, but the problem is that it looks that our internal implementation (grpc) will be very different than the beacon API (that as far as I can tell is not completely worked out to allow validator clients to act as builders). We were hoping to deprecate the grpc implementation, but it seems harder when we deviate from the beacon API",
+      "createdAt": "2026-03-31T14:09:52.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, but actually it's fine not to have the builder index in that call as long as the beacon node has the beacon block already with the committed signed bid",
+      "createdAt": "2026-03-31T14:12:59.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if that endpoint assumes the beacon has cached the envelope for the external builder or local proposer that is already committed in the bid, that endpoint as is will work fine",
+      "createdAt": "2026-03-31T14:13:29.614000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ahh no, that thing is in `produceBlock` not in the getPayloadEnvelope",
+      "createdAt": "2026-03-31T14:15:01.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'll stick to grpc",
+      "createdAt": "2026-03-31T14:15:22.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "should be the same args either way that you need to pass, but I don't think anyone looked at implementing the \"act as a builder\" flow, I don't think I want to couple that with the validators client in lodestar and rather have a separate process that just uses some sse events, and might use the beaocn node to build the payload, just not sure yet how that flow will look like but we should make the standard beacon-api in a way that allows this to be easy to implement",
+      "createdAt": "2026-03-31T14:17:59.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah perhaps it's that I had a very clear picture of what this beacon API would be, and assumed that this was the current status of that API:\nThe builder namespace requires two endpoints\n- Get a bid to sign right now:  The beacon is in charge of caching a payload, the fee recipient, etc. The endpoint gets the builder index as a parameter. \n- Get an envelope to sign right now: the beacon is in charge of using the cached payload or alternatively the endpoint takes an entire new payload and requests. It's fine if these are different endpoints, one that uses the cched payload and another one that gets all the data.  In the cached senario, if the current block has the commitment to the cached hash, return the corresponding full payload envelope. \nThe beacon needs two endpoints to just broadcast the two signed objects.",
+      "createdAt": "2026-03-31T14:23:48.764000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I think it's good to have separate endpoint under `/builder` what's currently not defined is the case where the beacon node caches the payload, we only have #584 which supplies the payload\n\nfor broadcast these should be `/beacon` endpoints anyway like we have `publishBlockV2` today so I don't think we need dedicated endpoints\n\nwhat doesn't work for local payloads right now is telling the EL what gas limit to use",
+      "createdAt": "2026-03-31T14:29:04.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`POST /eth/v1/beacon/execution_payload_bid` already part of master to broadcast the bid",
+      "createdAt": "2026-03-31T14:30:50.694000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`POST /eth/v1/beacon/execution_payload_envelope` is part of https://github.com/ethereum/beacon-APIs/pull/580/",
+      "createdAt": "2026-03-31T14:32:04.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xpatches",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "idk if this is well known but the EIP and potuz's annotated spec make reference to PAYLOAD_TIMELY_THRESHOLD without defining it anywhere. I think some language around how the value is decided would be appropriate (client-configured? spec-defined?)\n\n<https://www.potuz.net/posts/gloas-annotated-forkchoice/> refers to it in `is_payload_timely` and <https://eips.ethereum.org/EIPS/eip-7732> refers to it in the `PTC equivocations` section",
+      "createdAt": "2026-03-31T14:38:30.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xpatches",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the spec itself does define it here <https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/fork-choice.md#constants>",
+      "createdAt": "2026-03-31T14:40:25.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xpatches",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but as `PTC_SIZE // 2` which makes little sense",
+      "createdAt": "2026-03-31T14:40:49.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I think it's good to have separate",
+      "createdAt": "2026-03-31T14:43:53.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/beacon-APIs/blob/master/apis/validator/execution_payload_bid.yaml\nThis endpoint does not allow the validator to tweak the values  and `execution_payment` part of the bid, so I doubt any external builder will ever use this endpoint. I'm fine by it cause our internal implementation will make the beacon set these values, but just flagging this that it sounds to me this endpoint will be mostly useless",
+      "createdAt": "2026-03-31T15:14:56.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@1386598056320831509> I think we should move that to the builder namespace and make it useful for builders (and CLs that wanna act as a builder)",
+      "createdAt": "2026-03-31T15:16:55.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i doubt an external builder will use that endpoint tbh. An external builder would likely create the bid themselves, sign it, then use an endpoint to create the envelope, sign the envelope and then use an endpoint to publish the envelope to the n/w",
+      "createdAt": "2026-03-31T18:00:26.300000+00:00",
+      "attachments": []
+    }
+  ]
+}

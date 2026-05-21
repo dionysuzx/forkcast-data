@@ -1,0 +1,408 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-05-12",
+  "messageCount": 49,
+  "sourceHash": "7ff22987b56edf3990249daae2ea68e01886f5a9d8576403eff249a0193a678c",
+  "searchText": "there's a kurtosis in https://github.com/ethereum/consensus-specs/pull/4630 – please lmk when can add a branch to it from another client, would love to get it stable <@412614104222531604>, I've pushed a fix to `glamsterdam-devnet-2` and `glamsterdam-devnet-3` branches yesterday, however, `grandine-geth-1` did not restart on `glamsterdam-devnet-3`. Ah does that have to do with the byRange Teku issues that we discussed in ACDT? Our checks while syncing payloads are quite simple, we only downscore if block's bid is based on a full payload and it doesn't exist https://gist.github.com/StefanBratanov/a268520a28040e6bfbcfd7393f6455d8 I added code that checks if the same peer returned blocks and payloads and to penalize if they aren't compatible in any way. But the problem is that it seems that I screwed up and even if the peer told me that can't give me payloads, I penalize him for giving me blocks Teku often times does not serve us the payloads, so we penalize it instead of requesting the payloads from somoeone else One could argue that our behavior is correct though: if you return blocks then you should also return the payloads. The problem is that the two calls are independent instead of being one, so the actual correct behavior is to not penalize you if you do not reply to one of them I think you should penalise us if we are not serving canonical payloads to be fair yeah but the problem is that the call is separated if I send you a call to get the payloads and you don't reply then that should be an ignore if you're for example rate limited if it were a unique call then it would be simpler... every single day since Svalbard I regret not fighting stronger for 8237 essentially ALL problems we see on devnets steer from peering and boil down to syncing complexity it was utterly stupid not to bag 8237 with 5094 rolling out the new image ah I see, yes, if we include rate limiting in the scenario, it becomes a bit of a mess, we keep separate rate limit with the same initial number for blocks and payloads, so it's unlikely we return partial responses from one if the other one returns everything ~~epbs~~ 8237 solves this I'm not sure how I feel about potentially bringing back 8237 into discussion now lol we consistently see from Teku that you give us blocks and you give us zero payloads. Is this correct <@363800010518822915> ? I saw this a few times at least shuoldn't we have some kinda checks for this stuff btw ? I feel like it should be easily testable testing p2p scoring has been pretty hard since genesis, and these are typically the hardest things to diagnose. Specially cause a client that is \"doing well on tesnet\" could be simply accepting anything and just trusting that peers won't be malicious. But then if we all do this and there's an actual attack on production we are fucked AFAIK we do not test malicious p2p behavior, or at least we do not do it broadly I mean it would still be valuable to test if happy cases working e.g I'm asking for A does peer give me A? right now it seems like teku is not even giving you A, so it should be a super easy test but that's the reason why happy case testing is not even possible: if I just disable any downscoring I'll be completely broken but I will pass any test in the happy case you think teku is downscoring prysm and thats why its giving you an empty payload? I think we should. It’s a great idea to cut the largest part of beacon blocks, the execution payload, which will only grow with higher gas limits, out of CL sync. At the same time it's beneficial for a post-zkEVM world and might be needed anyway in the future. Can we discuss 8237 again on Thursday's call? I remember Lighthouse mentioned that it's not super simple to implement for them - would be great to get an update on that. Same applies for Nimbus. For Teku and Lodestar I forgot what they thought about it. cc <@&1417820113981145228> we also need EL right? On the EL it's a rather uncomplicated change, at least judging from the [specs-side](https://github.com/ethereum/execution-specs/pull/2770/changes/0710d41783c2a3aeed10077d2540ca9888a3f294), but yeah, would def need discussion too. I think it would be useful to have some sort of debugging tool to investigating scoring etc across devnets, in Teku we have API exposing the scores https://consensys.github.io/teku/#tag/Teku/operation/getPeersScore i vibe coded a jenky UI but havne't had time to put much work into it No Nimbus 😑 re 8237 discussion, I recall some mention of removal of CL serving of payloads? but I don't see that in the EIP. Was the EIP scope reduced to just the addition of the accumulator? care to share? I can probably vibe something built on top of it https://github.com/OffchainLabs/prysm/compare/peer-scores-ui its only prysm specific though.. something more general and shareable btw diff implementations will be nice All, thoughts on adding this note? https://github.com/ethereum/consensus-specs/pull/5227 no, I never removed explicitly the API methods cause I didn't want to write up the API PR but that is the obvious intention of the EIP, I don't really care at all about that EIP if it doesn't come with the assumption that I do not need to ever again download payloads by range Im trying to test epbs related changes for rbuilder against glamsterdam-devnet-3 and have been running into the following issue since yesterday. Not really sure why it's being caused, but might be a bug in cl. Basically my cl-3 always falls behind and then gets stuck on a single slot. It stops importing self built blocks. Pre gloas everything is working fine, cl-1, cl-2, cl-3 all peer and follow the chain. Once gloas activates and rbuilder starts sending out bids, cl-3 gradually falls behind (proposers fall back to self build because rbuilders bids aren't being selected, possibly because the bid are invalid/not competitive) and then gets stuck on slot 147 forever. I make the builder deposit transaction somewhere in epoch 4 images i am using: ``` - el_type: reth el_image: ethpandaops/reth:bal-devnet-6 cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:bharath-123-buildoor-apis cl_extra_params: - --prepare-all-payloads vc_type: prysm vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-3 count: 2 ``` <@1386598056320831509> that's your branch it seems LH doesn’t have a problem supporting this. It actually makes our life easier. we were just convinced that ELs want to get rid of their networking layer eventually and this would prevent that from happening is this really reasonable assumption? lol maybe im naive Right now, and in the near future, I don't see why ELs would want that, esp not for sync where ELs are just about to ship a new snap sync version. <@520034910149410861> (and cc <@363800010518822915> that is suffering with this on spec tests and <@504202741933932544> that may have already implemented this). I am struggling to see how to deal with proposer boost and the builder unblinding feature you added Francesco. In particular I am worried about weakening the phase 0 clause: ``` # [IGNORE] The block is the first block with valid signature received for the proposer for the slot if (block.proposer_index, block.slot) in seen.proposer_slots: raise GossipIgnore(\"block is not the first valid block for this proposer and slot\") ``` Keeping track of equivocations seen over gossip will require us to validate signatures on possible garbage that may arrive after we've already seen the first block. And moreover will require us to check on every repeated message for differences in the block. Most of the latter problem is probably already covered by libp2p that will not even let through messages with the same hash, but still we would be required to validate the HTR and check it's different. I'm just asking for advice since I am not sure how to proceed. There does not seem to be any approach better than the naive one of simply validate these during the early window (only early equivocations and for the current slot matter) and just cache a boolean if we catch one with a valid signature.",
+  "excerpts": [
+    {
+      "author": "etan_status",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there's a kurtosis in https://github.com/ethereum/consensus-specs/pull/4630 – please lmk when can add a branch to it from another client, would love to get it stable",
+      "createdAt": "2026-05-12T07:03:31.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "povilas8490",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@412614104222531604>, I've pushed a fix to `glamsterdam-devnet-2` and `glamsterdam-devnet-3` branches yesterday, however, `grandine-geth-1` did not restart on `glamsterdam-devnet-3`.",
+      "createdAt": "2026-05-12T07:23:38.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah does that have to do with the byRange Teku issues that we discussed in ACDT? Our checks while syncing payloads are quite simple, we only downscore if block's bid is based on a full payload and it doesn't exist https://gist.github.com/StefanBratanov/a268520a28040e6bfbcfd7393f6455d8",
+      "createdAt": "2026-05-12T13:19:14.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I added code that checks if the same peer returned blocks and payloads and to penalize if they aren't compatible in any way. But the problem is that it seems that I screwed up and even if the peer told me that can't give me payloads, I penalize him for giving me blocks",
+      "createdAt": "2026-05-12T13:24:55.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Teku often times does not serve us the payloads, so we penalize it instead of requesting the payloads from somoeone else",
+      "createdAt": "2026-05-12T13:25:16.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "One could argue that our behavior is correct though: if you return blocks then you should also return the payloads. The problem is that the two calls are independent instead of being one, so the actual correct behavior is to not penalize you if you do not reply to one of them",
+      "createdAt": "2026-05-12T13:26:19.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think you should penalise us if we are not serving canonical payloads to be fair",
+      "createdAt": "2026-05-12T13:50:08.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah but the problem is that the call is separated",
+      "createdAt": "2026-05-12T13:52:51.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if I send you a call to get the payloads and you don't reply then that should be an ignore",
+      "createdAt": "2026-05-12T13:53:07.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if you're for example rate limited",
+      "createdAt": "2026-05-12T13:53:14.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if it were a unique call then it would be simpler... every single day since Svalbard I regret not fighting stronger for 8237",
+      "createdAt": "2026-05-12T13:53:48.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "essentially ALL problems we see on devnets steer from peering and boil down to syncing complexity",
+      "createdAt": "2026-05-12T13:54:07.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it was utterly stupid not to bag 8237 with 5094",
+      "createdAt": "2026-05-12T13:54:31.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "rolling out the new image",
+      "createdAt": "2026-05-12T13:59:54.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah I see, yes, if we include rate limiting in the scenario, it becomes a bit of a mess, we keep separate rate limit with the same initial number for blocks and payloads, so it's unlikely we return partial responses from one if the other one returns everything",
+      "createdAt": "2026-05-12T14:07:11.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "~~epbs~~ 8237 solves this",
+      "createdAt": "2026-05-12T14:30:15.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm not sure how I feel about potentially bringing back 8237 into discussion now lol",
+      "createdAt": "2026-05-12T14:30:52.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we consistently see from Teku that you give us blocks and you give us zero payloads. Is this correct <@363800010518822915> ?",
+      "createdAt": "2026-05-12T14:39:16.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I saw this a few times at least",
+      "createdAt": "2026-05-12T14:39:21.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "shuoldn't we have some kinda checks for this stuff btw ?",
+      "createdAt": "2026-05-12T14:39:51.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I feel like it should be easily testable",
+      "createdAt": "2026-05-12T14:40:22.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "testing p2p scoring has been pretty hard since genesis, and these are typically the hardest things to diagnose. Specially cause a client that is \"doing well on tesnet\" could be simply accepting anything and just trusting that peers won't be malicious. But then if we all do this and there's an actual attack on production we are fucked",
+      "createdAt": "2026-05-12T14:42:15.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "AFAIK we do not test malicious p2p behavior, or at least we do not do it broadly",
+      "createdAt": "2026-05-12T14:42:43.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I mean it would still be valuable to test if happy cases working",
+      "createdAt": "2026-05-12T14:42:47.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "e.g \n\nI'm asking for A does peer give me A?",
+      "createdAt": "2026-05-12T14:42:57.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "right now it seems like teku is not even giving you A, so it should be a super easy test",
+      "createdAt": "2026-05-12T14:43:16.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but that's the reason why happy case testing is not even possible: if I just disable any downscoring I'll be completely broken but I will pass any test in the happy case",
+      "createdAt": "2026-05-12T14:43:25.856000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you think teku is downscoring prysm and thats why its giving you an empty payload?",
+      "createdAt": "2026-05-12T14:44:20.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we should. It’s a great idea to cut the largest part of beacon blocks, the execution payload, which will only grow with higher gas limits, out of CL sync. At the same time it's beneficial for a post-zkEVM world and might be needed anyway in the future.",
+      "createdAt": "2026-05-12T15:13:19.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Can we discuss 8237 again on Thursday's call?\nI remember Lighthouse mentioned that it's not super simple to implement for them - would be great to get an update on that. Same applies for Nimbus. For Teku and Lodestar I forgot what they thought about it.\ncc <@&1417820113981145228>",
+      "createdAt": "2026-05-12T15:17:23.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we also need EL right?",
+      "createdAt": "2026-05-12T15:21:11.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "On the EL it's a rather uncomplicated change, at least judging from the [specs-side](https://github.com/ethereum/execution-specs/pull/2770/changes/0710d41783c2a3aeed10077d2540ca9888a3f294), but yeah, would def need discussion too.",
+      "createdAt": "2026-05-12T15:26:30.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think it would be useful to have some sort of debugging tool to investigating scoring etc across devnets, in Teku we have API exposing the scores https://consensys.github.io/teku/#tag/Teku/operation/getPeersScore",
+      "createdAt": "2026-05-12T15:52:33.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i vibe coded a jenky UI but havne't had time to put much work into it",
+      "createdAt": "2026-05-12T16:04:04.942000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "42214f1dac3042f93de3853a784a0f17823cd9ae8da5bab65a40d798b1a7db00"
+        }
+      ]
+    },
+    {
+      "author": "tomi0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No Nimbus 😑",
+      "createdAt": "2026-05-12T16:05:49.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "re 8237 discussion, I recall some mention of removal of CL serving of payloads? but I don't see that in the EIP.\nWas the EIP scope reduced to just the addition of the accumulator?",
+      "createdAt": "2026-05-12T16:39:32.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "care to share?",
+      "createdAt": "2026-05-12T16:58:05.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I can probably vibe something built on top of it",
+      "createdAt": "2026-05-12T16:58:18.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/OffchainLabs/prysm/compare/peer-scores-ui its only prysm specific though.. something more general and shareable btw diff implementations will be nice",
+      "createdAt": "2026-05-12T17:05:33.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "All, thoughts on adding this note?\nhttps://github.com/ethereum/consensus-specs/pull/5227",
+      "createdAt": "2026-05-12T17:56:18.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, I never removed explicitly the API methods cause I didn't want to write up the API PR",
+      "createdAt": "2026-05-12T18:11:29.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but that is the obvious intention of the EIP, I don't really care at all about that EIP if it doesn't come with the assumption that I do not need to ever again download payloads by range",
+      "createdAt": "2026-05-12T18:12:03.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "721orbit",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Im trying to test epbs related changes for rbuilder against glamsterdam-devnet-3 and have been running into the following issue since yesterday. Not really sure why it's being caused, but might be a bug in cl.\n  \nBasically my cl-3 always falls behind and then gets stuck on a single slot. It stops importing self built blocks. Pre gloas everything is working fine, cl-1, cl-2, cl-3 all peer and follow the chain. Once gloas activates and rbuilder starts sending out bids, cl-3 gradually falls behind (proposers fall back to self build because rbuilders bids aren't being selected, possibly because the bid are invalid/not competitive) and then gets stuck on slot 147 forever.\n\nI make the builder deposit transaction somewhere in epoch 4\n\nimages i am using:\n```\n  - el_type: reth\n    el_image: ethpandaops/reth:bal-devnet-6                                                                                 \n    cl_type: prysm                                                                                                               \n    cl_image: ethpandaops/prysm-beacon-chain:bharath-123-buildoor-apis                                                                      \n    cl_extra_params:                                                                                                             \n      - --prepare-all-payloads                                                                                                   \n    vc_type: prysm                                                                                                               \n    vc_image: ethpandaops/prysm-validator:glamsterdam-devnet-3 \n    count: 2   \n```",
+      "createdAt": "2026-05-12T18:50:41.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@1386598056320831509> that's your branch it seems",
+      "createdAt": "2026-05-12T19:34:53.307000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "LH doesn’t have a problem supporting this. It actually makes our life easier. we were just convinced that ELs want to get rid of their networking layer eventually and this would prevent that from happening",
+      "createdAt": "2026-05-12T19:37:42.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is this really reasonable assumption?",
+      "createdAt": "2026-05-12T20:09:04.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lol maybe im naive",
+      "createdAt": "2026-05-12T20:32:08.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Right now, and in the near future, I don't see why ELs would want that, esp not for sync where ELs are just about to ship a new snap sync version.",
+      "createdAt": "2026-05-12T22:37:16.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@520034910149410861> (and cc <@363800010518822915> that is suffering with this on spec tests and <@504202741933932544> that may have already implemented this). I am struggling to see how to deal with proposer boost and the builder unblinding feature you added Francesco. In particular I am worried about weakening the phase 0 clause:\n```\n    # [IGNORE] The block is the first block with valid signature received for the proposer for the slot\n    if (block.proposer_index, block.slot) in seen.proposer_slots:\n        raise GossipIgnore(\"block is not the first valid block for this proposer and slot\")\n```\nKeeping track of equivocations seen over gossip will require us to validate signatures on possible garbage that may arrive after we've already seen the first block. And moreover will require us to check on every repeated message for differences in the block. Most of the latter problem is probably already covered by libp2p that will not even let through messages with the same hash, but still we would be required to validate the HTR and check it's different. \n\nI'm just asking for advice since I am not sure how to proceed. There does not seem to be any approach better than the naive one of simply validate these during the early window (only early equivocations and for the current slot matter) and just cache a boolean if we catch one with a valid signature.",
+      "createdAt": "2026-05-12T23:58:29.016000+00:00",
+      "attachments": []
+    }
+  ]
+}

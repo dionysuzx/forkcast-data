@@ -1,0 +1,482 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-13",
+  "messageCount": 59,
+  "sourceHash": "d9c4925ed760a8d7d2f52608a877b1a0d654cef57f9580729204826dbf7f323e",
+  "searchText": "with the current gloas spec, `ForkChoiceNode` is mandatory because the same block root addresses two physically distinct states `(block_states[root] vs payload_states[root])` — fork-choice has to be able to express which state a head points to. but with https://github.com/ethereum/consensus-specs/pull/5094 do we still need `ForkChoiceNode` to carry `payload_status`? I don't see any consumers of it in the spec, `payload_states` is removed if we also remove `payload_status` in `ForkChoiceNode`, the forkchoice spec is a lot simplified and much more closer to fulu Fork choice still needs a way to express payload status. Without `ForkChoiceNode` I'm not sure it would be able to do so. Where would ptc votes and attestation payload weights land? I'm seeing `is_supporting_vote` `get_node_children` and `get_payload_status_tiebreaker` read it just to name a few it's confusing to me all of that are used for `get_head()` and `get_head()` is used for head vote, `payload_status` is used for `attData.index == 1` for skipped slot then it's used inside `get_head()` again so the only function is `get_head()` in term of lodestar's implementation, this design maps to 3 different variants with same `blockRoot + stateRoot`. In the current gloas it makes a lot of sense, I'm just not sure after this PR is applied there could be some use cases other than `get_head()` that I'm missing? if not it opens a way for simplification in `get_proposer_head` via `is_head_weak` and `is_parent_strong` as well. but yeah maybe there is a way to simplify, though I think the concept of payload status still needs to live somewhere in fork choice yes `get_proposer_head` uses `is_head_weak` which uses `get_attestation_score` but it's not needed in this context, it should work the same to fulu, there is no need to separate FULL vs EMPTY vs PENDING in this specific scenario I think a way to look at this forkchoice design is start from fulu instead of the current gloas to make sure we don't overcomplicate things and introduce technical debt for future forks I share confusion. But in my mental model, don't we need anyway to handle votes for the 3 variants? FC must always have to count votes for lagging validators (not seeing block at N and voting for N-1 root with index) voting for FULL and EMPTY and count votes for the non lagging ones voting for PENDING. And those votes can be seen scattered along a 64 slots moving window. Am I correct? also not just lagging validators but missed slots as well sure, I was just emphasizing the non perfect-hipothetical case I think now that we have single phase stf, we can track pending/full via parent payload hash and payload hash. \"full\" means the parent payload hash is N-1 payload hash \"empty\" means parent payload hash is N-2 payload hash This is the right way of thinking, instead of focusing on the python implementation aspects of it, one should think on the actual spec that Python is trying to express. ForkchoiceNode is an old artifact of how I chose to implement this in Prysm years ago. I'm pretty sure a gazillion different constructions would work just the same and some may be better adapted to each language. The fact of the matter is that forkchoice needs to pick between empty or full branches, choose whatever you want to use to make that distinction. Today forkchoice uses that construction of ForkChoiceNode to avoid duplication This PR does not change forkchoice in any way, the dissapeareance of the intermediate payload state is irrelevant to forkchoice. I think stf is orthogonal to FC. As Potuz just said, you just have to have a data structure supporting the vote counts of this combinations. and \"pending\" is a legit third variant. the absence of an intermediate state has not changed the FC by any means to me. got a branch for it? I feel like this is epbs-devnet-2 terretory I think we can make the call on this today on acdt but based on what I have read above, it seems like most client teams are strongly in favor of this change. Yes I agree. I'll push once I get Infront of computer Is there an easy way to trigger execution request through kurtosis? <@592004585506340885> if we do decide in favor of 5094, how soon can we get a new cl spec version out? you want automated way, or manual? ```yaml additional_services: - assertoor assertoor_params: run_stability_check: false run_block_proposal_check: false tests: - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/pectra-dev/kurtosis/bls-changes.yaml\", config: { targetAddress: \"0x332E43696A505EF45b9319973785F837ce5267b9\" } } - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/gloas-support/playbooks/gloas-dev/builder-lifecycle.yaml\" } ``` this should have some bls changes and builder lifecycle if you want manual you can create withdrawal credential 0x02 and use dora's webui to trigger partial withdrawals running this test should fill the Execution Requests with deposits, consolidation- & withdrawalrequests: ``` - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/pectra-dev/kurtosis/fillup-all-el-queues.yaml\" } ``` I think consolidations will require a specific network param tho due to min eth it's only filling the queue. the requests are invalid. but shouldn't matter much for testing? https://github.com/OffchainLabs/prysm/pull/16658 If we decide to merge this, I think we can get a release out in < 48 hours. I would like to (1) merge the PR, (2) generate nightly reference tests for it, and (3) confirm that one or more clients pass the updated tests. Then, if successful, we'll make a release. Sorry, the end of the breakout call was very rushed. If there are any concerns/comments with the timeline for merging that PR & making a release, I'd be happy to chat about it here. I will post a document with other wins we get from this change + trade-offs later today/tomorrow, it seemed though that everyone in the call had a good understanding of those already I believe we need a release before passing tests :). I will focus on reviewing the PR and we should all do that, but please lets not rush on merging it until we've covered all subtleties. Yeah I won't rush it. But it would be nice if a single client passed tests, as a sanity check. if you give me the nightly reference, i can see if my draft branch passes it, but even prysm passes it, it's not a signal to rush it I have a question, the description of `should_extend_payload` says `If the blob data is not available, we do not extend it`. but that is not reflected in the method as below.: ```python def should_extend_payload(store: Store, root: Root) -> bool: proposer_root = store.proposer_boost_root return ( (is_payload_timely(store, root) and is_payload_data_available(store, root)) or proposer_root == Root() or store.blocks[proposer_root].parent_root != root or is_parent_node_full(store, store.blocks[proposer_root]) ) ``` We could have a case where the proposer root beacon block extends on the parent block even if the blob data is not available and `should_extend_payload` will return true? If the blob data is not available then you can't even sync the payload. so this function even gets reached One problem I noticed on the PR is what would happen when there are reorgs. The requests need to be taken from the envelope. A natural thing would be to store the blinded envelope with requests, but this is very wasteful as the envelope and the block will store twice the requests. What are clients doing about this? We are planning to store blinded payload with full requests. We could blind even the requests on finalization to save space but it will complicate things #5094 review lounge yeah, but this sucks badly, that was going to be our approach, but I already see myself complaining to Terence 🙂 A cleaner approach is to add a separate db column with requests only, and have the envelope stored as fully blinded. Than just prune the request colmun on finalization. Or prune requests as soon as we write a child block containing those requests? Well it won't work for equivocating blocks... ~~Well if the key is the bid root, it should be fine~~ Storing a full blinded version will require both querying the el an also resolve the next beaconblock to get the requests when serving rpc... I'd probably go for avcepting data duplication for now ... Yeah serving payloads by range is horrible if we don't save them both I am just thinking if we can remove attestation's data.index mechanism if we delay processing payload. I think a beacon block already indicates whether its parent is full or empty, so attesting to it already express attester's view on payload availability. I am not sure if there will be any consequence if we get rid of data.index = [0, 1] thing. Should we preserve this signal? cc. <@755590043632140352> <@520034910149410861> Nah this is wrong. When you are in the committee of slot N+1 and you don't like the block of N+1, you want to vote for, say N as head. You *must* signal if you are voting for (N, full) or (N, empty) and the root of N does not tell you if it is full or empty was curious to get some mainnet data on this and sampled the last 2 weeks worth of blocks to get a better sense of whether or not adding `parent_execution_requests` to the block is big deal, some data points worth noting - 91.2% of blocks have zero execution requests - the average is ~29 bytes/block - the worse case was ~14 KB extra data (74 deposits in one block) so I do think this is almost negligible, especially in terms of extra storage, but definitely worth to analyse further, also wrt to what the limiting factor here, I doubt we can even reach the current ssz limit without bumping the gas limit? The average case is not the problem. The issue is if a builder can cause an ex ante for example by including a ton of invalid requests. It's free for them and broadcast is not an issue for the Payload, but it's costly to the next proposer can that be prevented by having a gossip check against the root in the bid? The root can be fine It's perfectly fine to gossip the max number of deposit requests that are crap Builders can do this today but it hurts them Whether with your PR they'll hurt the next proposer <@412614104222531604> what's stopping us from running devnet-2 as Glamsterdam 0 with a previous stable branch of Bal? We could target that for first day interop with Kurtosis runs the days leading to it",
+  "excerpts": [
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "with the current gloas spec, `ForkChoiceNode` is mandatory because the same block root addresses two physically distinct states `(block_states[root] vs payload_states[root])` — fork-choice has to be able to express which state a head points to.\nbut with https://github.com/ethereum/consensus-specs/pull/5094 do we still need `ForkChoiceNode` to carry `payload_status`? I don't see any consumers of it in the spec, `payload_states` is removed\nif we also remove `payload_status` in `ForkChoiceNode`, the forkchoice spec is a lot simplified and much more closer to fulu",
+      "createdAt": "2026-04-13T03:51:38.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Fork choice still needs a way to express payload status. Without `ForkChoiceNode` I'm not sure it would be able to do so. Where would ptc votes and attestation payload weights land?\n\nI'm seeing `is_supporting_vote` `get_node_children` and\n `get_payload_status_tiebreaker`  read it just to name a few",
+      "createdAt": "2026-04-13T05:31:27.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's confusing to me\nall of that are used for `get_head()`\nand `get_head()` is used for head vote, `payload_status` is used for `attData.index == 1` for skipped slot\nthen it's used inside `get_head()` again\nso the only function is `get_head()`\n\nin term of lodestar's implementation, this design maps to 3 different variants with same `blockRoot + stateRoot`. In the current gloas it makes a lot of sense, I'm just not sure after this PR is applied\n\nthere could be some use cases other than `get_head()` that I'm missing? if not it opens a way for simplification",
+      "createdAt": "2026-04-13T06:25:25.447000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in `get_proposer_head` via `is_head_weak` and `is_parent_strong` as well. but yeah maybe there is a way to simplify, though I think the concept of payload status still needs to live somewhere in fork choice",
+      "createdAt": "2026-04-13T06:32:56.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes `get_proposer_head` uses `is_head_weak` which uses `get_attestation_score`\nbut it's not needed in this context, it should work the same to fulu, there is no need to separate FULL vs EMPTY vs PENDING in this specific scenario",
+      "createdAt": "2026-04-13T06:44:23.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think a way to look at this forkchoice design is start from fulu instead of the current gloas to make sure we don't overcomplicate things and introduce technical debt for future forks",
+      "createdAt": "2026-04-13T06:45:51.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I share confusion.\nBut in my mental model, don't we need anyway to handle votes for the 3 variants? FC must always have to count votes for lagging validators (not seeing block at N and voting for N-1 root with index) voting for FULL and EMPTY and count votes for the non lagging ones voting for PENDING.  And those votes can be seen scattered along a 64 slots moving window.\nAm I correct?",
+      "createdAt": "2026-04-13T09:22:47.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also not just lagging validators but missed slots as well",
+      "createdAt": "2026-04-13T09:40:28.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "sure, I was just emphasizing the non perfect-hipothetical case",
+      "createdAt": "2026-04-13T09:42:50.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think now that we have single phase stf, we can track pending/full via parent payload hash and payload hash.\n\"full\" means the parent payload hash is N-1 payload hash\n\"empty\" means parent payload hash is N-2 payload hash",
+      "createdAt": "2026-04-13T12:36:47.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is the right way of thinking, instead of focusing on the python implementation aspects of it, one should think on the actual spec that Python is trying to express. ForkchoiceNode is an old artifact of how I chose to implement this in Prysm years ago. I'm pretty sure a gazillion different constructions would work just the same and some may be better adapted to each language. The fact of the matter is that forkchoice needs to pick between empty or full branches, choose whatever you want to use to make that distinction. Today forkchoice uses that construction of ForkChoiceNode to avoid duplication",
+      "createdAt": "2026-04-13T12:47:36.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This PR does not change forkchoice in any way, the dissapeareance of the intermediate payload state is irrelevant to forkchoice.",
+      "createdAt": "2026-04-13T12:51:23.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think stf is orthogonal to FC.\nAs Potuz just said, you just have to have a data structure supporting the vote counts of this combinations. and \"pending\" is a legit third variant.\nthe absence of an intermediate state has not changed the FC by any means to me.",
+      "createdAt": "2026-04-13T13:02:04.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "got a branch for it?",
+      "createdAt": "2026-04-13T13:28:16.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I feel like this is epbs-devnet-2 terretory",
+      "createdAt": "2026-04-13T13:28:25.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we can make the call on this today on acdt",
+      "createdAt": "2026-04-13T13:28:31.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but based on what I have read above, it seems like most client teams are strongly in favor of this change.",
+      "createdAt": "2026-04-13T13:28:48.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes I agree. I'll push once I get Infront of computer",
+      "createdAt": "2026-04-13T13:31:01.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is there an easy way to trigger execution request through kurtosis?",
+      "createdAt": "2026-04-13T13:31:25.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@592004585506340885> if we do decide in favor of 5094, how soon can we get a new cl spec version out?",
+      "createdAt": "2026-04-13T13:31:32.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you want automated way, or manual?",
+      "createdAt": "2026-04-13T13:31:53.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```yaml\nadditional_services:\n  - assertoor\n\nassertoor_params:\n  run_stability_check: false\n  run_block_proposal_check: false\n  tests:\n    - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/pectra-dev/kurtosis/bls-changes.yaml\", config: { targetAddress: \"0x332E43696A505EF45b9319973785F837ce5267b9\" } }\n    - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/gloas-support/playbooks/gloas-dev/builder-lifecycle.yaml\" }\n```",
+      "createdAt": "2026-04-13T13:32:31.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this should have some bls changes and builder lifecycle",
+      "createdAt": "2026-04-13T13:32:40.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if you want manual you can create withdrawal credential 0x02 and use dora's webui to trigger partial withdrawals",
+      "createdAt": "2026-04-13T13:33:04.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "running this test should fill the Execution Requests with deposits, consolidation- & withdrawalrequests:\n```\n    - { file: \"https://raw.githubusercontent.com/ethpandaops/assertoor/refs/heads/master/playbooks/pectra-dev/kurtosis/fillup-all-el-queues.yaml\" }\n```",
+      "createdAt": "2026-04-13T13:34:47.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think consolidations will require a specific network param tho",
+      "createdAt": "2026-04-13T13:35:04.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "due to min eth",
+      "createdAt": "2026-04-13T13:35:13.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's only filling the queue.  the requests are invalid.  but shouldn't matter much for testing?",
+      "createdAt": "2026-04-13T13:35:33.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/OffchainLabs/prysm/pull/16658",
+      "createdAt": "2026-04-13T13:48:15.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we decide to merge this, I think we can get a release out in < 48 hours. I would like to (1) merge the PR, (2) generate nightly reference tests for it, and (3) confirm that one or more clients pass the updated tests. Then, if successful, we'll make a release.",
+      "createdAt": "2026-04-13T14:04:26.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry, the end of the breakout call was very rushed. If there are any concerns/comments with the timeline for merging that PR & making a release, I'd be happy to chat about it here.",
+      "createdAt": "2026-04-13T15:03:58.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I will post a document with other wins we get from this change + trade-offs later today/tomorrow, it seemed though that everyone in the call had a good understanding of those already",
+      "createdAt": "2026-04-13T15:08:36.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I believe we need a release before passing tests :). I will focus on reviewing the PR and we should all do that, but please lets not rush on merging it until we've covered all subtleties.",
+      "createdAt": "2026-04-13T15:11:48.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I won't rush it. But it would be nice if a single client passed tests, as a sanity check.",
+      "createdAt": "2026-04-13T15:15:05.192000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if you give me the nightly reference, i can see if my draft branch passes it, but even prysm passes it, it's not a signal to rush it",
+      "createdAt": "2026-04-13T15:23:38.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have a question, the description of `should_extend_payload` says `If the blob\ndata is not available, we do not extend it`. but that is not reflected in the method as below.:\n```python\ndef should_extend_payload(store: Store, root: Root) -> bool:\n    proposer_root = store.proposer_boost_root\n    return (\n        (is_payload_timely(store, root) and is_payload_data_available(store, root))\n        or proposer_root == Root()\n        or store.blocks[proposer_root].parent_root != root\n        or is_parent_node_full(store, store.blocks[proposer_root])\n    )\n```\nWe could have a case where the proposer root beacon block extends on the parent block even if the blob data is not available and `should_extend_payload` will return true?",
+      "createdAt": "2026-04-13T17:07:28.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If the blob data is not available then you can't even sync the payload.",
+      "createdAt": "2026-04-13T17:36:30.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so this function even gets reached",
+      "createdAt": "2026-04-13T17:36:54.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "One problem I noticed on the PR is what would happen when there are reorgs. The requests need to be taken from the envelope. A natural thing would be to store the blinded envelope with requests, but this is very wasteful as the envelope and the block will store twice the requests. What are clients doing about this?",
+      "createdAt": "2026-04-13T17:55:47.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We are planning to store blinded payload with full requests. We could blind even the requests on finalization to save space but it will complicate things",
+      "createdAt": "2026-04-13T18:04:50.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "#5094 review lounge",
+      "createdAt": "2026-04-13T18:12:43.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, but this sucks badly, that was going to be our approach, but I already see myself complaining to Terence 🙂",
+      "createdAt": "2026-04-13T18:42:45.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "A cleaner approach is to add a separate db column with requests only, and have the envelope stored as fully blinded. Than just prune the request colmun on finalization.",
+      "createdAt": "2026-04-13T19:06:55.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Or prune requests as soon as we write a child block containing those requests?",
+      "createdAt": "2026-04-13T19:08:26.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Well it won't work for equivocating blocks...",
+      "createdAt": "2026-04-13T19:09:11.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "~~Well if the key is the bid root, it should be fine~~",
+      "createdAt": "2026-04-13T19:12:49.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Storing a full blinded version will require both querying the el an also resolve the next beaconblock to get the requests  when serving rpc... I'd probably go for avcepting data duplication for now ...",
+      "createdAt": "2026-04-13T19:46:10.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah serving payloads by range is horrible if we don't save them both",
+      "createdAt": "2026-04-13T20:10:06.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nc1234",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am just thinking if we can remove attestation's data.index mechanism if we delay processing payload. I think a beacon block already indicates whether its parent is full or empty, so attesting to it already express attester's view on payload availability. I am not sure if there will be any consequence if we get rid of data.index = [0, 1] thing. Should we preserve this signal? cc. <@755590043632140352> <@520034910149410861>",
+      "createdAt": "2026-04-13T20:54:05.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Nah this is wrong. When you are in the committee of slot N+1 and you don't like the block of N+1, you want to vote for, say N as head. You *must* signal if you are voting for (N, full) or (N, empty) and the root of N does not tell you if it is full or empty",
+      "createdAt": "2026-04-13T20:56:21.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "was curious to get some mainnet data on this and sampled the last 2 weeks worth of blocks to get a better sense of whether or not adding `parent_execution_requests` to the block is big deal, some data points worth noting\n- 91.2% of blocks have zero execution requests\n- the average is ~29 bytes/block\n- the worse case was ~14 KB extra data (74 deposits in one block)\nso I do think this is almost negligible, especially in terms of extra storage, but definitely worth to analyse further, also wrt to what the limiting factor here, I doubt we can even reach the current ssz limit without bumping the gas limit?",
+      "createdAt": "2026-04-13T21:23:55.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The average case is not the problem. The issue is if a builder can cause an ex ante for example by including a ton of invalid requests. It's free for them and broadcast is not an issue for the Payload, but it's costly to the next proposer",
+      "createdAt": "2026-04-13T21:25:45.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can that be prevented by having a gossip check against the root in the bid?",
+      "createdAt": "2026-04-13T21:26:30.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The root can be fine",
+      "createdAt": "2026-04-13T22:10:35.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's perfectly fine to gossip the max number of deposit requests that are crap",
+      "createdAt": "2026-04-13T22:10:57.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Builders can do this today but it hurts them",
+      "createdAt": "2026-04-13T22:11:07.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Whether with your PR they'll hurt the next proposer",
+      "createdAt": "2026-04-13T22:11:21.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@412614104222531604> what's stopping us from running devnet-2 as Glamsterdam 0 with a previous stable branch of Bal?",
+      "createdAt": "2026-04-13T22:20:42.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We could target that for first day interop with Kurtosis runs the days leading to it",
+      "createdAt": "2026-04-13T22:21:16.334000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "channel": "block-access-lists",
+  "date": "2026-04-17",
+  "messageCount": 26,
+  "sourceHash": "501af8c76e778b3e72141156455b1aa07df714dcc421200414728b52d1e8ed02",
+  "searchText": "Hi, thanks - I understand that the block will be rejected once the BAL is found invalid. My question is more about how the validator actually detects this mismatch efficiently without losing the performance benefits of BAL. As per the EIP, the validator needs to execute the block, track actual accesses, regenerate the BAL, and compare it with the proposer-provided BAL. But in an adversarial case where a dependency is missing in BAL (e.g., two transactions actually touch the same slot but are declared independent), this mismatch is only discovered during execution. So I’m trying to understand the intended model here: Does the validator need to execute transactions in a safe way (sequentially or with conflict detection) to correctly derive the BAL? If yes, doesn’t that limit using BAL for parallel execution before verification, since BAL itself may be wrong? If validators instead run transactions in parallel based on BAL, are they expected to detect conflicts during execution and discard/restart work when a mismatch is found? More generally, is BAL mainly intended for prefetching/IO and post-execution optimizations, while execution itself still needs to be conservative until BAL is verified? Trying to understand how validators can detect incorrect BALs while still benefiting from parallel execution, especially in adversarial cases. So there are 2 BALs, the one in the block that is passed to the EL over the engine api and then used for parallelization + calcularing the BAL hash in the block header, and then there is a \"virtual BAL\" that clients generate during execution themselves to be able to verify, the correctness of the given BAL by hashing the virtual BAL after execution and comparing the hash with the one in the block header. Thus, an invalid BAL would lead clients to parallelize txs wrongly (using the wrong state) but would also cause the whole block to turn invalid. On top of that, there are some \"tricks\" clients apply to be able to fail invalid blocks as early as possible, e.g. check if the items in the BAL are realistic/feasible to be accesses based on the available gas. This is further documented in this post: https://ethresear.ch/t/early-rejection-of-adversarial-bals/23995 An invalid BAL would never \"remove\" the execution parallelization, it would just cause execution to be done against the wrong state. ------------------ Something for <@&1460290804898861117> : With [eip-2780](https://eips.ethereum.org/EIPS/eip-2780) as it stands today (cfi; reducing tx base cost from 21k to 4.5k), and assuming a 300M gas limit, we exceed the `uint16` range used for `BlockAccessIndex` in eip-7928. Before eip-2780 there was enough headroom, but now it feels safer to move to `uint64` to avoid future issues. I drafted a PR [here](https://github.com/ethereum/EIPs/pull/11535). Related to this topic, I saw there're inconsistencies across clients: * geth, nethermind, erigon use `uint16` (should be updated to `uint64`) * besu and reth already use `uint64` (fine) On json-rpc: * geth omits empty change lists (e.g. `storage_changes`) * besu, erigon, reth, nethermind include empty lists * the execution-apis spec marks these fields as optional Open question: should we make those fields required (and update geth), keep them optional and accept divergence, or standardize on omitting empty lists (update all clients except geth)? Wouldn't be u32 be enough? Seems like a bit jump between 16 to 64 4.5M transactions per block seem unlikely Fair, esp as times come down yes, would be enough too, then all clients would need to change though. I think that's even better, and also future-proof. will update my msg and pr based on that Curious what other clients think. I don’t have a strong opinion on uint32 vs uint64, and it won’t matter much. The important part is moving away from uint16, which could become too small in the future. not sure what we want to use. in the description you are saying go to uint64 but in the PR modification I see uint32 Yeah, updated to uint32 based on marius input. I'm fine with either. Also updated the description of the PR now. I'd proposed we just go with uint32, having all clients update to that. I removed the hash from the header (the header itself doesn't exist in Gloas), can you check if this is a breaking change for you? Is there any reason to use u32 though? Only 64 bit architectures are supported by clients and often times operations with 64bit registers are more performant than 32, is this something that gets repeated a lot and it's a storage worry? Otherwise for computation we should default to 64bit on scalars Yeah, thanks, I reviewed it and looks good! The bal hash still exists on the EL side (derived from hashing the BAL after receiving it over the engine api) and we won't need it on the CL side, esp. now that the ExecutionPayloadHeader is about to be removed. Originally, I only put it there to follow the existing practices, but fine with it being removed now. bandwidth How many times this is repeated? But u32 isn't bigger than u64 in RLP, assuming numbers are limited by gas limit anyway, no? Oh in ssz it is smaller Interesting, yeah you're right I think I'm happy to go back to u64, which means only geth, nethermind and erigon must go from u16 to u32 and besu and reth can keep it as-is. I think nimbus had is at u64 already too, so, fine. Reverted back to u64, now. If there's a good reason to go with u32, happy to update again. I have a rpi 1st gen thats 32bit 😂 yes we are using u64 for RLP and we have the same rlp hash Me too! Until a couple of months ago it was my email server still",
+  "excerpts": [
+    {
+      "author": "sahil.sojitra",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hi, thanks - I understand that the block will be rejected once the BAL is found invalid.\n\nMy question is more about how the validator actually detects this mismatch efficiently without losing the performance benefits of BAL.\n\nAs per the EIP, the validator needs to execute the block, track actual accesses, regenerate the BAL, and compare it with the proposer-provided BAL. But in an adversarial case where a dependency is missing in BAL (e.g., two transactions actually touch the same slot but are declared independent), this mismatch is only discovered during execution.\n\nSo I’m trying to understand the intended model here:\n\nDoes the validator need to execute transactions in a safe way (sequentially or with conflict detection) to correctly derive the BAL?\nIf yes, doesn’t that limit using BAL for parallel execution before verification, since BAL itself may be wrong?\nIf validators instead run transactions in parallel based on BAL, are they expected to detect conflicts during execution and discard/restart work when a mismatch is found?\n\nMore generally, is BAL mainly intended for prefetching/IO and post-execution optimizations, while execution itself still needs to be conservative until BAL is verified?\n\nTrying to understand how validators can detect incorrect BALs while still benefiting from parallel execution, especially in adversarial cases.",
+      "createdAt": "2026-04-17T03:29:41.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So there are 2 BALs, the one in the block that is passed to the EL over the engine api and then used for parallelization + calcularing the BAL hash in the block header, and then there is a \"virtual BAL\" that clients generate during execution themselves to be able to verify, the correctness of the given BAL by hashing the virtual BAL after execution and comparing the hash with the one in the block header.\nThus, an invalid BAL would lead clients to parallelize txs wrongly (using the wrong state) but would also cause the whole block to turn invalid.\nOn top of that, there are some \"tricks\" clients apply to be able to fail invalid blocks as early as possible, e.g. check if the items in the BAL are realistic/feasible to be accesses based on the available gas. This is further documented in this post:\nhttps://ethresear.ch/t/early-rejection-of-adversarial-bals/23995\n\nAn invalid BAL would never \"remove\" the execution parallelization, it would just cause execution to be done against the wrong state.",
+      "createdAt": "2026-04-17T04:44:02.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "------------------\nSomething for <@&1460290804898861117> :\nWith [eip-2780](https://eips.ethereum.org/EIPS/eip-2780) as it stands today (cfi; reducing tx base cost from 21k to 4.5k), and assuming a 300M gas limit, we exceed the `uint16` range used for `BlockAccessIndex` in eip-7928.\nBefore eip-2780 there was enough headroom, but now it feels safer to move to `uint64` to avoid future issues.\n\nI drafted a PR [here](https://github.com/ethereum/EIPs/pull/11535).\n\nRelated to this topic, I saw there're inconsistencies across clients:\n* geth, nethermind, erigon use `uint16` (should be updated to `uint64`)\n* besu and reth already use `uint64` (fine)\n\nOn json-rpc:\n* geth omits empty change lists (e.g. `storage_changes`)\n* besu, erigon, reth, nethermind include empty lists\n* the execution-apis spec marks these fields as optional\n\nOpen question: should we make those fields required (and update geth), keep them optional and accept divergence, or standardize on omitting empty lists (update all clients except geth)?",
+      "createdAt": "2026-04-17T08:00:20.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Wouldn't be u32 be enough? Seems like a bit jump between 16 to 64",
+      "createdAt": "2026-04-17T08:04:40.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "4.5M transactions per block seem unlikely",
+      "createdAt": "2026-04-17T08:05:34.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Fair, esp as times come down",
+      "createdAt": "2026-04-17T08:06:03.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, would be enough too, then all clients would need to change though. I think that's even better, and also future-proof.",
+      "createdAt": "2026-04-17T08:14:30.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "will update my msg and pr based on that",
+      "createdAt": "2026-04-17T08:14:41.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Curious what other clients think. I don’t have a strong opinion on uint32 vs uint64, and it won’t matter much. The important part is moving away from uint16, which could become too small in the future.",
+      "createdAt": "2026-04-17T09:41:38.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not sure what we want to use. in the description you are saying go to uint64 but in the PR modification I see uint32",
+      "createdAt": "2026-04-17T10:11:56.548000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, updated to uint32 based on marius input. I'm fine with either.\nAlso updated the description of the PR now.",
+      "createdAt": "2026-04-17T12:37:00.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'd proposed we just go with uint32, having all clients update to that.",
+      "createdAt": "2026-04-17T12:38:22.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I removed the hash from the header (the header itself doesn't exist in Gloas), can you check if this is a breaking change for you?",
+      "createdAt": "2026-04-17T12:51:16.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is there any reason to use u32 though? Only 64 bit architectures are supported by clients and often times operations with 64bit registers are more performant than 32, is this something that gets repeated a lot and it's a storage worry? Otherwise for computation we should default to 64bit on scalars",
+      "createdAt": "2026-04-17T12:54:23.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, thanks, I reviewed it and looks good! The bal hash still exists on the EL side (derived from hashing the BAL after receiving it over the engine api) and we won't need it on the CL side, esp. now that the ExecutionPayloadHeader is about to be removed. Originally, I only put it there to follow the existing practices, but fine with it being removed now.",
+      "createdAt": "2026-04-17T12:57:03.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "bandwidth",
+      "createdAt": "2026-04-17T12:59:26.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How many times this is repeated?",
+      "createdAt": "2026-04-17T13:04:58.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But u32 isn't bigger than u64 in RLP, assuming numbers are limited by gas limit anyway, no?",
+      "createdAt": "2026-04-17T13:05:00.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh in  ssz it is smaller",
+      "createdAt": "2026-04-17T13:05:58.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Interesting, yeah you're right I think",
+      "createdAt": "2026-04-17T13:06:07.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm happy to go back to u64, which means only geth, nethermind and erigon must go from u16 to u32 and besu and reth can keep it as-is.",
+      "createdAt": "2026-04-17T13:07:49.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think nimbus had is at u64 already too, so, fine.",
+      "createdAt": "2026-04-17T13:08:25.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Reverted back to u64, now. If there's a good reason to go with u32, happy to update again.",
+      "createdAt": "2026-04-17T13:24:19.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have a rpi 1st gen thats 32bit 😂",
+      "createdAt": "2026-04-17T13:26:12.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes we are using u64 for RLP and we have  the same rlp hash",
+      "createdAt": "2026-04-17T14:13:12.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Me too! Until a couple of months ago it was my email server still",
+      "createdAt": "2026-04-17T14:21:11.392000+00:00",
+      "attachments": []
+    }
+  ]
+}

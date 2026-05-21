@@ -1,0 +1,742 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-15",
+  "messageCount": 90,
+  "sourceHash": "ae202db31d56c0ecbf5214c477061554bd5e103663a9fe2ecfb7ea55d2124789",
+  "searchText": "In the case of a reorg, I think there could be a situation where a the node doesnt have any bids to accept (since it had initially ignored bids that didnt initially meet its view of head). Probably not super important now, but if we want to eventually deprecate local block building we'll need to handle this edge case I think Our plan right now is to send non-canonical bids to a reprocess queue and in the case of re-org, process bids that now meet our new view of head I think this is not necessary to address, bids will come for next and current slot Thus some bids must match the current head view Also it's very likely builders themselves will be sending different bids for different heads As they currently build on top of different heads when are we targeting to have bal as I think this is not true, or at least my PR doesn't change anything here so there are 2 FCU calls - 1. without payload attributes - 2. with payload attributes if we are the next proposer with my spec change, (1) doesn't change to current gloas, and (2) also doesn't change because even pre-gloas you need to do an epoch transition (`process_epoch`) before you call FCU with payload attributes since it affects `get_expected_withdrawals(state).withdrawals` the only difference I see between pre-gloas and gloas with #5094 is that you have to run `apply_parent_execution_payload` ok so this actually seems like a major benefit of #5094 is that we decouple the epoch transition from the payload if we assume the worst case with `PAYLOAD_ATTESTATION_DUE_BPS = 7500` means we get the payload at ~9 seconds (current mainnet slot duration), this might allow us to choose `PAYLOAD_ATTESTATION_DUE_BPS` more flexibly as epoch transition time is no longer a consideration. I don't think ~3 seconds is a big deal right now, but if we wanna further reduce slot time this can be a major benefit, also the general trend seems to be that each fork we add more work to the epoch transition Fwiw Vitalik correctly noticed that this property will anyway be lost by FOCIL isn't this already the case in current gloas spec, `payload_states` is a fork choice internal that needs offchain information to construct a block because you can either pick `block_states[root]` or `payload_states[root]` but to know which of these you need fork choice, I think my PR just makes this more visible and evident that the execution payload with epbs becomes a pure DA concern based fork choice view > \"A node today is given a beacon state and it doesn't need anything else to construct a block that builds on it and is automatically canonical. \" I don't even think that is defined in current gloas spec, kinda related to the same I commented [here](https://github.com/ethereum/consensus-specs/pull/5094#issuecomment-4252338022) > node needs to have external information to tell it if it's block needs to build on full or empty this part specifically is true in both current gloas and after 5094, it's just differently expressed inside the spec, ie. before we store that intermediate information as a post-payload state, with 5094, we store the block state only and the execution payload separately, but either way to make sense on whether to build on full or empty, you need fork choice no it's not, the head state is either the post-EL state advanced to the current slot or the post-CL state advanced to the current slot. Given such a state you know exactly on top of what you are proposing. If it is a post EL-state you build on full and you have everything to propsoe already, if it is a post-CL state you build on empty and you have all that you need already. The head state is all that is needed to prepare a block. forkchoice is always needed to choose the head state, this is true before Gloas, the point is that the current Gloas spec, given the head state, you don't need anything else for liveness, but post 5094 that's no longer true > the head state is either the post-EL state advanced to the current slot or the post-CL state advanced to the current slot sure but how do you decide which one to pick without offchain/fork choice info? this has always since phase 0 been the case: forkchoice tells you which staate is the head state but head state in current gloas is ambigious without fork choice, it can be either `block_states[root]` or `payload_states[root]` I guess your \"given a head state\" is what I find misleading, you mean a state you feed into a node at startup, like checkpoint sync? it's not, head state has always been the post-state chosen by forkchoice, advanced to the current slot, this hasn't changed since phase0 and this is still the case in the current Gloas, with or without 5094. The difference is that with 5094, given that state alone, you cannot recover what forkchoice told you was your head: you lost the info if forkchoice had told you full or empty and you need to recover it offchain. Whether the current spec, if you give me the head state I can pinpoint exactly what forkchoice head was pointed at there is no more ambiguity in the current spec than in phase0, 5094 does bring this ambiguity. I agree, this is new. It is a substantial change that somehow it gives me the creeps, but 1) I can't find any real attack over it and 2) <@273808422753796097> pointed that FOCIL anyway removes the \"static\" feature above and we need offchain info to be able to construct a canonical block anyway. Still, even FOCIL does not remove this feature today that we have that knowing the headstate is equivalent to knowing our head. 5094 does remove this. How do clients feel about this change (https://github.com/ethereum/consensus-specs/pull/5113). Seems reasonable to me, but might be an annoying change for clients at this point in time. If you don't think it will be too bad, we can merge it. cc <@881905303011086387> <@&1417820113981145228> other than 5094, is there anything we want to see in the alpha.5 release? should be trivial for us but cc <@363800010518822915> who's implementing most alone. yes the gloas genesis pr This one? https://github.com/ethereum/consensus-specs/pull/5067 yes might need a rebase if 5094 gets merged Definitely. Okay we'll deal with this too. How are we feeling about 5094? we are not targeting bal before interop right? if we are, then we need the bal change in the release, but probably better for them to land in alpha.6 and target that during interop Yes, not in this release. Planning to do a fairly quick alpha.6 release with the changes necessary for BALs 👍 Targeting alpha.6 about this time next week. Deferred payload processing concerns this investigation sent me down a rabbit hole peeling off layer after layer on execution request handling. i have to say, this is probably one of the most non-sensical parts of Ethereum client architecture. there is Solidity ABI parsing, SSZ conversion (in the EL!), Engine API JSON framing. and indirection, oh, so much indirection. wait but this question should have been rather trivial at least fow what I would have wanted to see: that is, what is the maximum SSZ length that requests can have, as a fraction of the *average* beacon block because this is really the hurt that a malicious builder can do **for free** i am trying to understand why we **need** to propagate the same data twice on the wire, it feels extremely wasteful. it'll be taking away 1.5MiB of capacity (poorly compressible worst case scenario) from the critical path, basically annulling one of the most useful benefits of ePBS: the beacon block is tiny and sufficient to start critical path work. IUC, a necessary precondition to validate beacon block N+1 is that we must've received and executed the payload for N, which already includes the execution requests. so we already have them. it makes zero sense to duplicate them on the wire. i must be misunderstanding something, please correct me! because validity of the block should be a static check on the STF, if we do not send this with the block the STF becomes a function of the previous payload, the block and the previous state sure, but we can just virtualize this field we don't need to send the data twice on the network. the beacon block can commit to it, and the beacon node can replace that commitment with the actual data it already has _before_ feeding it into the STF On the practical side of things also it is because without sending them twice then it would break the exact same problem that this PR is trying to solve: that you can request the finalized checkpoint from the node and you only need the next block to start proceeding, you do not need to start requesting payloads from previous epoch to be able to sync the next block <@755590043632140352> to be clear: the network payload does not need to coincide 100% with the consensus payload. it's useful to view it as a stateful compression mechanism. during the critical path: - we compress the data into a commitment in the beacon block N+1 for sending - we expand into the full exec requests before feeding the expanded block into STF when serving it via req/resp (for the sync from finalized checkpoint you just mentioned), the responder can also send the expanded response. it just doesn't make sense to send the same data twice in the critical path. especially given the WCS is 1.5MiB. > payloads from previous epoch to be able to sync the next block that shouldn't be needed even if we remove `parent_execution_requests` as the `anchor_state` already has the execution requests of the `anchor_block` applied, so you should be able to sync the next block I do not think that's true: finalized is slot 30 full, the state is the post state of the CL block advanced to 32, that's anchor state. You cannot apply 33 (the next block) without recovering the payload of 30, this is the main problem well, then explain me how you solve the checkpoint sync scenario I am pointing to which is what led to the uproar over the current status ah I see what you mean but that's needed either way, you need the payload of 30 to process 33 since the payload is not finalized and need to be verified (ie. part of `store.payloads`) to pass this check ``` if is_parent_node_full(store, block): assert is_payload_verified(store, block.parent_root) ``` in `on_block`, only the `anchor_state.latest_block_hash` payload is finalized 1. You fetch the finalized state from a peer. 2. You sync to HEAD via req/resp (BeaconBlocksByRoot/BeaconBlocksByRange). 3. The peer serves the expanded form, with the **full parent_execution_requests inlined**, not the compressed form. no, with 5094 you do not need the payload, you get the block 33 and you check against the bid in 30, that's the whole point of your PR as far as I can tell! this doesn't work, we sync to finalized state from the checkpoint server that gives us the finalized state already I cannot start syncing until I have seen the requests from **before** the finalized epoch start I've been saying this forever 🙂 https://discord.com/channels/595666850260713488/874767108809031740/1491830057327526138 that is true from a pure STF perspective but I thought doing [gloas range sync](https://www.potuz.net/posts/gloas-range-sync/) is only safe up until the finalized checkpoint So there's still an edge case that a payload with that given blockhash may not exist at all but in that case the incoming block would have to be invalid and you won't be able to sync that chain eventually I'm still awaiting for EL devs to chime in that thread as to the safety of syncing the EL and CL independently I guess what you are saying is you can sync optimistically even to the head with 5094 without requiring fetching payloads? even with less assurances than optimistically: I think even checking the blockhash is unnecessary I am starting to suspect that we kept an overly complex optimistic sync spec that we could have ditched after the merge and Gloas allows us to sync without ever getting a payload at all can you elaborate? what is the exact problem with the checkpoint sync service? are you worried a",
+  "excerpts": [
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In the case of a reorg, I think there could be a situation where a the node doesnt have any bids to accept (since it had initially ignored bids that didnt initially meet its view of head). Probably not super important now, but if we want to eventually deprecate local block building we'll need to handle this edge case I think \n\nOur plan right now is to send non-canonical bids to a reprocess queue and in the case of re-org, process bids that now meet our new view of head",
+      "createdAt": "2026-04-15T01:15:16.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this is not necessary to address, bids will come for next and current slot",
+      "createdAt": "2026-04-15T01:17:32.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thus some bids must match the current head view",
+      "createdAt": "2026-04-15T01:18:16.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also it's very likely builders themselves will be sending different bids for different heads",
+      "createdAt": "2026-04-15T01:18:52.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As they currently build on top of different heads",
+      "createdAt": "2026-04-15T01:19:09.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when are we targeting to have bal as",
+      "createdAt": "2026-04-15T09:36:39.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this is not true, or at least my PR doesn't change anything here\n\nso there are 2 FCU calls\n- 1. without payload attributes\n- 2. with payload attributes if we are the next proposer\n\nwith my spec change, (1) doesn't change to current gloas, and (2) also doesn't change because even pre-gloas you need to do an epoch transition (`process_epoch`) before you call FCU with payload attributes since it affects `get_expected_withdrawals(state).withdrawals`",
+      "createdAt": "2026-04-15T09:51:16.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-04-15T09:58:07.673000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "bb63f3ac74c58e94fab9194bd4b4fbcc051268b9cb7a5b00c72747de538e93ad"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the only difference I see between pre-gloas and gloas with #5094 is that you have to run `apply_parent_execution_payload`",
+      "createdAt": "2026-04-15T09:59:41.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok so this actually seems like a major benefit of #5094 is that we decouple the epoch transition from the payload if we assume the worst case with `PAYLOAD_ATTESTATION_DUE_BPS = 7500` means we get the payload at ~9 seconds (current mainnet slot duration), this might allow us to choose `PAYLOAD_ATTESTATION_DUE_BPS` more flexibly as epoch transition time is no longer a consideration. I don't think ~3 seconds is a big deal right now, but if we wanna further reduce slot time this can be a major benefit, also the general trend seems to be that each fork we add more work to the epoch transition",
+      "createdAt": "2026-04-15T10:39:38.367000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "90ce29522445c79fa6705c5dc675631b084d64ed8b62421e2df1c6818ef7b65c"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Fwiw Vitalik correctly noticed that this property will anyway be lost by FOCIL",
+      "createdAt": "2026-04-15T11:47:54.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "isn't this already the case in current gloas spec, `payload_states` is a fork choice internal that needs offchain information to construct a block because you can either pick `block_states[root]` or `payload_states[root]` but to know which of these you need fork choice, I think my PR just makes this more visible and evident that the execution payload with epbs becomes a pure DA concern based fork choice view\n\n> \"A node today is given a beacon state and it doesn't need anything else to construct a block that builds on it and is automatically canonical. \"\nI don't even think that is defined in current gloas spec, kinda related to the same I commented [here](https://github.com/ethereum/consensus-specs/pull/5094#issuecomment-4252338022)\n\n> node needs to have external information to tell it if it's block needs to build on full or empty\nthis part specifically is true in both current gloas and after 5094, it's just differently expressed inside the spec, ie. before we store that intermediate information as a post-payload state, with 5094, we store the block state only and the execution payload separately, but either way to make sense on whether to build on full or empty, you need fork choice",
+      "createdAt": "2026-04-15T13:31:50.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no it's not, the head state is either the post-EL state advanced to the current slot or the post-CL state advanced to the current slot. Given such a state you know exactly on top of what you are proposing. If it is a post EL-state you build on full and you have everything to propsoe already, if it is a post-CL state you build on empty and you have all that you need already. The head state is all that is needed to prepare a block.",
+      "createdAt": "2026-04-15T13:38:19.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "forkchoice is always needed to choose the head state, this is true before Gloas, the point is that the current Gloas spec, given the head state, you don't need anything else for liveness, but post 5094 that's no longer true",
+      "createdAt": "2026-04-15T13:39:20.139000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> the head state is either the post-EL state advanced to the current slot or the post-CL state advanced to the current slot\nsure but how do you decide which one to pick without offchain/fork choice info?",
+      "createdAt": "2026-04-15T13:39:24.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this has always since phase 0 been the case: forkchoice tells you which staate is the head state",
+      "createdAt": "2026-04-15T13:39:45.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but head state in current gloas is ambigious without fork choice, it can be either `block_states[root]` or `payload_states[root]`\n\nI guess your \"given a head state\"  is what I find misleading, you mean a state you feed into a node at startup, like checkpoint sync?",
+      "createdAt": "2026-04-15T13:44:20.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's not, head state has always been the post-state chosen by forkchoice, advanced to the current slot, this hasn't changed since phase0 and this is still the case in the current Gloas, with or without 5094. The difference is that with 5094, given that state alone, you cannot recover what forkchoice told you was your head: you lost the info if forkchoice had told you full or empty and you need to recover it offchain. Whether the current spec, if you give me the head state I can pinpoint exactly what forkchoice head was pointed at",
+      "createdAt": "2026-04-15T13:46:08.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there is no more ambiguity in the current spec than in phase0, 5094 does bring this ambiguity.",
+      "createdAt": "2026-04-15T13:46:37.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree, this is new.",
+      "createdAt": "2026-04-15T15:16:37.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It is a substantial change  that somehow it gives me the creeps, but 1) I can't find any real attack over it and 2) <@273808422753796097> pointed that FOCIL anyway removes the \"static\" feature above and we need offchain info to be able to construct a canonical block anyway. Still, even FOCIL does not remove this feature today that we have that knowing the headstate is equivalent to knowing our head. 5094 does remove this.",
+      "createdAt": "2026-04-15T15:49:02.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How do clients feel about this change (https://github.com/ethereum/consensus-specs/pull/5113). Seems reasonable to me, but might be an annoying change for clients at this point in time. If you don't think it will be too bad, we can merge it. cc <@881905303011086387>",
+      "createdAt": "2026-04-15T16:04:21.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@&1417820113981145228> other than 5094, is there anything we want to see in the alpha.5 release?",
+      "createdAt": "2026-04-15T16:28:51.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "should be trivial for us but cc <@363800010518822915> who's implementing most alone.",
+      "createdAt": "2026-04-15T16:32:40.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes the gloas genesis pr",
+      "createdAt": "2026-04-15T16:35:36.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This one? https://github.com/ethereum/consensus-specs/pull/5067",
+      "createdAt": "2026-04-15T16:37:14.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2026-04-15T16:39:13.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "might need a rebase if 5094 gets merged",
+      "createdAt": "2026-04-15T16:40:50.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Definitely. Okay we'll deal with this too.",
+      "createdAt": "2026-04-15T16:42:07.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How are we feeling about 5094?",
+      "createdAt": "2026-04-15T16:42:32.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we are not targeting bal before interop right? if we are, then we need the bal change in the release, but probably better for them to land in alpha.6 and target that during interop",
+      "createdAt": "2026-04-15T17:01:01.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, not in this release. Planning to do a fairly quick alpha.6 release with the changes necessary for BALs 👍",
+      "createdAt": "2026-04-15T17:02:17.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Targeting alpha.6 about this time next week.",
+      "createdAt": "2026-04-15T17:02:46.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Deferred payload processing concerns",
+      "createdAt": "2026-04-15T17:19:38.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this investigation sent me down a rabbit hole peeling off layer after layer on execution request handling. i have to say, this is probably one of the most non-sensical parts of Ethereum client architecture. there is Solidity ABI parsing, SSZ conversion (in the EL!), Engine API JSON framing. and indirection, oh, so much indirection.",
+      "createdAt": "2026-04-15T17:35:40.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "wait but this question should have been rather trivial at least fow what I would have wanted to see: that is, what is the maximum SSZ length that requests can have, as a fraction of the  *average* beacon block",
+      "createdAt": "2026-04-15T17:37:26.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because this is really the hurt that a malicious builder can do **for free**",
+      "createdAt": "2026-04-15T17:37:50.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i am trying to understand why we **need** to propagate the same data twice on the wire, it feels extremely wasteful. it'll be taking away 1.5MiB of capacity (poorly compressible worst case scenario) from the critical path, basically annulling one of the most useful benefits of ePBS: the beacon block is tiny and sufficient to start critical path work.",
+      "createdAt": "2026-04-15T18:04:30.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "IUC, a necessary precondition to validate beacon block N+1 is that we must've received and executed the payload for N, which already includes the execution requests. so we already have them. it makes zero sense to duplicate them on the wire.",
+      "createdAt": "2026-04-15T18:06:29.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i must be misunderstanding something, please correct me!",
+      "createdAt": "2026-04-15T18:06:54.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because validity of the block should be a static check on the STF, if we do not send this with the block the STF becomes a function of the previous payload, the block and the previous state",
+      "createdAt": "2026-04-15T18:10:15.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "sure, but we can just virtualize this field",
+      "createdAt": "2026-04-15T18:10:50.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we don't need to send the data twice on the network. the beacon block can commit to it, and the beacon node can replace that commitment with the actual data it already has _before_ feeding it into the STF",
+      "createdAt": "2026-04-15T18:11:27.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "On the practical side of things also it is because without sending them twice then it would break the exact same problem that this PR is trying to solve: that you can request the finalized checkpoint from the node and you only need the next block to start proceeding, you do not need to start requesting payloads from previous epoch to be able to sync the next block",
+      "createdAt": "2026-04-15T18:11:30.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> to be clear: the network payload does not need to coincide 100% with the consensus payload. it's useful to view it as a stateful compression mechanism. during the critical path:\n- we compress the data into a commitment in the beacon block N+1 for sending\n- we expand into the full exec requests before feeding the expanded block into STF\n\nwhen serving it via req/resp (for the sync from finalized checkpoint you just mentioned), the responder can also send the expanded response. it just doesn't make sense to send the same data twice in the critical path. especially given the WCS is 1.5MiB.",
+      "createdAt": "2026-04-15T18:18:14.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> payloads from previous epoch to be able to sync the next block\nthat shouldn't be needed even if we remove `parent_execution_requests` as the `anchor_state` already has the execution requests of the `anchor_block` applied, so you should be able to sync the next block",
+      "createdAt": "2026-04-15T18:41:40.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do not think that's true: finalized is slot 30 full, the state is the post state of the CL block advanced to 32, that's anchor state. You cannot apply 33 (the next block) without recovering the payload of 30, this is the main problem",
+      "createdAt": "2026-04-15T18:43:48.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, then explain me how you solve the checkpoint sync scenario I am pointing to",
+      "createdAt": "2026-04-15T18:45:07.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "which is what led to the uproar over the current status",
+      "createdAt": "2026-04-15T18:45:19.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah I see what you mean but that's needed either way, you need the payload of 30 to process 33 since the payload is not finalized and need to be verified (ie. part of `store.payloads`) to pass this check\n```\nif is_parent_node_full(store, block):\n    assert is_payload_verified(store, block.parent_root)\n```\nin `on_block`, only the `anchor_state.latest_block_hash` payload is finalized",
+      "createdAt": "2026-04-15T19:00:52.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "1. You fetch the finalized state from a peer.\n2. You sync to HEAD via req/resp (BeaconBlocksByRoot/BeaconBlocksByRange).\n3. The peer serves the expanded form, with the **full parent_execution_requests inlined**, not the compressed form.",
+      "createdAt": "2026-04-15T19:03:22.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, with 5094 you do not need the payload, you get the block 33 and you check against the bid in 30, that's the whole point of your PR as far as I can tell!",
+      "createdAt": "2026-04-15T19:04:37.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this doesn't work, we sync to finalized state from the checkpoint server that gives us the finalized state already",
+      "createdAt": "2026-04-15T19:05:09.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I cannot start syncing until I have seen the requests from **before** the finalized epoch start",
+      "createdAt": "2026-04-15T19:05:37.944000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I've been saying this forever 🙂 https://discord.com/channels/595666850260713488/874767108809031740/1491830057327526138",
+      "createdAt": "2026-04-15T19:11:11.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that is true from a pure STF perspective but I thought doing [gloas range sync](https://www.potuz.net/posts/gloas-range-sync/) is only safe up until the finalized checkpoint",
+      "createdAt": "2026-04-15T19:11:16.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So there's still an edge case that a payload with that given blockhash may not exist at all but in that case the incoming block would have to be invalid and you won't be able to sync that chain eventually",
+      "createdAt": "2026-04-15T19:13:07.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm still awaiting for EL devs to chime in that thread as to the safety of syncing the EL and CL independently",
+      "createdAt": "2026-04-15T19:13:32.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess what you are saying is you can sync optimistically even to the head with 5094 without requiring fetching payloads?",
+      "createdAt": "2026-04-15T19:16:03.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "even with less assurances than optimistically: I think even checking the blockhash is unnecessary",
+      "createdAt": "2026-04-15T19:16:31.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am starting to suspect that we kept an overly complex optimistic sync spec that we could have ditched after the merge",
+      "createdAt": "2026-04-15T19:17:02.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and Gloas allows us to sync without ever getting a payload at all",
+      "createdAt": "2026-04-15T19:17:11.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can you elaborate? what is the exact problem with the checkpoint sync service? are you worried about some off-by-1 sort of situation?",
+      "createdAt": "2026-04-15T19:23:15.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the snapshot would just include the beacon blocks in expanded form, no?",
+      "createdAt": "2026-04-15T19:24:26.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And Raul no, you cannot do what you want because there's no attestations to the Payload. If the proposer got the requests but attesters didn't them the proposer would be grieved",
+      "createdAt": "2026-04-15T19:24:46.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So you cannot avoid sending them with the block unless there's a round of attestations to DA of the Payload",
+      "createdAt": "2026-04-15T19:25:45.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "One could overload PTC for this but we need to check safety even in this case and again it breaks checkpoint sync again",
+      "createdAt": "2026-04-15T19:26:42.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's the situation I describe above with 30 finalized",
+      "createdAt": "2026-04-15T19:27:44.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "sorry, i don't get this. you're saying that PTC does not actually provide a strong enough signal of the execution payload having been received by the whole network?",
+      "createdAt": "2026-04-15T19:29:27.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It does but it doesn't do any checking",
+      "createdAt": "2026-04-15T19:30:54.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So the requests in the Payload may not correspond to the commitment",
+      "createdAt": "2026-04-15T19:31:10.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "for an attester to attest successfully to beacon block N+1, it must have received the execution payload of N _and_ executed it so it can verify that the state root matches, no?",
+      "createdAt": "2026-04-15T19:31:16.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "otherwise it won't be able to attest to N+1 to begin with",
+      "createdAt": "2026-04-15T19:31:27.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes",
+      "createdAt": "2026-04-15T19:31:43.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so if this is a precondition for attestation, then it follows that the execution requests _are_ available. otherwise we have a larger problem",
+      "createdAt": "2026-04-15T19:32:32.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, again: no one got the requests except the next proposer that got them. No one has imported the Payload except the proposer that got it and the proposer has built on full, but it's reorged cause no one has the requests",
+      "createdAt": "2026-04-15T19:34:27.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If instead the proposer sends the requests then the Payload has to be present",
+      "createdAt": "2026-04-15T19:35:05.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So the only way to do this on gossip is to also request that the PTC checks that the requests correspond to the bid",
+      "createdAt": "2026-04-15T19:35:37.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And that will still break checkpoint sync but at least work for gossip if we put this extra trust on the PTC",
+      "createdAt": "2026-04-15T19:36:08.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But we already have these sort of equivocation attacks by builders anyway",
+      "createdAt": "2026-04-15T19:37:48.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How would this affect the next proposer? Wouldn't they just build on-top of a different block?",
+      "createdAt": "2026-04-15T20:26:51.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it looks like even if you optimize deposits by batching them, you will need a 193M gas limit and lock up ~$20.5M in ETH to reach the ssz size limit, the current worst case size on mainnet is ~489 KB",
+      "createdAt": "2026-04-15T20:40:28.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Not if they have everything. They think the Payload is good",
+      "createdAt": "2026-04-15T21:49:56.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we violate the rule that stf is only a function of prestate and block, if it becomes a function of prestate, data and block, then we could blind them in the block (so in beacon block we will have previous execution requests root and current bid) and everything should remain the same. We are essentially putting the whole network in the condition in which only the proposer is now (\"to build on full you have to know the full payload\" becomes \"to import the block you have to know the previous full payload\"). \nThe stf will check that you are passing execution requests that correctly unblind the root present in the block.\n\nBut that's a big departure. A stf depending on offchain data is huge.\n\nYou may say it isn't really off chain, it is on another chain:)",
+      "createdAt": "2026-04-15T21:50:22.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why would they think the payload is good? `verify_execution_payload_envelope` will throw an exception.",
+      "createdAt": "2026-04-15T21:51:21.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And optimistic sync will be gone forever",
+      "createdAt": "2026-04-15T21:58:37.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Not if they have everything",
+      "createdAt": "2026-04-15T22:08:06.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Already drinking with a friend, hit me later on DM and we'll go over this 🙂",
+      "createdAt": "2026-04-15T22:08:41.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Okay lol. Will message you tomorrow.",
+      "createdAt": "2026-04-15T22:09:01.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I don't think this makes sense 😅",
+      "createdAt": "2026-04-15T22:09:09.645000+00:00",
+      "attachments": []
+    }
+  ]
+}

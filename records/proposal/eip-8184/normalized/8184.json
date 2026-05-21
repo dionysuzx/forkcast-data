@@ -1,0 +1,96 @@
+{
+  "id": 8184,
+  "title": "EIP-8184: LUCID encrypted mempool",
+  "status": "Draft",
+  "description": "Public encrypted mempool for commit-before-reveal inclusion of MEV-sensitive transactions, without enshrining a specific encryption scheme.",
+  "laymanDescription": "Hides transaction details until they are locked into a block, preventing front-running and sandwich attacks. Users can safely broadcast transactions publicly without exposing them to exploitation. The system works with different encryption methods, including letting users decrypt their own transactions, reducing dependence on trusted intermediaries.",
+  "author": "Anders Elowsson (@anderselowsson), Justin Florentine (@jflo), Julian Ma (@ma-julian)",
+  "type": "Standards Track",
+  "category": "Core",
+  "createdDate": "2026-03-04",
+  "discussionLink": "https://ethereum-magicians.org/t/eip-8184-lucid-encrypted-mempool/28017",
+  "requires": [
+    "2718",
+    "7805"
+  ],
+  "source": {
+    "official": "ethereum/EIPs",
+    "forkcastEnrichment": true
+  },
+  "forkRelationships": [
+    {
+      "forkName": "Hegota",
+      "statusHistory": [
+        {
+          "status": "Proposed",
+          "call": "acde/230",
+          "date": "2026-02-12"
+        },
+        {
+          "status": "Declined",
+          "call": "acde/232",
+          "date": "2026-03-12"
+        }
+      ],
+      "isHeadliner": false,
+      "wasHeadlinerCandidate": true,
+      "champions": [
+        {
+          "name": "Justin Florentine",
+          "discord": "robocopsgonemad"
+        }
+      ],
+      "presentationHistory": [
+        {
+          "type": "headliner_proposal",
+          "link": "https://ethereum-magicians.org/t/hegota-headliner-lucid-encrypted-mempool/27658",
+          "date": "2026-02-05"
+        },
+        {
+          "type": "headliner_presentation",
+          "call": "acde/230",
+          "date": "2026-02-12"
+        }
+      ]
+    }
+  ],
+  "stakeholderImpacts": {
+    "endUsers": {
+      "description": "Protected from front-running and sandwich attacks in the public mempool without needing to trust private intermediaries."
+    },
+    "appDevs": {
+      "description": "Can build applications leveraging trustless MEV protection and on-chain routing with exact pre-state knowledge."
+    },
+    "walletDevs": {
+      "description": "Must integrate encryption standards, handle sealed transaction lifecycle, and help users choose reliable decryptors."
+    },
+    "toolingInfra": {
+      "description": "Block explorers and indexers need to parse sealed transactions, key messages, and delayed execution patterns."
+    },
+    "layer2s": {
+      "description": "Could adopt similar encrypted transaction mechanisms for MEV protection on L2."
+    },
+    "stakersNodes": {
+      "description": "Validators gain agency as includers forcing encrypted transaction inclusion; must handle key-timeliness voting via PTC."
+    },
+    "clClients": {
+      "description": "Significant changes: PTC key-timeliness voting, LucidKeyMessage gossip, and ST-commitment validation in beacon blocks."
+    },
+    "elClients": {
+      "description": "New sealed transaction type, delayed top-of-block execution, ST ticket charging, and ciphertext envelope handling."
+    }
+  },
+  "benefits": [
+    "Prevents front-running and sandwich attacks through commit-before-reveal encrypted transaction inclusion",
+    "Restores public mempool viability by removing the need for private order flow",
+    "Broadens FOCIL censorship resistance to cover MEV-sensitive transactions",
+    "Supports multiple encryption schemes without coupling Ethereum to a specific construction"
+  ],
+  "tradeoffs": [
+    "Adds one-slot execution latency as transactions execute in the following block",
+    "Introduces trust assumptions around decryptors for key release timing",
+    "Substantial cross-layer implementation complexity touching both consensus and execution clients"
+  ],
+  "abstract": "",
+  "bodyPreview": "## Abstract This EIP specifies LUCID, a mechanism for carrying encrypted transactions through Ethereum's public inclusion pipeline while keeping their contents hidden until after the scheduling decision has been fixed. By requiring commitment before reveal and delaying decryption until that point, LUCID protects MEV-sensitive order flow, limits probabilistic front-running by minimizing pre-execution information leakage, and broadens the practical censorship resistance of inclusion lists. The design remains open to different off-protocol decryption schemes, including trustless self-decryption, rather than coupling Ethereum to a single enshrined cryptographic construction. ## Motivation Transaction ordering power has, in practice, made the public mempool unusable for a large share of economically meaningful transactions on Ethereum. When pending transactions can be inspected before inclusion, sophisticated actors can front-run, sandwich, or simply copy profitable strategies, turning transparent block production into an industrialized market for toxic MEV. The natural response has been a migration toward private order flow. Users, wallets, searchers, and applications increasingly route transactions through private relays, builder-run mempools, order flow auctions, and other trusted intermediaries that can shield transaction contents until inclusion. These arrangements replace a public and permissionless inclusion path with opaque bilateral relationships. They reward trust, access, and private dealmaking over open competition, starving the public mempool, entrenching incumbent builders, and leaving access to blockspace vulnerable to outages, policy changes, and discretionary blacklisting. This is especially concerning because it pushes some of Ethereum’s most important activity away from the public, composable domain. Offchain market structures may provide reasonable local arrangements, but they are unlikely to constitute a sufficient long-run equilibrium for Ethereum on their own. The promise of DeFi is not merely that transactions settle onchain; it is that trading, competition, and execution themselves can occur permissionlessly onchain. Another core property is censorship resistance (CR), but because [EIP-7805](./eip-7805.md) (FOCIL) relies on open propagation, it cannot provide CR for transactions subject to MEV extraction. A public encrypted mempool addresses this gap. If transactions can be propagated in encrypted form and committed to before their contents are revealed, users no longer need to choose between MEV protection and trustless access to blockspace. This broadens the practical censorship resistance of inclusion lists while reducing the importance of privileged private order flow in builder competition. At the same time, Ethereum cannot presently enshrine a single encryption scheme for this purpose. A viable in-protocol scheme requires a silent setup with small public keys, non-interactive decryption, no trusted setup, practical ciphertext sizes, CCA2 security, and a credible path to quantum safety. No known construction fully satisfies these requirements at Ethereum’s scale, and waiting for cryptographic breakthroughs would impose an unacceptable delay. LUCID extends the inclusion pipeline to sealed transactions (STs) that can be propagated in public without revealing their contents. Builders commit to them before decryption, and key publishers release keys only after the scheduling decision has been fixed. In doing so, it preserves a public, permissionless path to inclusion for MEV-sensitive transactions without coupling Ethereum to a specific encryption scheme. Transactions may be self-decrypted in a trustless manner or encrypted in an open design according to a key publisher's instructions. This broadens the practical CR afforded by FOCIL while reducing Ethereum’s dependence on centralized order-flow relationships. In the longer term, it helps preserve an Ethereum in which trading and transaction competition can take place onchain, in public, and under permissionless market structure. ## Specification ### Constants and parameters ```python TOB_GAS_FRACTION_DENOMINATOR = 8 TOB_FEE_FRACTION = 128 MAX_SIGNATURE_SIZE = 2**16 MAX_ST_COMMITS_PER_IL = 2 MAX_STS_PER_BUNDLE = 64 MAX_BYTES_PER_ST = 2**24 // 64 # Byte bound implied by EIP-7976 and EIP-7825 MAX_ST_COMMITS = MAX_ST_COMMITS_PER_IL * IL_COMMITTEE_SIZE # IL_COMMITTEE_SIZE defined in EIP-7805 MAX_ST_TICKETS = MAX_ST_COMMITS * MAX_STS_PER_BUNDLE tob_gas_limit = block.gas_limit // TOB_GAS_FRACTION_DENOMINATOR tob_gas_limit_per_il = tob_gas_limit // IL_COMMITTEE_SIZE ``` ### Overview: from submission to execution This subsection provides an overview of the LUCID mechanism. LUCID relies on sealed transactions (STs), consisting of a signed ST ticket used for charging the sender and binding to a key publisher and a `ciphertext_envelope`. The `ciphertext_envelope` decrypts to a signed plaintext transaction (PT) that can have a different `from` field than the ST. Senders encrypt transactions to a key publisher in an open design following the key publisher's off‑protocol instructions (and if applicable, using its public key), or can otherwise self‑decrypt trustlessly. The ST can be propagated in the public mempool without revealing the PT until after commitment. Figure 1 provides a timeline for the design. ![Figure 1](../assets/eip-8184/1.png) **Figure 1.** LUCID timeline. Bids are included in the beacon block to allow key publishers to release keys in a timely manner before the next slot starts. Decrypted transactions are executed in the next block. * **Before $T_1$** – Includers propagate ILs that, besides PTs, can incorporate STs. The STs are either included individually or in a bundle (dark blue background). * **$T_1$** – Attesters (purple) of slot $n$ freeze their view of propagated ILs as well as votes on the timeliness of decryption keys released during the previous slot. * **After $T_1$** – Once builders know which ILs and"
+}

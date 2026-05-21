@@ -1,0 +1,402 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-05-13",
+  "messageCount": 49,
+  "sourceHash": "78ddb983afd93d73ac631fad03bbee6ec0580d98d703a430d05ef17b20f48ea0",
+  "searchText": "discussing with him on DM <@&1417820113981145228> can you please give us a way to measure the deposit verification time? let that be a log message or metric or trace or whatever. my general feeling about this approach is that it introduces technical debt as-is both on the cl and el side - from discussions with EL:s, they were surprisingly supportive of SSZ blocks (https://eips.ethereum.org/EIPS/eip-7807) which is superior because it provides the same benefit (and many others) as 8237 _without_ introducing said debt, ie 7807 similarly allows us to remove the EL-CL link, but in a clean way. nimbus does not need 8237 for gloas to sync indepdently, ie we achieve the same result by importing rlp in the the CL and performing the necessary check there You will have the equivocal parent block in the `Store` after processing the child, won't you? You never accept equivocal blocks on p2p, but you may pull one via RPC The attack we protect a builder from is the following: 1) slot N: Builder sees 40% support on a beacon block with the bid and reveals 2) slot N: Proposer reveals two blocks for the same slot, the second can be self built; attesters are split 3) slot N+1: Proposer belongs to the same entity and self-builds a new block with the builder's content and publishes a timely block 4) builder's payload is reorged out cause it's beacon block has 40% and the competing slot N+1 block has 40% via proposer boost + a few attestations from the previous slot attesting to its parent is the understanding above correct? Oh, i also see `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`, but what if proposer at the previous slot reveals that block after that deadline and also atts in the support of that equivocal block that it has produced. What is the reason to count equivocal blocks only if they are published before `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`? @glamsterdam-cl can you please give us https://github.com/OffchainLabs/prysm/ > Keeping track of equivocations seen over gossip will require us to validate signatures on possible garbage that may arrive after we've already seen the first block. Why is this different than doing so before seeing the first block? It's still punishable if someone sends a message that doesn't verify > And moreover will require us to check on every repeated message for differences in the block This would only have to be done once, once a single equivocation has been seen we can go back to ignoring everything That's mostly right, except: 2) The proposer would reveal the second block afterwards, once the builder has already published the payload (so it can't just detect the equivocation and withhold) It doesn't need to publish the equivocating block on time because it doesn't care about receiving any attestation weight, since it can just get the 40% from proposer boost + a few of its own attestations. I don't know how to solve this without equivocation detection. Still up for doing away with trustless payments though 😄 Why do we need `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`? yep, I am now implementing exactly this, my question was vacuous anyway since today we anyway do that extra signature verification to prepare a proposer slashing on the fly. This is because proposer boost only cares about \"early\" equivocations. Francesco argues that otherwise you can remove proposer boost from an honest proposer by releasing late equivocations. This is mostly an edge case that I am not sure justifies tracking these timeliness in the store, but anyway it's fairly trivial to implement so no problem I guess the \"ignore after second message\" rule should be specified in the executable p2p spec? this timeliness rule seems to be gamable if you have two consecutive proposals. Then you can have proposer boost for your malicious proposal build on top of an equivocal block with empty payload and stolen builder's payload that is also possible today i am saying that timeliness rule seems to make things worse. it is removing PB from honest proposer at the cost of slashing vs having PB on malicious proposal and helping it win when it makes sense to be slashed as the fee from stolen payload covers the costs. but i might be wrong I don't understand, today proposer boost is unconditionally applied regardless of equivocations it's not about today vs Gloas. we change conditions for applying proposer boost and we introduce a new rule for early equivocations while removing \"early\" would be a net positive to me. Why not remove it then? Ah no you could not do this, because *the timely block that caused the builder to release the payload* would then be detected as an equivocation: - Let `B` be the \"good block\" that caused the builder to release its payload. - `B` must have been released early, so everyone would have recorded `B`. - Then the proposer releases `B'` late and builds on it, but everyone that gets it sees that `B` and `B'` are an equivocating pair, because they are evaluating `B'` and they have `B` as a timely recorded sibling: ``` equivocations = [ root for root, block in store.blocks.items() if ( store.block_timeliness[root][PTC_TIMELINESS_INDEX] and block.proposer_index == parent.proposer_index and block.slot + 1 == slot and root != parent_root ) ] ``` If the proposer had built on `B`, `B'` would not be detected as a timely equivocation (because it is not, it is late), and proposer boost would have applied, because `equivocations` would be empty. If the proposer maliciously builds on `B'` (even though it has no weight), then we have `equivocations = [B]`, because `B` was timely It's this statement (from https://github.com/ethereum/consensus-specs/pull/4807): > Assuming < 20% adversary, we get builder reveal safety: > Builder reveals when seeing block B with > 40% weight and no equivocations > => if the proposer extends an equivocation B', proposer boost doesn't apply to B': B' is weak because it is late and thus does not accrue honest weight, and attesters detect the existence of an equivocation (B is timely). > => no matter what the proposer does, the block stays canonical btw we would need tests for this, my initial implementation for this actually only checked for the existence of equivocations symmetrically and would have counted equivocations both ways, only after you linked to the above conversation that I changed it to track differently oh, i see now, sorry i got confused by that check. So, it checks that *another* block is timely then it makes sense! It is confusing 😂 (every time this comes up I never remember about the details and I am just re-reading the description of the PR and asking claude questions about it before answering 😄) that's also me trying to understand your fork choice PRs 😂 actually a comment on `should_apply_proposer_boost` would be good, most probably I wasn't the only one that implemented this incorrectly. Although a test for both scenarios would be needed anyway found this invalid payload, probably from Nimbus https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/49700 ``` May-13 13:22:24.741[chain] ^[[36mverbose^[[39m: Completed getBlobsV2 for block slot=49700, root=0xced478320d49430802c5176a9a756a2c2f814017679c3dee71d2346fd22780e6 May-13 13:22:25.014[chain] ^[[33mwarn^[[39m: Error processing execution payload from gossip slot=49700, peer=16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk, root=0xced478320d49430802c5176a9a756a2c2f814017679c3dee71d2346fd22780e6 - Envelope verification error: Withdrawals mismatch between payload and expected payload=0x9e3ecb1b43eb0e4d2f31095adb896a0689d3ef7640b95ab334e49532d8d5d6a8 expected=0x3da34ac4371227edfbf6f74375e1b47c3541c4856d3668ffca204505e731d557 Error: Envelope verification error: Withdrawals mismatch between payload and expected payload=0x9e3ecb1b43eb0e4d2f31095adb896a0689d3ef7640b95ab334e49532d8d5d6a8 expected=0x3da34ac4371227edfbf6f74375e1b47c3541c4856d3668ffca204505e731d557 at BeaconChain.importExecutionPayload (file:///usr/src/lodestar/packages/beacon-node/src/chain/blocks/importExecutionPayload.ts:159:11) at BeaconChain.processExecutionPayload (file:///usr/src/lodestar/packages/beacon-node/src/chain/blocks/importExecutionPayload.ts:296:3) at JobItemQueue.runJob (file:///usr/src/lodestar/packages/beacon-node/src/util/queue/itemQueue.ts:149:22) ``` this is a known issue within nimbus we are working on a fix Do I understsand correctly that the curcuit breaker that switches to local block building that we have today will exist post-Gloas? We had some discussions on this in interop. Anonymous builders on p2p could choose to not reveal payloads and cause some liveness failure and we have no way to slash today except the fact that their payment will go to the proposer. There were ideas to fallback to trusted builders from trustless and then to self-building if that goes bad too. But I assume the simplest thing to do with gloas is to fallback to local block building if there are a certain number of missing payloads in a row Yeah, i think the simplest way would be to preserve the same behavior as it is today, i.e. switch straight to local building we want to avoid this, we can circuit break to ban particular builders now eg every single time we hit the circuit breaker for builder bugs instead of CL bugs, it would have been a single block P2P builders can sybil if you ban a particular builder pubkey, this is much easier with trusted builders where you could just disconnect from this. i see, you just ban a builder and when there are no bids you can use you start local building? this is not about P2P builders though, we've had detailed discussions in interop about the fallback mechanism, I'm sure the notes are up in the website there are different fallback mechanisms it's a bit complex, but we want to revert to **only** trusted builders some times, and to **only** local building some others, or **only** p2p bids on others but the first line of defense is blacklisting a single builder https://hackmd.io/@nixorokish/builder-api-summary#5-Circuit-Breakers here is the summary yeah i think the main issue we found was that, it is hard to tell if a bid came from trusted builder or from p2p just by looking at the bid It would be great if someone would take a look at this PR: https://github.com/ethereum/consensus-specs/pull/5249 It does an important thing and extends fork choice abstraction layer so it can be modified in Gloas and make the upgradability from Phase0 to Gloas easier than it is today. Impls doesn't need to change anything as ultimately this PR doesn't introduce any semantics change and rather addresses readability and testability issues of the spec which I personally had when started to read and work with the fork choice spec in Gloas can we hold that one until we get a few views? I don't mind if the logic is slightly changed pre-Gloas, but I want to really check that nothing changes post-Gloas, or that at least I understand the changes For reference, the backporting caused in <https://github.com/ethereum/consensus-specs/pull/4807> still has us skipping some spectests. I hope I can unskip them soon.",
+  "excerpts": [
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "discussing with him on DM",
+      "createdAt": "2026-05-13T04:20:06.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@&1417820113981145228> can you please give us a way to measure the deposit verification time? let that be a log message or metric or trace or whatever.",
+      "createdAt": "2026-05-13T08:09:45.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "my general feeling about this approach is that it introduces technical debt as-is both on the cl and el side - from discussions with EL:s, they were surprisingly supportive of SSZ blocks (https://eips.ethereum.org/EIPS/eip-7807) which is superior because it provides the same benefit (and many others) as 8237 _without_ introducing said debt, ie 7807 similarly allows us to remove the EL-CL link, but in a clean way. \n\nnimbus does not need 8237 for gloas to sync indepdently, ie we achieve the same result by importing rlp in the the CL and performing the necessary check there",
+      "createdAt": "2026-05-13T08:14:31.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You will have the equivocal parent block in the `Store` after processing the child, won't you? You never accept equivocal blocks on p2p, but you may pull one via RPC",
+      "createdAt": "2026-05-13T08:24:09.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The attack we protect a builder from is the following:\n1) slot N: Builder sees 40% support on a beacon block with the bid and reveals\n2) slot N: Proposer reveals two blocks for the same slot, the second can be self built; attesters are split\n3) slot N+1: Proposer belongs to the same entity and self-builds a new block with the builder's content and publishes a timely block\n4) builder's payload is reorged out cause it's beacon block has 40% and the competing slot N+1 block has 40% via proposer boost + a few attestations from the previous slot attesting to its parent\n\nis the understanding above correct?",
+      "createdAt": "2026-05-13T08:27:51.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh, i also see `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`, but what if proposer at the previous slot reveals that block after that deadline and also atts in the support of that equivocal block that it has produced. What is the reason to count equivocal blocks only if they are published before `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`?",
+      "createdAt": "2026-05-13T08:45:56.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "@glamsterdam-cl can you please give us",
+      "createdAt": "2026-05-13T08:56:44.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/OffchainLabs/prysm/",
+      "createdAt": "2026-05-13T11:30:08.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> Keeping track of equivocations seen over gossip will require us to validate signatures on possible garbage that may arrive after we've already seen the first block.\nWhy is this different than doing so before seeing the first block? It's still punishable if someone sends a message that doesn't verify\n\n> And moreover will require us to check on every repeated message for differences in the block\nThis would only have to be done once, once a single equivocation has been seen we can go back to ignoring everything",
+      "createdAt": "2026-05-13T12:05:52.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's mostly right, except:\n2) The proposer would reveal the second block afterwards, once the builder has already published the payload (so it can't just detect the equivocation and withhold)\n\nIt doesn't need to publish the equivocating block on time because it doesn't care about receiving any attestation weight, since it can just get the 40% from proposer boost + a few of its own attestations.\n\nI don't know how to solve this without equivocation detection. Still up for doing away with trustless payments though 😄",
+      "createdAt": "2026-05-13T12:09:50.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why do we need `store.block_timeliness[root][PTC_TIMELINESS_INDEX]`?",
+      "createdAt": "2026-05-13T12:11:34.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yep, I am now implementing exactly this, my question was vacuous anyway since today we anyway do that extra signature verification to prepare a proposer slashing on the fly.",
+      "createdAt": "2026-05-13T12:25:09.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is because proposer boost only cares about \"early\" equivocations. Francesco argues that otherwise you can remove proposer boost from an honest proposer by releasing late equivocations. This is mostly an edge case that I am not sure justifies tracking these timeliness in the store, but anyway it's fairly trivial to implement so no problem",
+      "createdAt": "2026-05-13T12:26:45.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess the \"ignore after second message\" rule should be specified in the executable p2p spec?",
+      "createdAt": "2026-05-13T12:27:14.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this timeliness rule seems to be gamable if you have two consecutive proposals. Then you can have proposer boost for your malicious proposal build on top of an equivocal block with empty payload and stolen builder's payload",
+      "createdAt": "2026-05-13T12:30:30.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that is also possible today",
+      "createdAt": "2026-05-13T12:30:52.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i am saying that timeliness rule seems to make things worse. it is removing PB from honest proposer at the cost of slashing vs having PB on malicious proposal and helping it win when it makes sense to be slashed as the fee from stolen payload covers the costs.",
+      "createdAt": "2026-05-13T12:33:34.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but i might be wrong",
+      "createdAt": "2026-05-13T12:34:04.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't understand, today proposer boost is unconditionally applied",
+      "createdAt": "2026-05-13T12:34:13.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "regardless of equivocations",
+      "createdAt": "2026-05-13T12:34:20.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's not about today vs Gloas. we change conditions for applying proposer boost and we introduce a new rule for early equivocations while removing \"early\" would be a net positive to me. Why not remove it then?",
+      "createdAt": "2026-05-13T12:35:22.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah no you could not do this, because *the timely block that caused the builder to release the payload* would then be detected as an equivocation:\n- Let `B` be the \"good block\" that caused the builder to release its payload. \n- `B` must have been released early, so everyone would have recorded `B`. \n- Then the proposer releases `B'` late and builds on it, but everyone that gets it sees that `B` and `B'` are an equivocating pair, because they are evaluating `B'` and they have `B` as a timely recorded sibling:\n\n```\n    equivocations = [\n        root\n        for root, block in store.blocks.items()\n        if (\n            store.block_timeliness[root][PTC_TIMELINESS_INDEX]\n            and block.proposer_index == parent.proposer_index\n            and block.slot + 1 == slot\n            and root != parent_root\n        )\n    ]\n```\n\nIf the proposer had built on `B`, `B'` would not be detected as a timely equivocation (because it is not, it is late), and proposer boost would have applied, because `equivocations` would be empty. If the proposer maliciously builds on `B'` (even though it has no weight), then we have `equivocations = [B]`, because `B` was timely",
+      "createdAt": "2026-05-13T12:42:09.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's this statement (from https://github.com/ethereum/consensus-specs/pull/4807):\n\n> Assuming < 20% adversary, we get builder reveal safety:\n> Builder reveals when seeing block B with > 40% weight and no equivocations\n> => if the proposer extends an equivocation B', proposer boost doesn't apply to B': B' is weak because it is late and thus does not accrue honest weight, and attesters detect the existence of an equivocation (B is timely).\n> => no matter what the proposer does, the block stays canonical",
+      "createdAt": "2026-05-13T12:44:03.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "btw we would need tests for this, my initial implementation for this actually only checked for the existence of equivocations symmetrically and would have counted equivocations both ways, only after you linked to the above conversation that I changed it to track differently",
+      "createdAt": "2026-05-13T12:46:10.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh, i see now, sorry i got confused by that check. So, it checks that *another* block is timely",
+      "createdAt": "2026-05-13T12:49:46.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "then it makes sense!",
+      "createdAt": "2026-05-13T12:49:56.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It is confusing 😂",
+      "createdAt": "2026-05-13T12:55:16.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "fradamt",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(every time this comes up I never remember about the details and I am just re-reading the description of the PR and asking claude questions about it before answering 😄)",
+      "createdAt": "2026-05-13T12:56:32.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's also me trying to understand your fork choice PRs 😂",
+      "createdAt": "2026-05-13T13:12:19.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "actually a comment on `should_apply_proposer_boost` would be good, most probably I wasn't the only one that implemented this incorrectly. Although a test for both scenarios would be needed anyway",
+      "createdAt": "2026-05-13T13:23:28.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "found this invalid payload, probably from Nimbus https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/49700\n```\nMay-13 13:22:24.741[chain]         ^[[36mverbose^[[39m: Completed getBlobsV2 for block slot=49700, root=0xced478320d49430802c5176a9a756a2c2f814017679c3dee71d2346fd22780e6\nMay-13 13:22:25.014[chain]            ^[[33mwarn^[[39m: Error processing execution payload from gossip slot=49700, peer=16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk, root=0xced478320d49430802c5176a9a756a2c2f814017679c3dee71d2346fd22780e6 - Envelope verification error: Withdrawals mismatch between payload and expected payload=0x9e3ecb1b43eb0e4d2f31095adb896a0689d3ef7640b95ab334e49532d8d5d6a8 expected=0x3da34ac4371227edfbf6f74375e1b47c3541c4856d3668ffca204505e731d557\nError: Envelope verification error: Withdrawals mismatch between payload and expected payload=0x9e3ecb1b43eb0e4d2f31095adb896a0689d3ef7640b95ab334e49532d8d5d6a8 expected=0x3da34ac4371227edfbf6f74375e1b47c3541c4856d3668ffca204505e731d557\n    at BeaconChain.importExecutionPayload (file:///usr/src/lodestar/packages/beacon-node/src/chain/blocks/importExecutionPayload.ts:159:11)\n    at BeaconChain.processExecutionPayload (file:///usr/src/lodestar/packages/beacon-node/src/chain/blocks/importExecutionPayload.ts:296:3)\n    at JobItemQueue.runJob (file:///usr/src/lodestar/packages/beacon-node/src/util/queue/itemQueue.ts:149:22)\n```",
+      "createdAt": "2026-05-13T13:26:44.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is a known issue within nimbus",
+      "createdAt": "2026-05-13T13:27:31.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we are working on a fix",
+      "createdAt": "2026-05-13T13:27:36.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do I understsand correctly that the curcuit breaker that switches to local block building that we have today will exist post-Gloas?",
+      "createdAt": "2026-05-13T17:17:58.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We had some discussions on this in interop. Anonymous builders on p2p could choose to not reveal payloads and cause some liveness failure and we have no way to slash today except the fact that their payment will go to the proposer. \nThere were ideas to fallback to trusted builders from trustless and then to self-building if that goes bad too. But I assume the simplest thing to do with gloas is to fallback to local block building if there are a certain number of missing payloads in a row",
+      "createdAt": "2026-05-13T17:47:57.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, i think the simplest way would be to preserve the same behavior as it is today, i.e. switch straight to local building",
+      "createdAt": "2026-05-13T17:50:44.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we want to avoid this, we can circuit break to ban particular builders now",
+      "createdAt": "2026-05-13T17:51:24.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "eg every single time we hit the circuit breaker for builder bugs instead of CL bugs, it would have been a single block",
+      "createdAt": "2026-05-13T17:51:48.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "P2P builders can sybil if you ban a particular builder pubkey, this is much easier with trusted builders where you could just disconnect from this.",
+      "createdAt": "2026-05-13T17:53:30.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i see, you just ban a builder and when there are no bids you can use you start local building?",
+      "createdAt": "2026-05-13T17:53:32.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is not about P2P builders though, we've had detailed discussions in interop about the fallback mechanism, I'm sure the notes are up in the website",
+      "createdAt": "2026-05-13T17:55:37.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there are different fallback mechanisms",
+      "createdAt": "2026-05-13T17:55:57.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's a bit complex, but we want to revert to **only** trusted builders some times, and to **only** local building some others, or **only** p2p bids on others",
+      "createdAt": "2026-05-13T17:56:32.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but the first line of defense is blacklisting a single builder",
+      "createdAt": "2026-05-13T17:56:48.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://hackmd.io/@nixorokish/builder-api-summary#5-Circuit-Breakers here is the summary",
+      "createdAt": "2026-05-13T17:57:59.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah i think the main issue we found was that, it is hard to tell if a bid came from trusted builder or from p2p just by looking at the bid",
+      "createdAt": "2026-05-13T18:01:15.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It would be great if someone would take a look at this PR: https://github.com/ethereum/consensus-specs/pull/5249\nIt does an important thing and extends fork choice abstraction layer so it can be modified in Gloas and make the upgradability from Phase0 to Gloas easier than it is today.\n\nImpls doesn't need to change anything as ultimately this PR doesn't introduce any semantics change and rather addresses readability and testability issues of the spec which I personally had when started to read and work with the fork choice spec in Gloas",
+      "createdAt": "2026-05-13T18:24:32.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can we hold that one until we get a few views? I don't mind if the logic is slightly changed pre-Gloas, but I want to really check that nothing changes post-Gloas, or that at least I understand the changes",
+      "createdAt": "2026-05-13T20:46:29.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For reference, the backporting caused in <https://github.com/ethereum/consensus-specs/pull/4807> still has us skipping some spectests. I hope I can unskip them soon.",
+      "createdAt": "2026-05-13T20:51:13.074000+00:00",
+      "attachments": []
+    }
+  ]
+}

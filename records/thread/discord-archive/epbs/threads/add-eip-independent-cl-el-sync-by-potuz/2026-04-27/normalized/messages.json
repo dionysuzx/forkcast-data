@@ -1,0 +1,970 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/Add EIP_ Independent CL_EL Sync by potuz...",
+  "date": "2026-04-27",
+  "messageCount": 210,
+  "sourceHash": "769a7463895c45726422139a6996191a152f3faf74e3b9e2be78db8c1f5964b6",
+  "searchText": "Thanks for raising this <@402080271563751435> . One of my concerns of this EIP was related to the range sync in zk era, where no EL is required. I believe a proof with public input will have to be pulled off by CL for each payload or beacon block to verify EL STF (and both layers STF in a more distant future) If the above makes sense then stepping away from payloads range sync today is the move towards the opposite direction. I believe `ProofEngine` won't be (and shall not be) equipped with a sophisticated network layer that would handle payload sync as EL is able to today Yes that’s correct. The proof engine has no external network to sync payloads and as such depends on the CL to provide payloads. Just a few additional comments (thinking out loud): - if we want to support VOPS node using the proof engine to drive forkchoice such that we can maintain a transaction pool for FOCIL then we may need to connect to devp2p network. However, this is far down the line and not something we have concluded on/can count on to mitigate the impact of deprecation of dangerous sync. - After EIP8142 the proof engine will no longer require execution payloads as it can guarantee payload availability via sampling of blocks. but it will anyway require some information for each payload right? Thinking about this proposal I think it may actually be redundant. There already exists a commitment which fits the description described in this EIP, that is the new_payload_request_root, e.g. the ssz tree hash root of the new payload body type used in the engine api. Furthermore the engine API already has checks to ensure that the execution payload is consistent with the parent beacon root. We are using the new_payload_request_root in our zkEVM guest programs Yes correct, however it will only require the payload header - not the payload body <@755590043632140352> I would recommend we do a review of the new_payload_request_root and also the consistency checks the engine API does against the parent beacon block root. It may be that there is already enough coverage that allow us to not check the chain prefix comprehensively. This will require changes to the Engine API, right? No the engine api already does these checks There is specifically a check against the parent beacon block. The parent beacon block is already an accumulator of the execution requests etc hmmm, it does the `block_hash` verification since the merge, there is no SSZ hash_tree_root checks in the Engine API and parent_beacon_block_root is a part of the `block_hash` check Right so doesn’t that check already satisfy our requirements here? The new_payload_request_root isn’t materialised in the standard CL protocol. We will be making it first class to support BIB / payload sapling for zk attesters it does, but it requires the full payload to be passed to the EL, this EIP proposes to get rid of the need for CL to pull full payloads Get rid of CL -> EL payloads entirely or only for range sync? for range sync of the finalized prefix of the chain I think that’s fine then. In any case most EL’s already do their own isolated sync of the finalized prefix maybe in the future it would be enough to verify the finalized payload via ProofEngine to deem the whole prefix valid? Yes I think that’s is already in place then the sync in the future would look like as the following: verify proofs for each payload starting from the finalized one and that's it The accumulator exists in the beacon block and the engine API acts on the latest block. Verifying the latest block using the engine API also gives guarantees via the block hash check which is sensitive to the beacon block root? Yep that’s how it’s currently implemented in light house for EIP8025 the thing is that we have to check each payload independently, specifically check that the payload fields that matter to CL has same values in CL and EL. this is why we have to introduce an accumulator of those fields. Will proof verification give us that property? I guess so because one of the inputs into proof verification is the beacon block root Isn’t the beacon block is already the accumulator Are you expecting that EL’s are currently checking this for the finalised chain prefix because I believe currently they do not. hmm, that's true. actually, this EIP might not be needed 😄 you're right, `parent_beacon_block_root` commits to all historical beacon block data -- this is the accumulator we need, and if the `block_hash` verification with that root passes we can say that EL and CL have the same values for the whole prefix of the chain Yep agreed hmm I don't think it fully gets us there: parent_beacon_block_root sits behind ssz htr on the CL side and keccak/rlp on the EL side so neither layer can compute the same commitment independently, and the EL doesn't currently verify payload.withdrawals_root against state.latest_withdrawals_root anyway, so e.g. a withdrawal substitution attack still slips through. The example I'm thinking of is an EL payload containing a different withdrawal than what the CL block commits to... full `block_hash` verification implies the CL and EL agrees on the content of the parent beacon block root and parent payload, and all the ancestor blocks. Then it also implies the same for the current beacon block root and the current payload I’m afk this moment but if someone could provide spec url for the block hash verification on the engine that would provide good context for this The idea is they don’t compute the same commitment. The CL provides the beacon root and the EL takes that as input in the engine. I need to review the actual spec in more detail to assess the withdrawals concern my understanding is that EIP-8237 is about the [S, F] range where the proof engine doesn't run there's no spec yet, afaict. This thread and the EIPs PR is all there is right now There already exists checks in the engine against parent beacon block The EL already does a decoupled sync for the finalized prefix Where is \"there\" now? In clients [S,F] is s the snapshot? Right but how would you prevent, in the [S, F] range, that e.g. the withdrawals are the same at each layer, EL and CL, and there's not a case where both layers believe they have a valid finalized chain where, in truth, the EL chain builds on top of an invalid chain? No S here is just some block before finality. The beacon block already has a commitment to the execution requests (I believe these are the withdrawals)? And the EL block validity guarantees the execution requests are valid for said block. So a combination of commitments in the beacon block + payload validity EL’s have been doing decoupled sync for the finalized prefix for a very long time there are EL triggered exits which is an EL request but withdrawals go the other way (CL-> EL) whereas EL requests go EL -> CL CL knows the `F.parent_beacon_block_root` and that this root is valid according to its view which also commits to withdrawals of all ancestors of `F`. Then `F.parent_beacon_block_root` is a part of EL block header of the `F.payload` or the descendant payload if `F` is empty. If `block_hash` verification for `F.payload` passes it implies that EL payloads have the same content as CL blocks for the `[S, F]` range Not sure on the specifics described here but if it is currently captured in one of the commitments in the engine API then using the checks we already do as described by <@425572898787426305> above I believe it should be covered. I’ll review the specs and a EL impl in around 30 to get more context. This is where the payload is converted to block in geth: https://github.com/ethereum/go-ethereum/blob/master/beacon/engine/types.go#L306 Then the block hash is verified here: https://github.com/ethereum/go-ethereum/blob/master/beacon/engine/types.go#L255 Ah gotcha! looks like this simplifies a lot If 8025 is \"only\" optional proofs, wouldn't all other nodes still need 8237? Nodes won't need 8237 to do the range sync post-Gloas as `parent_beacon_block_root` already an accumulator that we were looking for. Optional proofs doesn't change that Sorry, it's not clicking for me yet: parent_beacon_block_root commits to e.g. state.latest_withdrawals_root in ssz, but no layer actually verifies that ssz_htr(payload.withdrawals) equals state.latest_withdrawals_root. CL doesn't have the payload during range sync, EL has no ssz, and the encodings don't match anyway (EL stores withdrawals as a keccak MPT root, BeaconState commits via SSZ htr). What am I missing here? Hmmm, `parent_beacon_block_root` of `F` will be verified but it's not necessarily that the grand parent beacon block root is correct on the EL side? Yeah, I see what you mean. I've got confused, need to think more into it The beacon block root isn't verified on the EL side. That's where the whole reasoning above breaks Historical payloads may have correct `parent_beacon_block_root` but at the same time the content of those payloads *may not* correspond to that root. The new accumulator solves this because it is verified on EL and CL side as opposed to the beacon block root which is only CL verifiable. Can you elaborate? for finalized prefix chain all beacon blocks are considered valid and final but we want to ensure that in the case if invalid block was finalized and there are 100% malicious nodes, a local node can detect that and reject the invalid chain `parent_beacon_block_root` commits to history `F` on the CL side. At the same time the payload that corresponds to the `F.payload_bid.block_hash` commits to the history `F'` -- we cannot verify that these two histories are equal with just the `block_hash` verification of the block `F`. I believe that's correct, the EL works under the assumption that the finalized hash provided via fcu is valid and uses this as a trust anchor for decoupled historical sync. `block_hash` verification of `F.payload` implies `parent_beacon_block_root` in that payload is correct. It doesn't imply the `F.parent.parent_beacon_block_root` corresponds to the `F.parent.payload` and so force isn't this the assumption we accept with weak-subjectivity? It's not just about EL trust assumptions, it's about the whole node to have the correct view on the chain even if an invalid block has been finalized. We don't want a node to be tricked into a situation where some malicious payload was finalized and the node can't recognize that and believes that its on the correct chain Don't we already have this assumption about ancestry validity via weak subjectivity assumptions? We assume that all historical blocks before the checkpoint are valid We assume that for a sync from scratch, a snap sync relies on the pivot block to be valid. But when a node went offline after it has been snap synced in the past, we want it to verify everything from the point of going offline. Imagine all honest experienced temporal outage, adversary can build a malicious block and then when honest back online they will accept that malicious block Yeah I think if we want to be resistant to invalid finalized EL blocks then an accumulator makes sense. I think currently this is handled in the CL. For example in lighthouse for finalized blocks it asserts consistency between withdrawals and blob commitments against the EL block txs. Some CL clients run `block_hash` validation and do not pass payloads to EL for the finalized prefix of the chain. But then the problem is that those CLs pull payloads from the network and EL does the same and we get a duplication in p2p Another reason for that EIP is CL's sync complexity post-Gloas, payloads aren't anymore inside of beacon block and there should be a separate by range request on CL side handling which causes a lot of complexity, I've heard this from Potuz at least Given that we came to a point where this EIP is reasonable post-Gloas. I am curious now how the sync without payloads for the finalized prefix will look like with ProofEngine? Will then CL need to request all public inputs for each payload even from ",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Thanks for raising this <@402080271563751435> . One of my concerns of this EIP was related to the range sync in zk era, where no EL is required. I believe a proof with public input will have to be pulled off by CL for each payload or beacon block to verify EL STF (and both layers STF in a more distant future)",
+      "createdAt": "2026-04-27T07:14:57.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If the above makes sense then stepping away from payloads range sync today is the move towards the opposite direction. I believe `ProofEngine` won't be (and shall not be) equipped with a sophisticated network layer that would handle payload sync as EL is able to today",
+      "createdAt": "2026-04-27T07:17:10.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes that’s correct. The proof engine has no external network to sync payloads and as such depends on the CL to provide payloads. \n\nJust a few additional comments (thinking out loud):\n- if we want to support VOPS node using the proof engine to drive forkchoice such that we can maintain a transaction pool for FOCIL then we may need to connect to devp2p network. However, this is far down the line and not something we have concluded on/can count on to mitigate the impact of deprecation of dangerous sync.\n- After EIP8142 the proof engine will no longer require execution payloads as it can guarantee payload availability via sampling of blocks.",
+      "createdAt": "2026-04-27T07:53:45.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but it will anyway require some information for each payload right?",
+      "createdAt": "2026-04-27T07:56:23.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Thinking about this proposal I think it may actually be redundant. There already exists a commitment which fits the description described in this EIP, that is the new_payload_request_root, e.g. the ssz tree hash root of the new payload body type used in the engine api. Furthermore the engine API already has checks to ensure that the execution payload is consistent with the parent beacon root.",
+      "createdAt": "2026-04-27T07:56:55.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We are using the new_payload_request_root in our zkEVM guest programs",
+      "createdAt": "2026-04-27T07:58:04.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes correct, however it will only require the payload header - not the payload body",
+      "createdAt": "2026-04-27T07:59:04.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@755590043632140352> I would recommend we do a review of the new_payload_request_root and also the consistency checks the engine API does against the parent beacon block root. It may be that there is already enough coverage that allow us to not check the chain prefix comprehensively.",
+      "createdAt": "2026-04-27T08:01:03.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This will require changes to the Engine API, right?",
+      "createdAt": "2026-04-27T08:01:24.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No the engine api already does these checks",
+      "createdAt": "2026-04-27T08:01:39.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "There is specifically a check against the parent beacon block. The parent beacon block is already an accumulator of the execution requests etc",
+      "createdAt": "2026-04-27T08:02:17.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmmm, it does the `block_hash` verification since the merge, there is no SSZ hash_tree_root checks in the Engine API",
+      "createdAt": "2026-04-27T08:03:24.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and parent_beacon_block_root is a part of the `block_hash` check",
+      "createdAt": "2026-04-27T08:03:54.671000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Right so doesn’t that check already satisfy our requirements here?",
+      "createdAt": "2026-04-27T08:04:22.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The new_payload_request_root isn’t materialised in the standard CL protocol. We will be making it first class to support BIB / payload sapling for zk attesters",
+      "createdAt": "2026-04-27T08:05:16.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it does, but it requires the full payload to be passed to the EL, this EIP proposes to get rid of the need for CL to pull full payloads",
+      "createdAt": "2026-04-27T08:05:19.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Get rid of CL -> EL payloads entirely or only for range sync?",
+      "createdAt": "2026-04-27T08:06:05.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for range sync of the finalized prefix of the chain",
+      "createdAt": "2026-04-27T08:06:23.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think that’s fine then. In any case most EL’s already do their own isolated sync of the finalized prefix",
+      "createdAt": "2026-04-27T08:06:51.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "maybe in the future it would be enough to verify the finalized payload via ProofEngine to deem the whole prefix valid?",
+      "createdAt": "2026-04-27T08:07:10.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes I think that’s is already in place",
+      "createdAt": "2026-04-27T08:07:25.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "then the sync in the future would look like as the following: verify proofs for each payload starting from the finalized one and that's it",
+      "createdAt": "2026-04-27T08:08:09.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The accumulator exists in the beacon block and the engine API acts on the latest block. Verifying the latest block using the engine API also gives guarantees via the block hash check which is sensitive to the beacon block root?",
+      "createdAt": "2026-04-27T08:08:14.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yep that’s how it’s currently implemented in light house for EIP8025",
+      "createdAt": "2026-04-27T08:08:32.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the thing is that we have to check each payload independently, specifically check that the payload fields that matter to CL has same values in CL and EL. this is why we have to introduce an accumulator of those fields. Will proof verification give us that property? I guess so because one of the inputs into proof verification is the beacon block root",
+      "createdAt": "2026-04-27T08:10:33.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Isn’t the beacon block is already the accumulator",
+      "createdAt": "2026-04-27T08:11:47.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Are you expecting that EL’s are currently checking this for the finalised chain prefix because I believe currently they do not.",
+      "createdAt": "2026-04-27T08:12:29.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm, that's true. actually, this EIP might not be needed 😄",
+      "createdAt": "2026-04-27T08:12:34.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you're right, `parent_beacon_block_root` commits to all historical beacon block data -- this is the accumulator we need, and if the `block_hash` verification with that root passes we can say that EL and CL have the same values for the whole prefix of the chain",
+      "createdAt": "2026-04-27T08:16:51.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yep agreed",
+      "createdAt": "2026-04-27T08:17:38.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm I don't think it fully gets us there: parent_beacon_block_root sits behind ssz htr on the CL side and keccak/rlp on the EL side so neither layer can compute the same commitment independently, and the EL doesn't currently verify payload.withdrawals_root against state.latest_withdrawals_root anyway, so e.g. a withdrawal substitution attack still slips through.",
+      "createdAt": "2026-04-27T08:43:43.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The example I'm thinking of is an EL payload containing a different withdrawal than what the CL block commits to...",
+      "createdAt": "2026-04-27T08:44:50.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "full `block_hash` verification implies the CL and EL agrees on the content of the parent beacon block root and parent payload, and all the ancestor blocks. Then it also implies the same for the current beacon block root and the current payload",
+      "createdAt": "2026-04-27T08:46:46.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I’m afk this moment but if someone could provide spec url for the block hash verification on the engine that would provide good context for this",
+      "createdAt": "2026-04-27T08:51:24.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The idea is they don’t compute the same commitment. The CL provides the beacon root and the EL takes that as input in the engine. I need to review the actual spec in more detail to assess the withdrawals concern",
+      "createdAt": "2026-04-27T08:55:37.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "my understanding is that EIP-8237 is about the [S, F] range where the proof engine doesn't run",
+      "createdAt": "2026-04-27T08:55:51.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "there's no spec yet, afaict. This thread and the EIPs PR is all there is right now",
+      "createdAt": "2026-04-27T08:56:13.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "There already exists checks in the engine against parent beacon block",
+      "createdAt": "2026-04-27T08:56:37.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The EL already does a decoupled sync for the finalized prefix",
+      "createdAt": "2026-04-27T08:57:10.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Where is \"there\" now?",
+      "createdAt": "2026-04-27T08:57:10.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In clients",
+      "createdAt": "2026-04-27T08:57:21.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "[S,F] is s the snapshot?",
+      "createdAt": "2026-04-27T08:58:44.966000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Right but how would you prevent, in the [S, F] range, that e.g. the withdrawals are the same at each layer, EL and CL, and there's not a case where both layers believe they have a valid finalized chain where, in truth, the EL chain builds on top of an invalid chain?",
+      "createdAt": "2026-04-27T08:59:14+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No S here is just some block before finality.",
+      "createdAt": "2026-04-27T08:59:47.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The beacon block already has a commitment to the execution requests (I believe these are the withdrawals)? And the EL block validity guarantees the execution requests are valid for said block.",
+      "createdAt": "2026-04-27T09:01:25.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So a combination of commitments in the beacon block + payload validity",
+      "createdAt": "2026-04-27T09:01:45.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "EL’s have been doing decoupled sync for the finalized prefix for a very long time",
+      "createdAt": "2026-04-27T09:02:40.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "there are EL triggered exits which is an EL request but withdrawals go the other way (CL-> EL) whereas EL requests go EL -> CL",
+      "createdAt": "2026-04-27T09:05:11.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "CL knows the `F.parent_beacon_block_root` and that this root is valid according to its view which also commits to withdrawals of all ancestors of `F`. Then `F.parent_beacon_block_root` is a part of EL block header of the `F.payload` or the descendant payload if `F` is empty. If `block_hash` verification for `F.payload` passes it implies that EL payloads have the same content as CL blocks for the `[S, F]` range",
+      "createdAt": "2026-04-27T09:05:22.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Not sure on the specifics described here but if it is currently captured in one of the commitments in the engine API then using the checks we already do as described by <@425572898787426305> above I believe it should be covered. I’ll review the specs and a EL impl in around 30 to get more context.",
+      "createdAt": "2026-04-27T09:07:37.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This is where the payload is converted to block in geth: https://github.com/ethereum/go-ethereum/blob/master/beacon/engine/types.go#L306\nThen the block hash is verified here: https://github.com/ethereum/go-ethereum/blob/master/beacon/engine/types.go#L255",
+      "createdAt": "2026-04-27T09:11:26.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah gotcha!",
+      "createdAt": "2026-04-27T09:11:27.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "looks like this simplifies a lot",
+      "createdAt": "2026-04-27T09:12:10.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If 8025 is \"only\" optional proofs, wouldn't all other nodes still need 8237?",
+      "createdAt": "2026-04-27T09:12:35.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Nodes won't need 8237 to do the range sync post-Gloas as `parent_beacon_block_root` already an accumulator that we were looking for. Optional proofs doesn't change that",
+      "createdAt": "2026-04-27T09:16:47.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Sorry, it's not clicking for me yet:\nparent_beacon_block_root commits to e.g. state.latest_withdrawals_root in ssz, but no layer actually verifies that ssz_htr(payload.withdrawals) equals state.latest_withdrawals_root. CL doesn't have the payload during range sync, EL has no ssz, and the encodings don't match anyway (EL stores withdrawals as a keccak MPT root, BeaconState commits via SSZ htr). What am I missing here?",
+      "createdAt": "2026-04-27T09:23:11.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hmmm, `parent_beacon_block_root` of `F` will be verified but it's not necessarily that the grand parent beacon block root is correct on the EL side?",
+      "createdAt": "2026-04-27T09:28:08.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah, I see what you mean. I've got confused, need to think more into it",
+      "createdAt": "2026-04-27T09:28:54.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The beacon block root isn't verified on the EL side. That's where the whole reasoning above breaks",
+      "createdAt": "2026-04-27T09:30:04.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Historical payloads may have correct `parent_beacon_block_root` but at the same time the content of those payloads *may not* correspond to that root. The new accumulator solves this because it is verified on EL and CL side as opposed to the beacon block root which is only CL verifiable.",
+      "createdAt": "2026-04-27T09:31:32.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Can you elaborate?",
+      "createdAt": "2026-04-27T09:32:21.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for finalized prefix chain all beacon blocks are considered valid and final",
+      "createdAt": "2026-04-27T09:32:52.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but we want to ensure that in the case if invalid block was finalized and there are 100% malicious nodes, a local node can detect that and reject the invalid chain",
+      "createdAt": "2026-04-27T09:33:44.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`parent_beacon_block_root` commits to history `F` on the CL side. At the same time the payload that corresponds to the `F.payload_bid.block_hash` commits to the history `F'` -- we cannot verify that these two histories are equal with just the `block_hash` verification of the block `F`.",
+      "createdAt": "2026-04-27T09:35:59.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I believe that's correct, the EL works under the assumption that the finalized hash provided via fcu is valid and uses this as a trust anchor for decoupled historical sync.",
+      "createdAt": "2026-04-27T09:38:07.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`block_hash` verification of `F.payload` implies `parent_beacon_block_root` in that payload is correct. It doesn't imply the `F.parent.parent_beacon_block_root` corresponds to the `F.parent.payload` and so force",
+      "createdAt": "2026-04-27T09:38:31.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "isn't this the assumption we accept with weak-subjectivity?",
+      "createdAt": "2026-04-27T09:39:31.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's not just about EL trust assumptions, it's about the whole node to have the correct view on the chain even if an invalid block has been finalized. We don't want a node to be tricked into a situation where some malicious payload was finalized and the node can't recognize that and believes that its on the correct chain",
+      "createdAt": "2026-04-27T09:39:45.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Don't we already have this assumption about ancestry validity via weak subjectivity assumptions?",
+      "createdAt": "2026-04-27T09:43:02.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We assume that all historical blocks before the checkpoint are valid",
+      "createdAt": "2026-04-27T09:43:45.586000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We assume that for a sync from scratch, a snap sync relies on the pivot block to be valid. But when a node went offline after it has been snap synced in the past, we want it to verify everything from the point of going offline. Imagine all honest experienced temporal outage, adversary can build a malicious block and then when honest back online they will accept that malicious block",
+      "createdAt": "2026-04-27T09:53:17.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah I think if we want to be resistant to invalid finalized EL blocks then an accumulator makes sense.",
+      "createdAt": "2026-04-27T09:55:17.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think currently this is handled in the CL. For example in lighthouse for finalized blocks it asserts consistency between withdrawals and blob commitments against the EL block txs.",
+      "createdAt": "2026-04-27T09:58:42.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Some CL clients run `block_hash` validation and do not pass payloads to EL for the finalized prefix of the chain. But then the problem is that those CLs pull payloads from the network and EL does the same and we get a duplication in p2p",
+      "createdAt": "2026-04-27T10:01:26.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Another reason for that EIP is CL's sync complexity post-Gloas, payloads aren't anymore inside of beacon block and there should be a separate by range request on CL side handling which causes a lot of complexity, I've heard this from Potuz at least",
+      "createdAt": "2026-04-27T10:02:28.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Given that we came to a point where this EIP is reasonable post-Gloas. I am curious now how the sync without payloads for the finalized prefix will look like with ProofEngine? Will then CL need to request all public inputs for each payload even from a finalized prefix of the chain to have the same validity guarantees?",
+      "createdAt": "2026-04-27T10:05:07.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we get exactly the same guarantees for unfinalized chain. Wo do the same, block hash, blob commitment and execution request asserts that the engine API does inside the zkvm guest program. From the perspective of the proof engine the guest program STF = engineAPI engine_newPayload interface.",
+      "createdAt": "2026-04-27T10:07:51.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "For the finalized prefix the CL currently does the `block_hash` validation and does not pass the payload to the proof engine.",
+      "createdAt": "2026-04-27T10:08:53.115000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "does CL run their own `block_hash` verification for the finalized prefix?",
+      "createdAt": "2026-04-27T10:09:35.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "a block is only considered valid if we have received k of n proofs for that block and all of its ancestors back to the the finalzied root",
+      "createdAt": "2026-04-27T10:09:39.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "currently yes",
+      "createdAt": "2026-04-27T10:09:46.938000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This was pre-existing logic",
+      "createdAt": "2026-04-27T10:09:58.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I see. Then one of the ways for the proving systems would be to include the validity of the new accumulator/commitment into the proof",
+      "createdAt": "2026-04-27T10:11:04.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yep, that would make sense to me",
+      "createdAt": "2026-04-27T10:11:37.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This commitment is actually a partial block header: with only a few fields in it and using a different commitment scheme than what EL usually uses, i.e. it's not a hash of the RLP encoding",
+      "createdAt": "2026-04-27T10:11:49.463000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yep currently we use ssz on the NewPayloadRequest type",
+      "createdAt": "2026-04-27T10:12:27.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but this will change with the accumulator",
+      "createdAt": "2026-04-27T10:12:44.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "btw, what comprises the public input to the proofs?",
+      "createdAt": "2026-04-27T10:12:47.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "its the new payload request root",
+      "createdAt": "2026-04-27T10:12:57.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hash_tree_root(execution_payload, execution_requests, blob_commitments)",
+      "createdAt": "2026-04-27T10:13:27.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "basically the ssz hash tree root of the input to the engine_newPayload method",
+      "createdAt": "2026-04-27T10:13:41.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "is that all that is needed to verify the payload (+ the proof of course)?",
+      "createdAt": "2026-04-27T10:14:58.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "correct",
+      "createdAt": "2026-04-27T10:15:17.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "+ ancestry validity",
+      "createdAt": "2026-04-27T10:15:29.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we maintain proofs in a tree structure (different branches for forks) and ensure that valid ancestry exists",
+      "createdAt": "2026-04-27T10:15:47.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i guess `parent_beacon_block_root` is also a part of it",
+      "createdAt": "2026-04-27T10:15:48.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "whoops yes thats what I was missing, I knew it looked wrong",
+      "createdAt": "2026-04-27T10:16:05.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which is established by verifying the ancestor's proof via the same operation?",
+      "createdAt": "2026-04-27T10:16:19.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "correct",
+      "createdAt": "2026-04-27T10:16:25.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "only upto the finalized root",
+      "createdAt": "2026-04-27T10:16:38.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "assumption is that pre-finalized is valid under this model",
+      "createdAt": "2026-04-27T10:16:48.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i believe we can do the same verification for the finalized prefix if we want to, right?",
+      "createdAt": "2026-04-27T10:17:18.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes nothing is stopping us but we would then need to define this at the protocol level. Currently we assume finalized is valid and as such discard proofs associated with the finalized prefix",
+      "createdAt": "2026-04-27T10:18:38.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Another direction would be to have proof aggregation. In generating a proof for block n we also verify the proof for block n-1 inside the prover / zkvm.",
+      "createdAt": "2026-04-27T10:19:29.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "However, this introduces recursion requriements on the zkvm prover.",
+      "createdAt": "2026-04-27T10:19:55.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And it would imply that if you verify a payload proof then the whole chain of its ancestors is valid, right? that would be great, of course",
+      "createdAt": "2026-04-27T10:20:35.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes that would be the implication",
+      "createdAt": "2026-04-27T10:20:45.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Today `ExecutionPayloadBid` doesn't contain `execution_payload_root`. If we had this field we would be able to verify a proof having the payload bid only which is desirable",
+      "createdAt": "2026-04-27T10:21:57.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But it's impossible to have this field committed to the payload that doesn't exist anymore, but for the parent payload it should be possible",
+      "createdAt": "2026-04-27T10:22:39.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes this is the direction we are heading in and was our intention so we can use BIB + sampling in the future",
+      "createdAt": "2026-04-27T10:22:52.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "could you clarify? Are you talking about the execution_payload_hash or the execution_payload_root?",
+      "createdAt": "2026-04-27T10:23:40.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the root, the parent hash is already there in the bid",
+      "createdAt": "2026-04-27T10:24:00.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the bid doesn't contain the payload hash? I was of the understanding that it did but maybe its changed?",
+      "createdAt": "2026-04-27T10:24:20.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It should be `parent_execution_payload_root`",
+      "createdAt": "2026-04-27T10:24:23.357000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it has the `parent_hash` which is the `block_hash` of the parent payload. But it doesn't have `hash_tree_root(parent.execution_payload)` which is one of the inputs to the proof verification",
+      "createdAt": "2026-04-27T10:25:08.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We need the `block_hash` which is `keccak(rlp(execution_payload)`",
+      "createdAt": "2026-04-27T10:26:05.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But the problem is that we can have that HTR only for the parent payload",
+      "createdAt": "2026-04-27T10:26:06.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but here you have HTR of the `execution_payload` as well",
+      "createdAt": "2026-04-27T10:26:42.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmmm yes youre right I made a mistake",
+      "createdAt": "2026-04-27T10:27:27.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we need all fields that allow us to construct the the execution payload header and the additional fields",
+      "createdAt": "2026-04-27T10:27:56.423000+00:00",
+      "attachments": []
+    }
+  ]
+}

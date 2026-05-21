@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/#5094 review lounge",
+  "date": "2026-04-15",
+  "messageCount": 26,
+  "sourceHash": "e800572869895b163ebd1c975afb3cb5377f5b5395a69ad95c4dabd973c20893",
+  "searchText": "Some reference tests for this PR can be found here: https://github.com/nflaig/consensus-specs/actions/runs/24418218975 Note, this isn't the latest commit, but it might still be useful. cc <@641548687813902336> <@586161934425128960> <@363800010518822915> <@654267572107083777> <@602753420033785856> I got both mainnet and minimal passing. Two feedback * It looks like we added `process_parent_execution_payload` tests, but removed the `process_execution_payload` tests entirely. Why were those removed? They still exist and still seem like valid tests, even if they are verify-only * The `process_parent_execution_payload` tests feel a bit odd. I had them fail at first when running `process_parent_execution_payload`, then realized `randao` and some other fields had changed. I looked into it a bit more and you need to run the whole state transition for them to pass. Is that intended? I have a question regarding using `should_extend_payload`. ``` def should_extend_payload(store: Store, root: Root) -> bool: proposer_root = store.proposer_boost_root return ( (is_payload_timely(store, root) and is_payload_data_available(store, root)) # Depends on when we receive votes or proposer_root == Root() # Will always be False if root is proposer root or store.blocks[proposer_root].parent_root != root # Will always be True if root is proposer_root or is_parent_node_full(store, store.blocks[proposer_root]) # Depends on the if the current block extended on parent ) ``` if we call `prepare_execution_payload` at like t=7s into the slot. Then assuming the beacon block for the slot is timely. The `root` and `proposer_root` will always be the same. `should_extend_payload` will always return True in this case right? based on `store.blocks[proposer_root].parent_root != root` which will always be True. I think `get_payload_status_tiebreaker` always calls `should_extend_payload` if the `root` is in the previous slot so `prepare_execution_payload` basically extends the payload if the beacon block is timely and the payload has been seen. But we can have a case where the beacon block is timely, it doesn't extend on its parent block and there are no PTC votes which might cause the block to wrongly extend the payload when it shouldn't? ~~ahh my bad, the state is advanced by process_slots so the proposer_boost_root would be unset~~ ~~I guess it ll always return True as `proposer_root == Root()`~~ i dont think `process_slots` unsets proposer boost root, but it is unset in `on_tick` I guess in the next slot, if the outcome of should_extend_payload changes, we would have to recall `prepare_execution_payload` regarding (1), where does Prysm implement `verify_execution_payload_envelope`? I was debating with Justin already whether we wanna put that function in `beacon-chain.md` or in `fork-choice.md` <@592004585506340885> maybe we can have tests for `verify_execution_payload_envelope` somehow? it looks like you deleted them [here](https://github.com/ethereum/consensus-specs/pull/5094/changes/1000bf81a1cb5d6fb55f05a7ded4b7ca1abc5259) Gm. As of this PR, `process_execution_payload` is removed. So why would there be Gloas+ tests for it? Regarding the 2nd point. Hmm that seems wrong. Let me look in to that. I put tests for `verify_execution_payload_envelope` here: https://github.com/nflaig/consensus-specs/blob/0a4bb37f686e3127390e0388475a7619e4bf1f5c/tests/core/pyspec/eth_consensus_specs/test/gloas/fork_choice/test_on_execution_payload_envelope.py Because this is a FC function, tests for it do not belong in block processing. because the tests also checked on the verifying part didn't they? Yes, but these have just been moved to a different test file. Not an exact copy, but similar. so maybe we do move the functions to `fork-choice.md`? as you suggested I'd be fine with that. Doesn't really matter though. Might reduce some confusion. I was under the impression everything under beacon chain md will have tests and we should test for them Even it's verify only, I think we should have tests one way or another pending the right locations To be clear, there are tests for the verify function. It's just in the fork choice tests, not block processing. ah ok, that's good to know, prysm passes them then Update on the 2nd point. I fixed this here (https://github.com/ethereum/consensus-specs/pull/5094/commits/dfce0c05abd307301801e15ce60764b1b00cdc18) and kicked off the test generation for it here (https://github.com/ethereum/consensus-specs/actions/runs/24465937513). These should be available in ~4 hours 😭 This action (https://github.com/ethereum/consensus-specs/actions/runs/24466896617) will produce just the minimal tests for Gloas. Should be available in ~20 minutes. awesome!! I just pushed a commit which does this. This is a weak preference of mine. Can revert if clients don't like it. But this simply moves two functions. No actual behavior differences. ~~Can you make another test release please? The `process_parent_execution_payload` operation tests were generated with `state_transition_and_sign_block` which is wrong, and I saw you fixed it in the PR.~~ Looks like there is new release. Lemme test again",
+  "excerpts": [
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Some reference tests for this PR can be found here:\nhttps://github.com/nflaig/consensus-specs/actions/runs/24418218975\n\nNote, this isn't the latest commit, but it might still be useful.\n\ncc <@641548687813902336> <@586161934425128960> <@363800010518822915> <@654267572107083777> <@602753420033785856>",
+      "createdAt": "2026-04-15T00:07:58.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I got both mainnet and minimal passing. Two feedback\n\n* It looks like we added `process_parent_execution_payload` tests, but removed the `process_execution_payload` tests entirely. Why were those removed? They still exist and still seem like valid tests, even if they are verify-only\n* The `process_parent_execution_payload` tests feel a bit odd. I had them fail at first when running `process_parent_execution_payload`, then realized `randao` and some other fields had changed. I looked into it a bit more and  you need to run the whole state transition for them to pass. Is that intended?",
+      "createdAt": "2026-04-15T03:24:49.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I have a question regarding using `should_extend_payload`. \n```\ndef should_extend_payload(store: Store, root: Root) -> bool:\n    proposer_root = store.proposer_boost_root\n    return (\n        (is_payload_timely(store, root) and is_payload_data_available(store, root)) # Depends on when we receive votes\n        or proposer_root == Root() # Will always be False if root is proposer root\n        or store.blocks[proposer_root].parent_root != root # Will always be True if root is proposer_root\n        or is_parent_node_full(store, store.blocks[proposer_root]) # Depends on the if the current block extended on parent\n    )\n```\nif we call `prepare_execution_payload` at like t=7s into the slot. Then assuming the beacon block for the slot is timely. The `root` and `proposer_root` will always be the same.  `should_extend_payload`  will always return True in this case right?  based on `store.blocks[proposer_root].parent_root != root` which will always be True. \nI think `get_payload_status_tiebreaker` always calls `should_extend_payload` if the `root` is in the previous slot",
+      "createdAt": "2026-04-15T05:17:18.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so `prepare_execution_payload` basically extends the payload if the beacon block is timely and the payload has been seen. But we can have a case where the beacon block is timely, it doesn't extend on its parent block and there are no PTC votes which might cause the block to wrongly extend the payload when it shouldn't?",
+      "createdAt": "2026-04-15T05:18:28.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "~~ahh my bad, the state is advanced by process_slots so the proposer_boost_root would be unset~~",
+      "createdAt": "2026-04-15T05:49:54.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "~~I guess it ll always return True as `proposer_root == Root()`~~",
+      "createdAt": "2026-04-15T05:52:13.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i dont think `process_slots` unsets proposer boost root, but it is unset in `on_tick`",
+      "createdAt": "2026-04-15T05:59:16.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess in the next slot, if the outcome of should_extend_payload changes, we would have to recall `prepare_execution_payload`",
+      "createdAt": "2026-04-15T06:39:57.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "regarding (1), where does Prysm implement `verify_execution_payload_envelope`? I was debating with Justin already whether we wanna put that function in `beacon-chain.md` or in `fork-choice.md`\n\n<@592004585506340885> maybe we can have tests for `verify_execution_payload_envelope` somehow? it looks like you deleted them [here](https://github.com/ethereum/consensus-specs/pull/5094/changes/1000bf81a1cb5d6fb55f05a7ded4b7ca1abc5259)",
+      "createdAt": "2026-04-15T10:50:02.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Gm. As of this PR, `process_execution_payload` is removed. So why would there be Gloas+ tests for it?",
+      "createdAt": "2026-04-15T12:38:47.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Regarding the 2nd point. Hmm that seems wrong. Let me look in to that.",
+      "createdAt": "2026-04-15T12:39:28.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I put tests for `verify_execution_payload_envelope` here: https://github.com/nflaig/consensus-specs/blob/0a4bb37f686e3127390e0388475a7619e4bf1f5c/tests/core/pyspec/eth_consensus_specs/test/gloas/fork_choice/test_on_execution_payload_envelope.py",
+      "createdAt": "2026-04-15T12:41:26.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Because this is a FC function, tests for it do not belong in block processing.",
+      "createdAt": "2026-04-15T12:42:02.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "because the tests also checked on the verifying part didn't they?",
+      "createdAt": "2026-04-15T12:55:14.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes, but these have just been moved to a different test file. Not an exact copy, but similar.",
+      "createdAt": "2026-04-15T12:59:38.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so maybe we do move the functions to `fork-choice.md`? as you suggested",
+      "createdAt": "2026-04-15T13:16:41.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'd be fine with that. Doesn't really matter though. Might reduce some confusion.",
+      "createdAt": "2026-04-15T13:26:21.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was under the impression everything under beacon chain md will have tests and we should test for them \n\nEven it's verify only, I think we should have tests  one way or another pending the right locations",
+      "createdAt": "2026-04-15T13:34:49.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "To be clear, there are tests for the verify function. It's just in the fork choice tests, not block processing.",
+      "createdAt": "2026-04-15T13:56:53.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah ok, that's good to know, prysm passes them then",
+      "createdAt": "2026-04-15T14:04:26.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Update on the 2nd point. I fixed this here (https://github.com/ethereum/consensus-specs/pull/5094/commits/dfce0c05abd307301801e15ce60764b1b00cdc18) and kicked off the test generation for it here (https://github.com/ethereum/consensus-specs/actions/runs/24465937513). These should be available in ~4 hours 😭",
+      "createdAt": "2026-04-15T16:47:07.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This action (https://github.com/ethereum/consensus-specs/actions/runs/24466896617) will produce just the minimal tests for Gloas. Should be available in ~20 minutes.",
+      "createdAt": "2026-04-15T16:49:39.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "awesome!!",
+      "createdAt": "2026-04-15T16:59:56.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I just pushed a commit which does this. This is a weak preference of mine. Can revert if clients don't like it.",
+      "createdAt": "2026-04-15T17:11:22.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But this simply moves two functions. No actual behavior differences.",
+      "createdAt": "2026-04-15T17:12:02.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nc1234",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "~~Can you make another test release please? The `process_parent_execution_payload` operation tests were generated with `state_transition_and_sign_block` which is wrong, and I saw you fixed it in the PR.~~ Looks like there is new release. Lemme test again",
+      "createdAt": "2026-04-15T23:53:27.134000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,506 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-16",
+  "messageCount": 62,
+  "sourceHash": "3b48f75c55d1a4d646433d7319cb73a38382f6e3e92c13bc23d191f32798fa88",
+  "searchText": "Yes this is correct, in fact they were added to the block just to prevent this signature change > \"to build on full you have to know the full payload\" becomes \"to import the block you have to know the previous full payload\" we should distinguish between two modes: syncing and catching up, because these are two independent network planes and must be treated differently. - live syncing == propagation == critical path. to import beacon block N (head) you need to have executed its parent. this means you already have the execution payload and therefore the requests. no need to propagate them again. - catching up == no propagation (or rather: you use propagation at an informational level only). here you rely on checkpoint sync to a finalized epoch, then req/resp onwards. both the snapshot and the req/resp contain the execution requests. there is a third mode (reorging), which is is really (1) falling back to (2) temporarily. in all cases, when you **ask** for it, you are served the requests. all i'm saying is that we should avoid *propagating* them twice. they can still be part of the formal beacon block, they are just elided in the gossip network payload. I agree with you that the definition of what is \"on-chain\" must not necessarily be equivalent of what is on gossip layer. Ignoring the technical consequences (can differ from client to client), we could have a \"execution-request-blinded\" datastructure running on gossip, while having the unblinded version on RPC layer. block+enevlop gossip will give you everything. another option could be to have the RPC datastructure blinded too, but havng an RPC dedcated to ExecutionRequestByRoot (beacon block root) so the on-chain consensus remains exactly as is, what changes is the networking layer supporting those structures. It could be even delivered as a coordinated release not requiring an HF > all i'm saying is that we should avoid propagating them twice. I don't think it's technically needed to have them in the `ExecutionPayloadEnvelope`, the local EL can always reconstruct them from the payload but that would require `engine_newPayload` to return them and we lose the ability to statically check them on gossip/fork choice before calling the EL Yeah with 5094 we could do this at the cost of slightly complicating the engine API, we would pass the bid root on new Payload and it will add a validation step on the EL to check that they match. The next proposer will also require an endpoint to recover them. I think this is not worth it cause the pain is in CL gossip not EL gossip <@795439202732867594> <@504202741933932544> we clearly have solutions to make the STF dependent on the availability of the requests, however, in addition of making the STF signature be clearly distinct for the first time, it would make RPC serving much more complicated. Range serving of blocks should unblind the blocks by requesting the requests from DB, assembling the block and sending them. This is all doable, the question is if we want to go this route. kinda related, I was curious why you mentioned including a ton of invalid requests is free for a builder, because they have to pass `verify_execution_payload_envelope` otherwise the payload is invalid and the next proposer will not build on it, there is comment below that says \"deposit requests that are crap\", in what regard? yeah, I'm actually disregarding EL validations, we do send the requests to the EL to verify them. My worry is mostly about the broadcast cost and situations of payload equivocations with bad requests. perhaps the garbage requests is not a problem if the cost to include them and passing validation is more than the expected profit of a reorg, which should probably be fine since a reorg cannot steal a payload in ePBS. to pass validation you need to lock up a huge amount of capital and currently the max size is limited by the gas limit but I brought this up because removing `execution_requests` from `ExecutionPayloadEnvelope` kinda resolves this issue? can't you just let the EL return it in the `engine_newPayload` and do the root check on the CL side? you mean the requests would be part of the payload itself instead of the envelope? they are part of the payload already (sort of) but as transactions, the EL can always reconstruct them yes so this was originally the design, for requests, I do not know why we went with the two seaparate lists that need to be validated that they are in sync aren't they part of the CL block because pre-gloas you need them for stf? if you rely on them being given to you by the EL you can't run `state_transition` on a blinded block, that's at least one issue I see (also same reasoning as above that stf should be self-contained) removing the requests from the envelope also prevent payload equivocation at least with regards to these requests. well, this same issue would continue happening if we remove them from the payload, they are always needed for the STF. We can remove it from the payload and then add them to the block. We could remove them from both but again this breaks syncing without the payloads. we do need them in the `BeaconBlock` via `parent_execution_requests` but I don't see a reason why the `ExecutionPayloadEnvelope` should have `execution_requests` since there is no stf anymore yeah currently they aren't needed except to make sure that they correspond to the committed root <@&1417820113981145228> could I get some reviews on these two PRs: * https://github.com/ethereum/consensus-specs/pull/5117 * https://github.com/ethereum/consensus-specs/pull/4840 is slot pre compile in? as i review: https://github.com/ethereum/execution-apis/blob/main/src/engine/amsterdam.md there is `slotNumber: QUANTITY, 64 Bits` so do we want to create another situation that diverge from engine api that only consits of BAL but not slot number? I don't fully understand the question. Isn't this required for interop? yes, you did it in 4840, but dont we want it in 5117 too? the payload needs to contain the slot number right? Hmm you're right. I missed that. Good catch. Will update. I'm not sure if there was an ExecutionPayload change in the EIP when I made this PR back in January It would be easier to make this change after 5117 is merged. I'm just going to wait. the question is more, do we accept both BAL and slot pre compile or BAL only? i know for BAL yes but i didnt get a sense for slot pre compile during the call (probably i missed it) i dont have a strong preference either cc <@412614104222531604> i'd prefer to have both we should do both as it’s been part of bals devnet for a long time now we shouldn’t rip it out now Also devs, thoughts on this PR? https://github.com/ethereum/consensus-specs/pull/5088 Sorry, there's so much to review 😢 My preference is that we shouldn't have impossible condition checks & if in the future we need this, we can always add it back. cc <@654267572107083777> ok in that case <@755590043632140352> might want to update his PR or it will be a different PR. the sooner we can have a release / spec tests the better because bottleneck will be on the client implementation and review yeah I agree may i assume https://github.com/ethereum/execution-apis/blob/main/src/engine/amsterdam.md is the source of truth now for glamsterdem devnet 0? i implemented bal and slot pre compile for prysm, i want to test it on kurtosis, which EL/geth image can i use? even better a kurtosis config example that worked for bal devnet will be great cc <@&1460290804898861117> <https://notes.ethereum.org/@ethpandaops/bal-devnet-3> Thanks! Specifically: https://notes.ethereum.org/@ethpandaops/bal-devnet-3#Local-testing `ethpandaops/geth:bal-devnet-3` I've made some more changes to the eip7843 PR. Now that `ExecutionPayload` contains the `slot_number` field, we can remove the `slot` field from `ExecutionPayloadEnvelope`. Obviously a consensus breaking change, but now is the time to make the change. we can remove `slot` from the `ExecutionPayloadEnvelope` right? Yeah I think so. That's what I did. btw do we wanna do something like this: https://github.com/ethereum/execution-apis/pull/608 otherwise local block building will struggle to set the gas limit I don't think so. We're not currently touching engine_forkchoiceUpdated in gloas. seems random, why now? https://github.com/ethereum/execution-apis/pull/608#issuecomment-3798868091 last part of my comment > for gloas, it's important to revisit this topic as a CL client can \"act as a builder\" but to do that it needs to be able to adjust the gas limit per payload/slot based on the proposer preferences received over p2p, a static gas limit config via CLI flag will not work here quick update: prysm implemented bal, slot in payload changes with amsterdam engine api and can finalize kurtosis with `ethpandaops/geth:bal-devnet-3`. I tested syncing as well next step is to wait for spec test and a release to make sure we can pass those Nice. I just kicked off the tests action for my eip7843 branch here: * https://github.com/jtraglia/consensus-specs/actions/runs/24537943344 Just the minimal tests. Will take ~1 hour to generate. This includes 5094 too. And this is the spec PR: https://github.com/ethereum/consensus-specs/pull/4840 <@592004585506340885> Can we get a build from `master` without BAL? Yes! Just minimal or do you want minimal & mainnet? Just minimal would be faster.",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes this is correct, in fact they were added to the block just to prevent this signature change",
+      "createdAt": "2026-04-16T11:05:05.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "raulvk",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> \"to build on full you have to know the full payload\" becomes \"to import the block you have to know the previous full payload\"\n\nwe should distinguish between two modes: syncing and catching up, because these are two independent network planes and must be treated differently.\n\n- live syncing == propagation == critical path. to import beacon block N (head) you need to have executed its parent. this means you already have the execution payload and therefore the requests. no need to propagate them again.\n- catching up == no propagation (or rather: you use propagation at an informational level only). here you rely on checkpoint sync to a finalized epoch, then req/resp onwards. both the snapshot and the req/resp contain the execution requests.\n\nthere is a third mode (reorging), which is is really (1) falling back to (2) temporarily. in all cases, when you **ask** for it, you are served the requests. all i'm saying is that we should avoid *propagating* them twice. they can still be part of the formal beacon block, they are just elided in the gossip network payload.",
+      "createdAt": "2026-04-16T12:25:23.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree with you that the definition of what is \"on-chain\" must not necessarily be equivalent of what is on gossip layer.\nIgnoring the technical consequences (can differ from client to client), we could have a \"execution-request-blinded\" datastructure running on gossip, while having the unblinded version on RPC layer.",
+      "createdAt": "2026-04-16T12:41:16.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "block+enevlop gossip will give you everything.\n\nanother option could be to have the RPC datastructure blinded too, but havng an RPC dedcated to ExecutionRequestByRoot (beacon block root)",
+      "createdAt": "2026-04-16T12:43:43.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so the on-chain consensus remains exactly as is, what changes is the networking layer supporting those structures.\nIt could be even delivered as a coordinated release not requiring an HF",
+      "createdAt": "2026-04-16T12:45:25.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> all i'm saying is that we should avoid propagating them twice.\nI don't think it's technically needed to have them in the `ExecutionPayloadEnvelope`, the local EL can always reconstruct them from the payload but that would require `engine_newPayload` to return them and we lose the ability to statically check them on gossip/fork choice before calling the EL",
+      "createdAt": "2026-04-16T12:50:51.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah with 5094 we could do this at the cost of slightly complicating the engine API, we would pass the bid root on new Payload and it will add a validation step on the EL to check that they match. The next proposer will also require an endpoint to recover them. I think this is not worth it cause the pain is in CL gossip not EL gossip",
+      "createdAt": "2026-04-16T13:04:33.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@795439202732867594> <@504202741933932544> we clearly have solutions to make the STF dependent on the availability of the requests, however, in addition of making the STF signature be clearly distinct for the first time, it would make RPC serving much more complicated. Range serving of blocks should unblind the blocks by requesting the requests from DB, assembling the block and sending them. \n\nThis is all doable, the question is if we want to go this route.",
+      "createdAt": "2026-04-16T13:27:58.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "kinda related, I was curious why you mentioned including a ton of invalid requests is free for a builder, because they have to pass `verify_execution_payload_envelope` otherwise the payload is invalid and the next proposer will not build on it, there is comment below that says \"deposit requests that are crap\", in what regard?",
+      "createdAt": "2026-04-16T13:32:25.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, I'm actually disregarding EL validations, we do send the requests to the EL to verify them. My worry is mostly about the broadcast cost and situations of payload equivocations with bad requests.",
+      "createdAt": "2026-04-16T13:37:58.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "perhaps the garbage requests is not a problem if the cost to include them and passing validation is more than the expected profit of a reorg, which should probably be fine since a reorg cannot steal a payload in ePBS.",
+      "createdAt": "2026-04-16T13:39:17.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "to pass validation you need to lock up a huge amount of capital and currently the max size is limited by the gas limit",
+      "createdAt": "2026-04-16T13:41:28.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but I brought this up because removing `execution_requests` from `ExecutionPayloadEnvelope` kinda resolves this issue?",
+      "createdAt": "2026-04-16T13:41:48.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can't you just let the EL return it in the `engine_newPayload` and do the root check on the CL side?",
+      "createdAt": "2026-04-16T13:42:27.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean the requests would be part of the payload itself instead of the envelope?",
+      "createdAt": "2026-04-16T13:51:45.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "they are part of the payload already (sort of) but as transactions, the EL can always reconstruct them",
+      "createdAt": "2026-04-16T13:52:58.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes so this was originally the design, for requests, I do not know why we went with the two seaparate lists that need to be validated that they are in sync",
+      "createdAt": "2026-04-16T13:56:08.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "aren't they part of the CL block because pre-gloas you need them for stf? if you rely on them being given to you by the EL you can't run `state_transition` on a blinded block, that's at least one issue I see (also same reasoning as above that stf should be self-contained)",
+      "createdAt": "2026-04-16T13:58:01.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "removing the requests from the envelope also prevent payload equivocation at least with regards to these requests.",
+      "createdAt": "2026-04-16T13:58:14.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, this same issue would continue happening if we remove them from the payload, they are always needed for the STF. We can remove it from the payload and then add them to the block. We could remove them from both but again this breaks syncing without the payloads.",
+      "createdAt": "2026-04-16T13:59:41.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we do need them in the `BeaconBlock` via `parent_execution_requests` but I don't see a reason why the `ExecutionPayloadEnvelope` should have `execution_requests` since there is no stf anymore",
+      "createdAt": "2026-04-16T14:02:16.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah currently they aren't needed except to make sure that they correspond to the committed root",
+      "createdAt": "2026-04-16T14:03:10.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@&1417820113981145228> could I get some reviews on these two PRs:\n* https://github.com/ethereum/consensus-specs/pull/5117\n* https://github.com/ethereum/consensus-specs/pull/4840",
+      "createdAt": "2026-04-16T16:22:17.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is slot pre compile in? as i review: https://github.com/ethereum/execution-apis/blob/main/src/engine/amsterdam.md\nthere is `slotNumber: QUANTITY, 64 Bits`\nso do we want to create another situation that diverge from engine api that only consits of BAL but not slot number?",
+      "createdAt": "2026-04-16T16:45:53.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't fully understand the question. Isn't this required for interop?",
+      "createdAt": "2026-04-16T16:52:39.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, you did it in 4840, but dont we want it in 5117 too?",
+      "createdAt": "2026-04-16T16:53:55.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the payload needs to contain the slot number right?",
+      "createdAt": "2026-04-16T16:54:21.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm you're right. I missed that. Good catch. Will update.",
+      "createdAt": "2026-04-16T16:55:49.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm not sure if there was an ExecutionPayload change in the EIP when I made this PR back in January",
+      "createdAt": "2026-04-16T16:57:25.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It would be easier to make this change after 5117 is merged. I'm just going to wait.",
+      "createdAt": "2026-04-16T16:58:37.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the question is more, do we accept both BAL and slot pre compile or BAL only? \ni know for BAL yes but i didnt get a sense for slot pre compile during the call (probably i missed it)\ni dont have a strong preference either",
+      "createdAt": "2026-04-16T17:01:55.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@412614104222531604>",
+      "createdAt": "2026-04-16T17:21:06.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i'd prefer to have both",
+      "createdAt": "2026-04-16T17:23:06.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should do both",
+      "createdAt": "2026-04-16T17:55:37.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "as it’s been part of bals devnet for a long time now",
+      "createdAt": "2026-04-16T17:55:54.030000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we shouldn’t rip it out now",
+      "createdAt": "2026-04-16T17:56:06.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also devs, thoughts on this PR?\nhttps://github.com/ethereum/consensus-specs/pull/5088",
+      "createdAt": "2026-04-16T18:01:12.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry, there's so much to review 😢",
+      "createdAt": "2026-04-16T18:01:21.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My preference is that we shouldn't have impossible condition checks & if in the future we need this, we can always add it back.",
+      "createdAt": "2026-04-16T18:02:04.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@654267572107083777>",
+      "createdAt": "2026-04-16T18:02:12.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok in that case <@755590043632140352> might want to update his PR or it will be a different PR. \nthe sooner we can have a release / spec tests the better because bottleneck will be on the client implementation and review",
+      "createdAt": "2026-04-16T18:04:04.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I agree",
+      "createdAt": "2026-04-16T18:05:51.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "may i assume https://github.com/ethereum/execution-apis/blob/main/src/engine/amsterdam.md\nis the source of truth now for glamsterdem devnet 0?",
+      "createdAt": "2026-04-16T18:09:23.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i implemented bal and slot pre compile for prysm, i want to test it on kurtosis, which EL/geth image can i use? \neven better a kurtosis config example that worked for bal devnet will be great",
+      "createdAt": "2026-04-16T18:28:38.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@&1460290804898861117>",
+      "createdAt": "2026-04-16T18:54:26.975000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<https://notes.ethereum.org/@ethpandaops/bal-devnet-3>",
+      "createdAt": "2026-04-16T18:54:59.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks! Specifically: https://notes.ethereum.org/@ethpandaops/bal-devnet-3#Local-testing",
+      "createdAt": "2026-04-16T18:57:50.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`ethpandaops/geth:bal-devnet-3`",
+      "createdAt": "2026-04-16T18:58:05.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I've made some more changes to the eip7843 PR. Now that `ExecutionPayload` contains the `slot_number` field, we can remove the `slot` field from `ExecutionPayloadEnvelope`. Obviously a consensus breaking change, but now is the time to make the change.",
+      "createdAt": "2026-04-16T19:41:48.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we can remove `slot` from the `ExecutionPayloadEnvelope` right?",
+      "createdAt": "2026-04-16T19:57:11.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I think so. That's what I did.",
+      "createdAt": "2026-04-16T20:21:08.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "btw do we wanna do something like this: https://github.com/ethereum/execution-apis/pull/608",
+      "createdAt": "2026-04-16T20:28:26.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "otherwise local block building will struggle to set the gas limit",
+      "createdAt": "2026-04-16T20:29:12.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think so. We're not currently touching engine_forkchoiceUpdated in gloas.",
+      "createdAt": "2026-04-16T20:37:04.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "seems random, why now?",
+      "createdAt": "2026-04-16T20:39:02.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/execution-apis/pull/608#issuecomment-3798868091 last part of my comment\n> for gloas, it's important to revisit this topic as a CL client can \"act as a builder\" but to do that it needs to be able to adjust the gas limit per payload/slot based on the proposer preferences received over p2p, a static gas limit config via CLI flag will not work here",
+      "createdAt": "2026-04-16T21:13:47.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "quick update: prysm implemented bal, slot in payload changes with amsterdam engine api and can finalize kurtosis with `ethpandaops/geth:bal-devnet-3`. I tested syncing as well \nnext step is to wait for spec test and a release to make sure we can pass those",
+      "createdAt": "2026-04-16T22:10:19.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Nice. I just kicked off the tests action for my eip7843 branch here:\n* https://github.com/jtraglia/consensus-specs/actions/runs/24537943344",
+      "createdAt": "2026-04-16T22:48:16.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Just the minimal tests. Will take ~1 hour to generate. This includes 5094 too.",
+      "createdAt": "2026-04-16T22:48:53.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And this is the spec PR: https://github.com/ethereum/consensus-specs/pull/4840",
+      "createdAt": "2026-04-16T22:50:24.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@592004585506340885> Can we get a build from `master` without BAL?",
+      "createdAt": "2026-04-16T23:58:01.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes! Just minimal or do you want minimal & mainnet? Just minimal would be faster.",
+      "createdAt": "2026-04-16T23:59:48.895000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,370 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-14",
+  "messageCount": 45,
+  "sourceHash": "c6f7296dcc91184f64332477f02ff9fa9049b6feaf16a2019a2c3f3c67207aba",
+  "searchText": "The only downside is that having two substantial additions in parallel can make merge conflicts a pain to deal with on the client side. That said, it prob will not be too bad. From a quick look, the overlapping areas seem fairly isolated. EIP-7928 appears on beacon state, the payload, and the Engine API call Is there a consensus-specs PR that reflects the latest progress on merging EIP-7928 into the gloas spec folder? I can take this on in a day or two once the spec is a bit more finalized <@1126229231572094976> having two unstable devnets will result one stable one ? ideally bals and epbs gets stable on their own and then we merge the two We are updating LH to follow _Nico's approach_. Could run test vectors if someone builds them from the branch 🙏 Anyone else looking at block production in the new paradigm? Seems like we need to execute `process_parent_execution_payload` while proposing, before forming the bid. We need to process the parent payload to know what the withdrawals should be for the block we're proposing, right? yeah i m trying to wrap my head around that too, `process_parent_execution_payload` adds the builders pending payment to the builder payment withdrawal queue and adds partial withdrawals too via `process_withdrawal_request`. I am not sure if using `get_expected_withdrawals(state)` in `prepare_execution_payload` is right? yeah I don't think it is, I think we need to make `process_parent_execution_payload` optional in block processing, and do something like: - if deciding to build on parent block's bid: run `process_parent_execution_payload` on state - compute withdrawals for EL interaction/bid creation - process beacon block (now including bid we just built), but with `process_parent_execution_payload` _NOT RUNNING_ if we are building on parent block's bid (don't want to run twice) - compute state root for beacon block -> inject -> sign, usual block building process I _think_. I'm a bit fried for today, but will revisit tomorrow. Yes this is correct, proposing was flagged as harder with this approach, I initially thought about caching the state after receiving the Payload and processing it (perhaps with an epoch transition in the middle) but dismissed it as it would make the cache very complex. Perhaps it makes sense to precompute this when we are proposing only this is underspecified right now, need to update `prepare_execution_payload`, looking into how to make that minimal in general this makes for fake engine on both sides, and lots of extra maintenance (and pointless fake branches too) Yeah I think it's very unlikely that BAL component makes consensus bugs. If it's already tested on the EL on it's own then it's good for the ePBS devnet to be based on top of bal The converse is not true and EL devs may want to keep a Bal devnet going longer. But a pure ePBS one is probably useless I'd feel a lot better if we at least had a stable bal devnet before we merge in the changes with epbs. We're not that far off i hope trying to get geth to sync up, working on getting the network to finalize now thanks for looking into that, the spec was not fully updated for this, see `prepare_execution_payload` it's much simpler than what you describe The issue is you can’t really use `is_parent_block_full` from beacon state helper. You need to compute to know whether, for a given parent root and hash, you are building on a full or empty parent. But once you know whether you are building on full or empty, the rest seems pretty straightforward right? Nothing really changes there. If you are building on empty, use `state.payload_expected_withdrawals` If you are building on full, use`get_expected_withdrawals(state)` `is_parent_block_full` no longer exists ya good. i havne't checked latest spec.. i did remove most of `is_parent_block_full` from prysm code you where referring to `prepare_execution_payload`? I just updated that today, it should work now, we just consult `get_head` ya. mainly how a proposer should pack withdrawals. Re: sproul's comment no this doesn't work, because you need to call `get_expected_withdrawals(state)` with the post-state of the requests. wow you are right, i missed that. That's annoying need to study how to make prysm work with this did you check my latest updates to `prepare_execution_payload`? i was a few commits behind, just checked `prepare_execution_payload` and it makes sense to me <@755590043632140352> is this the caching you were talking about? so you probably want to apply envelop requests immediately to precompute the withdrawals if you are the next proposer so you'll have them already if you decide do build on full? Yes but if we do this our cache becomes actually much more complicated and bug prone as I was complaining early on. I think the computation is fast enough that probably we will be fine without caching that's why I stopped complaining yes, it seems to me a fast mutation and we don't need to hash the state neither we need to check on teku 😄 i think the main cost here is you need to copy the state and that's not \"free\" copying isn't an issue for us, but materializing changes in validators and balances carried by execution requests might not be that cheap. We will track the performance and evaluate. Quick question about the gossip rules for payload bids. The spec says > [IGNORE] bid.value is less or equal than the builder's excess balance -- i.e. can_builder_cover_bid(state, builder_index, amount) returns True. What state are we using here? as a proposer, the only useful bids for me would be ones with `parent_block_root` as my canonical head, so would make sense to only check against that state. If we start loading states corresponding to the parent, then it opens us up to a dos risk for not much gain. How are other clients handling this? many gossip rules are underspecified in this same regard IMO, I take it that they all refer to the head state of the validating node copying isn't an issue for us, but I think the biggest problem of your PR <@586161934425128960> as of now is that you need to do an epoch transition **before** you call FCU to propose next block at epoch boundary. It's not much of a problem, but this is an architerctural change for us there's no way to avoid this thus, we'll have to bite the bullet and do the complicated NSC changes that I was afraid of, cc <@363800010518822915> that's true, however you can do that as soon as you have the beacon block, so timing wise seems fine, architecture wise it might be different based on client, we already run state/epoch transition before calling FCU in lodestar in pre-gloas we don't we send many of these things to the background to not lock on the hot path of attestation. We'll need to see what to do, probably we'll end up sending two different FCUs to the EL. one with and another without payload attributes on the flip side, the benefit here of 5094 compared to before is that you can run the epoch transition much earlier into the previous slot since you not longer have to wait for the payload to arrive (which could be late depending on ptc deadline), let's say 9 seconds, then you only have 3 seconds to do the epoch transition, and likely clients would have to run 2 epoch transition just to be prepared I think a distilled form of the discussion in threads is that the most fundamental difference in the spec that 5094 brings is that a state doesn't discern between full or empty so the notion of \"head state\" loses some meaning. This is evidenced by the fact that we now need offchain information to construct a block. That is. \"A node today is given a beacon state and it doesn't need anything else to construct a block that builds on it and is automatically canonical. \" This is no longer true with 5094 because the node needs to have external information to tell it if it's block needs to build on full or empty. And in case it needs to build on full it requires to have the full requests also available. I don't think this is a risk to liveness, but it is a consequential change when are we targeting to have bal as part of devnet? (glamsterdam-devnet-0) https://discord.com/channels/595666850260713488/874767108809031740/1493575150719991868 (but see a couple messages up also for context)",
+  "excerpts": [
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The only downside is that having two substantial additions in parallel can make merge conflicts a pain to deal with on the client side. That said, it prob will not be too bad. From a quick look, the overlapping areas seem fairly isolated. EIP-7928 appears on beacon state, the payload, and the Engine API call\n\nIs there a consensus-specs PR that reflects the latest progress on merging EIP-7928 into the gloas spec folder? I can take this on in a day or two once the spec is a bit more finalized <@1126229231572094976>",
+      "createdAt": "2026-04-14T01:57:12.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "having two unstable devnets will result one stable one ?",
+      "createdAt": "2026-04-14T04:17:04.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ideally bals and epbs gets stable on their own and then we merge the two",
+      "createdAt": "2026-04-14T04:17:28.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We are updating LH to follow _Nico's approach_. Could run test vectors if someone builds them from the branch 🙏",
+      "createdAt": "2026-04-14T04:58:05.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Anyone else looking at block production in the new paradigm? Seems like we need to execute `process_parent_execution_payload` while proposing, before forming the bid. We need to process the parent payload to know what the withdrawals should be for the block we're proposing, right?",
+      "createdAt": "2026-04-14T07:40:44.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah i m trying to wrap my head around that too, `process_parent_execution_payload` adds the builders pending payment to the builder payment withdrawal queue and adds partial withdrawals too via `process_withdrawal_request`. I am not sure if using `get_expected_withdrawals(state)` in `prepare_execution_payload` is right?",
+      "createdAt": "2026-04-14T07:57:31.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I don't think it is, I think we need to make `process_parent_execution_payload` optional in block processing, and do something like:\n\n- if deciding to build on parent block's bid: run `process_parent_execution_payload` on state\n- compute withdrawals for EL interaction/bid creation\n- process beacon block (now including bid we just built), but with `process_parent_execution_payload` _NOT RUNNING_ if we are building on parent block's bid (don't want to run twice)\n- compute state root for beacon block -> inject -> sign, usual block building process",
+      "createdAt": "2026-04-14T07:59:59.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I _think_. I'm a bit fried for today, but will revisit tomorrow.",
+      "createdAt": "2026-04-14T08:00:11.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes this is correct, proposing was flagged as harder with this approach, I initially thought about caching the state after receiving the Payload and processing it (perhaps with an epoch transition in the middle) but dismissed it as it would make the cache very complex. Perhaps it makes sense to precompute this when we are proposing only",
+      "createdAt": "2026-04-14T09:13:38.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is underspecified right now, need to update `prepare_execution_payload`, looking into how to make that minimal",
+      "createdAt": "2026-04-14T09:16:03.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in general this makes for fake engine on both sides, and lots of extra maintenance",
+      "createdAt": "2026-04-14T10:28:51.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(and pointless fake branches too)",
+      "createdAt": "2026-04-14T10:32:58.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I think it's very unlikely that BAL component makes consensus bugs. If it's already tested on the EL on it's own then it's good for the ePBS devnet to be based on top of bal",
+      "createdAt": "2026-04-14T10:42:25.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The converse is not true and EL devs may want to keep a Bal devnet going longer. But a pure ePBS one is probably useless",
+      "createdAt": "2026-04-14T10:42:59.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'd feel a lot better if we at least had a stable bal devnet before we merge in the changes with epbs.",
+      "createdAt": "2026-04-14T11:34:25.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We're not that far off i hope",
+      "createdAt": "2026-04-14T11:34:45.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "trying to get geth to sync up, working on getting the network to finalize now",
+      "createdAt": "2026-04-14T11:34:55.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thanks for looking into that, the spec was not fully updated for this, see `prepare_execution_payload` it's much simpler than what you describe",
+      "createdAt": "2026-04-14T12:35:05.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The issue is you can’t really use `is_parent_block_full` from beacon state helper. You need to compute to know whether, for a given parent root and hash, you are building on a full or empty parent.\n\nBut once you know whether you are building on full or empty, the rest seems pretty straightforward right? Nothing really changes there. \n\nIf you are building on empty,  use `state.payload_expected_withdrawals`\nIf you are building on full, use`get_expected_withdrawals(state)`",
+      "createdAt": "2026-04-14T14:09:47.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`is_parent_block_full` no longer exists",
+      "createdAt": "2026-04-14T14:10:09.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ya good. i havne't checked latest spec.. i did remove most of `is_parent_block_full` from prysm code",
+      "createdAt": "2026-04-14T14:10:36.916000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you where referring to `prepare_execution_payload`?",
+      "createdAt": "2026-04-14T14:11:45.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I just updated that today, it should work now, we just consult `get_head`",
+      "createdAt": "2026-04-14T14:12:03.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ya. mainly how a proposer should pack withdrawals. Re: sproul's comment",
+      "createdAt": "2026-04-14T14:12:16.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no this doesn't work, because you need to call `get_expected_withdrawals(state)` with the post-state of the requests.",
+      "createdAt": "2026-04-14T14:29:28.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "wow you are right, i missed that. That's annoying\nneed to study how to make prysm work with this",
+      "createdAt": "2026-04-14T14:31:56.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "did you check my latest updates to `prepare_execution_payload`?",
+      "createdAt": "2026-04-14T14:36:04.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i was a few commits behind, just checked `prepare_execution_payload` and it makes sense to me",
+      "createdAt": "2026-04-14T14:41:23.402000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> is this the caching you were talking about? so you probably want to apply envelop requests immediately to precompute the withdrawals if you are the next proposer so you'll have them already if you decide do build on full?",
+      "createdAt": "2026-04-14T14:47:27.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes but if we do this our cache becomes actually much more complicated and bug prone as I was complaining early on. I think the computation is fast enough that probably we will be fine without caching that's why I stopped complaining",
+      "createdAt": "2026-04-14T14:48:44.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, it seems to me a fast mutation and we don't need to hash the state neither",
+      "createdAt": "2026-04-14T14:49:34.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we need to check on teku 😄",
+      "createdAt": "2026-04-14T14:49:46.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think the main cost here is you need to copy the state and that's not \"free\"",
+      "createdAt": "2026-04-14T15:35:34.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "copying isn't an issue for us, but materializing changes in validators and balances carried by execution requests might not be that cheap. We will track the performance and evaluate.",
+      "createdAt": "2026-04-14T15:42:09.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Quick question about the gossip rules for payload bids. The spec says\n> [IGNORE] bid.value is less or equal than the builder's excess balance -- i.e. can_builder_cover_bid(state, builder_index, amount) returns True.\n\nWhat state are we using here? as a proposer, the only useful bids for me would be ones with `parent_block_root` as my canonical head, so would make sense to only check against that state. \nIf we start loading states corresponding to the parent, then it opens us up to a dos risk for not much gain. How are other clients handling this?",
+      "createdAt": "2026-04-14T15:55:42.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "many gossip rules are underspecified in this same regard IMO, I take it that they all refer to the head state of the validating node",
+      "createdAt": "2026-04-14T15:56:35.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "copying isn't an issue for us, but",
+      "createdAt": "2026-04-14T16:02:52.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the biggest problem of your PR <@586161934425128960> as of now is that you need to do an epoch transition **before** you call FCU to propose next block at epoch boundary. It's not much of a problem, but this is an architerctural change for us",
+      "createdAt": "2026-04-14T18:27:15.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there's no way to avoid this thus, we'll have to bite the bullet and do the complicated NSC changes that I was afraid of, cc <@363800010518822915>",
+      "createdAt": "2026-04-14T18:27:52.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's true, however you can do that as soon as you have the beacon block, so timing wise seems fine, architecture wise it might be different based on client, we already run state/epoch transition before calling FCU in lodestar in pre-gloas",
+      "createdAt": "2026-04-14T18:29:40.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we don't we send many of these things to the background to not lock on the hot path of attestation. We'll need to see what to do, probably we'll end up sending two different FCUs to the EL. one with and another without payload attributes",
+      "createdAt": "2026-04-14T18:31:42.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "on the flip side, the benefit here of 5094 compared to before is that you can run the epoch transition much earlier into the previous slot since you not longer have to wait for the payload to arrive (which could be late depending on ptc deadline), let's say 9 seconds, then you only have 3 seconds to do the epoch transition, and likely clients would have to run 2 epoch transition just to be prepared",
+      "createdAt": "2026-04-14T18:31:46.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think a distilled form of the discussion in threads is that the most fundamental difference in the spec that 5094 brings is that a state doesn't discern between full or empty so the notion of \"head state\" loses some meaning. This is evidenced by the fact that we now need offchain information to construct a block. That is. \n\n\"A node today is given a beacon state and it doesn't need anything else to construct a block that builds on it and is automatically canonical. \"\n\nThis is no longer true with 5094 because the node needs to have external information to tell it if it's block needs to build on full or empty. And in case it needs to build on full it requires to have the full requests also available. \n\nI don't think this is a risk to liveness, but it is a consequential change",
+      "createdAt": "2026-04-14T19:34:48.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when are we targeting to have bal as part of devnet? (glamsterdam-devnet-0)",
+      "createdAt": "2026-04-14T23:42:25.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://discord.com/channels/595666850260713488/874767108809031740/1493575150719991868 (but see a couple messages up also for context)",
+      "createdAt": "2026-04-14T23:50:55.758000+00:00",
+      "attachments": []
+    }
+  ]
+}

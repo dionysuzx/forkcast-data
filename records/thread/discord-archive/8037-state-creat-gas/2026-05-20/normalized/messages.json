@@ -1,0 +1,206 @@
+{
+  "schemaVersion": 1,
+  "channel": "8037-state-creat-gas",
+  "date": "2026-05-20",
+  "messageCount": 23,
+  "sourceHash": "1998e3785e59e0944061eeca6ea3ddc2e68a3d84567f6e108bdce80421013c36",
+  "searchText": "Two thoughts on this: - What \"unbounded\" buys an attacker is modest. The block-level state-gas cap already bounds the worst case at one block's worth of state. Whether that's consumed by one tx or several doesn't change the disk work the network has to do (unlike regular-gas, where a single long-running tx is meaningfully worse than many short ones). The cap on state-gas would mostly impact blocking building, not validation. - A 2x cap (~33.5M) would break the main use case the reservoir model exists for. A max-size 24 KiB contract needs ~37.6M state-gas just for code deposit (24,576 × 1530), plus ~183.6k for the new account and a ~5M constructor budget, which adds up to around 43M total. 2x doesn't cover that. We could derive a cap from the deployment worst case (e.g., `MAX_DEPLOYED_CODE_SIZE × CPSB + intrinsic + constructor_budget`), but I don't think the added complexity is worth it — it's another parameter to justify and maintain for a fairly small marginal benefit over the block-level cap. To pick up on the call refill clarification and the call data floor cap update, I created this [PR](https://github.com/ethereum/EIPs/pull/11706). Would be great to get <@755913785620824175> and client's feedback, specially as the call data floor make lead to implementation and test changes I just reran the analysis and now Erigon is performing on par with all the other clients. This means that based on the current numbers, we don't need to change any prices to these opcodes 🎉 Looks good to me. By the way, I want to correct one of my earlier statements regarding the interaction with the calldata floor cost. Marius pointed out that: Gas may be moved from the regular reservoir to the state reservoir through a pattern where state is created and then later canceled within the same transaction. In this case, although the regular gas budget is initially sufficient to cover the floor cost, it may become insufficient by the end of the transaction, requiring the remaining floor charge to be deducted from the state reservoir instead. The clarification will be appreciated that: in this case (part of floor cost is charged from the state reservoir), will this part be counted as state gas usage or regular gas usage? I don't think this will be an issue with my formulas. `tx_regular_gas` and `tx_state_gas` are separate of the accounting done in `gas_left` and `state_gas_reservoir`, as they record the net costs for regular and state gas. So, independently of whether gas moves from `gas_left` to `tx_state_gas`, the final `tx_regular_gas` and `tx_state_gas` are the same. block-level regular gas An example from claude in this example, the state-used will be non-zero i don't think it's logically correct ... I feel like this change contradicts the guiding principle of 7778, that refunds reduce what is charged to the user, not what the block counts. The key change here as I understand is: ``` # Currently tx_regular_gas = intrinsic_regular_gas + execution_regular_gas_used block_output.block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost) ``` To the following: ``` # Proposed tx_regular_gas = tx_gas_used − tx_state_gas block_output.block_regular_gas_used += tx_regular_gas ``` With the assumption (or principle) that block accounting and tx accounting should align, i.e. `tx_regular_gas + tx_state_gas` should equal `tx_gas_used` per tx. But to me this goes against the principle of 7778 as `tx_gas_used` should be the users costs after the refund is subtracted The original concern feels more like a feature than a bug to me, personally I'm happy with how it is spec'd but maybe I'm missing something. Would be keen to get <@830368514225340436>'s take here! I have a caveat for how to implement this after 7778, which would exclude the refunds. It is int he PR It looks like in cases where `tx_gas_used_before_refund > calldata_floor_gas_cost > tx_gas_used_after_refund` this PR violates EIP-7778. In the sense that it discounts refunds while accounting for block regular gas. In such cases, if we wanted to respect the rules of EIP-7778, we ought to have `tx_regular_gas = tx_gas_used_before_refund - tx_state_gas` Instead, we end up accounting `tx_regular_gas = calldata_floor_gas_cost - tx_state_gas` (which is lower) And then `block_output.block_regular_gas_used += tx_regular_gas` Tagging this thread: https://discord.com/channels/595666850260713488/1506199660224839860 Should the block level accounting for regular gas in a post EIP-7778 be something like ``` tx_regular_gas = max(tx_gas_used_before_refund, calldata_floor_gas_cost) - tx_state_gas ``` Which I think is identical to what we had earlier `tx_regular_gas` is gas added to `block_output.block_regular_gas_used` so idea is to remove floor_gas from this as it does not represent the gas used in CPU. floor gas should only be used to calculate `tx_used_gas` (gas used in receipt and user fee) This is a separate and important point that warrants discussion. However, if we decide to not include call data floor in the block gas accounting, this should be specified in EIP-7778 since it is part of the scope of that EIP This is the point that <@402853454126776320> made/found, and i kinda agree to it. Both EIP-8037 and EIP-7778 touches how block gas is calculated so i dont really mind where it is put. But yeah having discussion about it makes sense. Yeah, happy to put it in 7778 and leave 8037 as is, if people prefer. Btw i guess these changes will take effect in glam-devnet-5 (if other clients agree with it) Yeah all changes now should go to glam 5, unless consensus critical for bal-denvet-7/glam-dev-4 imo",
+  "excerpts": [
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Two thoughts on this:\n\n- What \"unbounded\" buys an attacker is modest. The block-level state-gas cap already bounds the worst case at one block's worth of state. Whether that's consumed by one tx or several doesn't change the disk work the network has to do (unlike regular-gas, where a single long-running tx is meaningfully worse than many short ones). The cap on state-gas would mostly impact blocking building, not validation. \n- A 2x cap (~33.5M) would break the main use case the reservoir model exists for. A max-size 24 KiB contract needs ~37.6M state-gas just for code deposit (24,576 × 1530), plus ~183.6k for the new account and a ~5M constructor budget, which adds up to around 43M total. 2x doesn't cover that.\n\nWe could derive a cap from the deployment worst case (e.g., `MAX_DEPLOYED_CODE_SIZE × CPSB + intrinsic + constructor_budget`), but I don't think the added complexity is worth it — it's another parameter to justify and maintain for a fairly small marginal benefit over the block-level cap.",
+      "createdAt": "2026-05-20T07:20:36.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "To pick up on the call refill clarification and the call data floor cap update, I created this [PR](https://github.com/ethereum/EIPs/pull/11706). Would be great to get <@755913785620824175> and client's feedback, specially as the call data floor make lead to implementation and test changes",
+      "createdAt": "2026-05-20T07:46:51.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I just reran the analysis and now Erigon is performing on par with all the other clients. This means that based on the current numbers, we don't need to change any prices to these opcodes 🎉",
+      "createdAt": "2026-05-20T07:51:43.739000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "gas_costs_by_client.png",
+          "content": "fd88b420686b63a8e62f377e150b9f5c55c44fd50f8a2fff667150a940c3c958"
+        }
+      ]
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Looks good to me. By the way, I want to correct one of my earlier statements regarding the interaction with the calldata floor cost. Marius pointed out that:\n\nGas may be moved from the regular reservoir to the state reservoir through a pattern where state is created and then later canceled within the same transaction. \n\nIn this case, although the regular gas budget is initially sufficient to cover the floor cost, it may become insufficient by the end of the transaction, requiring the remaining floor charge to be deducted from the state reservoir instead.",
+      "createdAt": "2026-05-20T08:02:00.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "The clarification will be appreciated that: in this case (part of floor cost is charged from the state reservoir), will this part be counted as state gas usage or regular gas usage?",
+      "createdAt": "2026-05-20T08:06:29.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I don't think this will be an issue with my formulas. `tx_regular_gas` and `tx_state_gas` are separate of the accounting done in `gas_left` and `state_gas_reservoir`, as they record the net costs for regular and state gas. So, independently of whether gas moves from `gas_left` to `tx_state_gas`, the final `tx_regular_gas` and `tx_state_gas` are the same.",
+      "createdAt": "2026-05-20T08:40:10.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "block-level regular gas",
+      "createdAt": "2026-05-20T10:55:30.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-05-20T11:38:15.729000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "9cb89647e9b3a3ebf8534bd838260e3268176ad9325170554fccafec9ad26af6"
+        }
+      ]
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "An example from claude",
+      "createdAt": "2026-05-20T11:38:23.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "in this example, the state-used will be non-zero",
+      "createdAt": "2026-05-20T11:38:34.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "i don't think it's logically correct ...",
+      "createdAt": "2026-05-20T11:38:50.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I feel like this change contradicts the guiding principle of 7778, that refunds reduce what is charged to the user, not what the block counts.\n\nThe key change here as I understand is:\n```\n# Currently\ntx_regular_gas = intrinsic_regular_gas + execution_regular_gas_used\nblock_output.block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost)\n```\nTo the following:\n```\n# Proposed\ntx_regular_gas = tx_gas_used − tx_state_gas\nblock_output.block_regular_gas_used += tx_regular_gas\n```\nWith the assumption (or principle) that block accounting and tx accounting should align, i.e. `tx_regular_gas + tx_state_gas` should equal `tx_gas_used` per tx. But to me this goes against the principle of 7778 as `tx_gas_used` should be the users costs after the refund is subtracted\n\nThe original concern feels more like a feature than a bug to me, personally I'm happy with how it is spec'd but maybe I'm missing something. Would be keen to get <@830368514225340436>'s take here!",
+      "createdAt": "2026-05-20T11:40:47.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I have a caveat for how to implement this after 7778, which would exclude the refunds. It is int he PR",
+      "createdAt": "2026-05-20T11:55:19.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gurukamath",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "It looks like in cases where\n`tx_gas_used_before_refund > calldata_floor_gas_cost > tx_gas_used_after_refund`\nthis PR violates EIP-7778. In the sense that it discounts refunds while accounting for block regular gas.\n \nIn such cases, if we wanted to respect the rules of EIP-7778, we ought to have \n`tx_regular_gas = tx_gas_used_before_refund - tx_state_gas`\n\nInstead, we end up accounting \n`tx_regular_gas = calldata_floor_gas_cost - tx_state_gas` (which is lower)\n\nAnd then `block_output.block_regular_gas_used += tx_regular_gas`",
+      "createdAt": "2026-05-20T14:25:13.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Tagging this thread: https://discord.com/channels/595666850260713488/1506199660224839860",
+      "createdAt": "2026-05-20T14:31:06.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gurukamath",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Should the block level accounting for regular gas in a post EIP-7778 be something like\n\n```\ntx_regular_gas = max(tx_gas_used_before_refund, calldata_floor_gas_cost) - tx_state_gas\n```\nWhich I think is identical to what we had earlier",
+      "createdAt": "2026-05-20T14:35:03.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "`tx_regular_gas` is gas added to `block_output.block_regular_gas_used` so idea is to remove floor_gas from this as it does not represent the gas used in CPU.",
+      "createdAt": "2026-05-20T15:01:03.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "floor gas should only be used to calculate `tx_used_gas` (gas used in receipt and user fee)",
+      "createdAt": "2026-05-20T15:01:23.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gurukamath",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This is a separate and important point that  warrants discussion. However, if we decide to not include call data floor in the block gas accounting, this should be specified in EIP-7778 since it is part of the scope of that EIP",
+      "createdAt": "2026-05-20T15:05:11.340000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This is the point that <@402853454126776320> made/found, and i kinda agree to it. Both EIP-8037 and EIP-7778 touches how block gas is calculated so i dont really mind where it is put. But yeah having discussion about it makes sense.",
+      "createdAt": "2026-05-20T15:06:51.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Yeah, happy to put it in 7778 and leave 8037 as is, if people prefer.",
+      "createdAt": "2026-05-20T15:10:39.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Btw i guess these changes will take effect in glam-devnet-5 (if other clients agree with it)",
+      "createdAt": "2026-05-20T15:18:32.045000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Yeah all changes now should go to glam 5, unless consensus critical for bal-denvet-7/glam-dev-4 imo",
+      "createdAt": "2026-05-20T16:07:36.563000+00:00",
+      "attachments": []
+    }
+  ]
+}

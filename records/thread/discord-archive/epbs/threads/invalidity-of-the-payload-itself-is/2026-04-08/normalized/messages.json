@@ -1,0 +1,370 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/_  invalidity of the payload itself is",
+  "date": "2026-04-08",
+  "messageCount": 45,
+  "sourceHash": "3857049c182901169d6440e65830cd893b49fe327f9254ef4d345706888b187d",
+  "searchText": "yes, the execution requests being invalid should invalidate the payload as they do today Perhaps we could decouple this but I believe this imposes a condition on requests which we do not necessarily need what you mean by invalid? execution request can't invalidate the block that's how they are desinged since electra, they are just no-ops if invalid oh crap I am being confused by something else! you're right, the requests being invalid won't need a rollback we do invalidate on false deserialization you would catch that one already when you process the envelope, and would reject it, so the rollback scenario can't happen yeah, I think this is is right so in this design the beacon just notifies the engine of the new payload and adjusts forkchoice but does not do anything onchain the context of the execution requests is done before slot transition then on the next block? and then epoch transition will be probably a problem if we keep that context https://gist.github.com/lodekeeper/6abbbc1f04bb1985f2f7bf165bfa0fa8 is a very rough spec of what i had in mind right, but the issue is that the `state` is already advanced when we get the call to process the block isn't it? so the requests are being passed a state with a different context (which can be particularly problematic at slot 0) and if we want to keep the previous context then implementations become a little trickier yes, `process_slots` needs to be called before applying execution requests to restore checkpoint state and dependent root as defined pre-gloas yeah but this generates the problem that the requests themselves are executed in a slot context different than when they were included. not sure if this is really an issue though one edge case is that execution requests in the last slot of the epoch are delayed by one epoch, but all of these are queue based anyways the very same requests will have different poststates depending on who builds on them which is also kinda crazy so the pre-state to the next block is really not deterministic until you start to build that block. So for example, a proposer will have to get the last payload at 31, precompute the epoch transition, precompute and cache the requests (as they are now part of state transition) and then wait to the beginning of the slot to call get_head and decide where to build if a block is missing, the next proposer needs to precompute the same requests cause their result may be different, even though no block was included this is valid but also is kinda why it solves the core issues brought up, I don't think there is a real practical impact I think this is the same as it is with the current spec with the current spec you locked in a state and then you do the transition my whole design is based on the premise that the intermediate post payload state isn't required, I am still not sure about that but I don't see a difference for proposer on whether or not they build on FULL or EMPTY in current design vs. my proposal, you have to run the `state_transition` either but I don't see why you would need to run it before `get_head`? Let's say the post block N+1 does not include the requests. How do you validate this? This is the fundamental problem of these designs unless you commit the full requests in the bid: the state transition function is no longer state, block -> state. if you do commit the full requests in the bid then it works, but it comes with the problem of having the requests in the bid 🙂 that for sure doesn't work because the proposer has to trust the builder that the execution requests are valid, or you need to figure out what you do if they are invalid, like what do you do with the block, you could make it invalid retroactively when processing the payload but I think that is completely broken design so agree on that point 100% I think having a state transition that is no longer state, block -> state is problematic to say the least 😅 isn't my proposal strictly better here, you can pre-compute the epoch transition without relying on the payload itself which means you can run it earlier in the previous slot (as soon as you see the beacon block and are confident it won't be reorged) while in the current spec you would have to wait until the payload arrives or you have enough PTC votes (>50%) to be confident that the next block (when calling `get_head`) will be build on top of the post payload state (FULL) and not the post block state (EMPTY) so pratically, if you wanna be prepared for both cases, don't you even need to pre-compute two epoch transition, one based on `payload_states[parent]` and another based on `block_states[parent]` > isn't my proposal strictly better here, you can pre-compute the epoch transition without relying on the payload itself which means you can run it earlier in the previous slot (as soon as you see the beacon block and are confident it won't be reorged) In fact this is a good thing of this approach, we do this anyway only when the payload is late. I think the stf having a signature of state, block, optional<payload> -> state works you prefer that over not modyfing that signature at all? At this stage I prefer what we have now rather than redesigning forkchoice to see if it's safe with this signature. But I think it should work Notice that you have it what way isn't it? You're getting the requests from the previous payload I was thinking about having an optional param like you said above but my current design just adds them to the beacon block body ```python class BeaconBlockBody(Container): # ... signed_execution_payload_bid: SignedExecutionPayloadBid payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS] # execution requests from parent's payload (empty if parent was EMPTY) parent_execution_requests: ExecutionRequests ``` and updates `process_block` ```python def process_block(state: BeaconState, block: BeaconBlock) -> None: # Process parent's deferred execution requests FIRST # (uses state.latest_block_header.slot and state.latest_execution_payload_bid # which are overwritten by process_block_header and process_execution_payload_bid) process_parent_execution_payload(state, block) process_block_header(state, block) # ... ``` I don't think it's strictly necessary from spec perspective but I am also not sure if changing the signature of `state_transition` is a good idea since it's stable `(state, block) -> state` since phase0 in general, having everything that's needed to run stf seems like a good idea, it keeps it more self-contained unless I am completely missing something my proposal has no impact on fork choice in fact, it also fixes everything that is currently not correct in the spec like `store_target_checkpoint_state` and `is_within_weak_subjectivity_period` + restores checkpoint state and `dependent_root` semantics on the api I think this also makes optimistic sync slightly simpler but haven't look into too much detail yet",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "",
+      "createdAt": "2026-04-08T15:10:31.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, the execution requests being invalid should invalidate the payload as they do today",
+      "createdAt": "2026-04-08T15:10:32.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Perhaps we could decouple this but I believe this imposes a condition on requests which we do not necessarily need",
+      "createdAt": "2026-04-08T15:10:59.007000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what you mean by invalid? execution request can't invalidate the block",
+      "createdAt": "2026-04-08T15:11:20.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's how they are desinged since electra, they are just no-ops if invalid",
+      "createdAt": "2026-04-08T15:11:50.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "oh crap I am being confused by something else! you're right, the requests being invalid won't need a rollback",
+      "createdAt": "2026-04-08T15:12:51.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we do invalidate on false deserialization",
+      "createdAt": "2026-04-08T15:13:13.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you would catch that one already when you process the envelope, and would reject it, so the rollback scenario can't happen",
+      "createdAt": "2026-04-08T15:14:00.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah, I think this is is right",
+      "createdAt": "2026-04-08T15:14:17.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so in this design the beacon just notifies the engine of the new payload and adjusts forkchoice",
+      "createdAt": "2026-04-08T15:15:13.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but does not do anything onchain",
+      "createdAt": "2026-04-08T15:15:17.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the context of the execution requests is done before slot transition then on the next block?",
+      "createdAt": "2026-04-08T15:15:56.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and then epoch transition will be probably a problem if we keep that context",
+      "createdAt": "2026-04-08T15:16:30.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://gist.github.com/lodekeeper/6abbbc1f04bb1985f2f7bf165bfa0fa8 is a very rough spec of what i had in mind",
+      "createdAt": "2026-04-08T15:17:54.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "right, but the issue is that the `state` is already advanced when  we get the call to process the block isn't it?",
+      "createdAt": "2026-04-08T15:20:52.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the requests are being passed a state with a different context (which can be particularly problematic at slot 0)",
+      "createdAt": "2026-04-08T15:21:14.244000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and if we want to keep the previous context then implementations become a little trickier",
+      "createdAt": "2026-04-08T15:21:34.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, `process_slots` needs to be called before applying execution requests to restore checkpoint state and dependent root as defined pre-gloas",
+      "createdAt": "2026-04-08T15:23:47.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah but this generates the problem that the requests themselves are executed in a slot context  different than when they were included.",
+      "createdAt": "2026-04-08T15:25:30.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "not sure if this is really an issue though",
+      "createdAt": "2026-04-08T15:25:45.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "one edge case is that execution requests in the last slot of the epoch are delayed by one epoch, but all of these are queue based anyways",
+      "createdAt": "2026-04-08T15:26:27.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the very same requests will have different poststates depending on who builds on them",
+      "createdAt": "2026-04-08T15:26:38.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which is also kinda crazy",
+      "createdAt": "2026-04-08T15:27:03.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the pre-state to the next block is really not deterministic until you start to build that block. So for example, a proposer will have to get the last payload at 31, precompute the epoch transition, precompute and cache the requests  (as they are now part of state transition) and then wait to the beginning of the slot to call get_head and decide where to build",
+      "createdAt": "2026-04-08T15:28:44.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if a block is missing, the next proposer needs to precompute the same requests cause their result may be different, even though no block was included",
+      "createdAt": "2026-04-08T15:29:26.873000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is valid but also is kinda why it solves the core issues brought up, I don't think there is a real practical impact",
+      "createdAt": "2026-04-08T16:01:41.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think this is the same as it is with the current spec",
+      "createdAt": "2026-04-08T16:08:01.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "with the current spec you locked in a state and then you do the transition",
+      "createdAt": "2026-04-08T16:08:46.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "my whole design is based on the premise that the intermediate post payload state isn't required, I am still not sure about that but I don't see a difference for proposer on whether or not they build on FULL or EMPTY in current design vs. my proposal, you have to run the `state_transition` either but I don't see why you would need to run it before `get_head`?",
+      "createdAt": "2026-04-08T16:14:12.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Let's say the post block  N+1 does not include the requests. How do you validate this? This is the fundamental problem of these designs unless you commit the full requests in the bid: the state transition function is no longer state, block -> state.",
+      "createdAt": "2026-04-08T16:22:31.190000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if you do commit the full requests in the bid then it works, but it comes with the problem of having the requests in the bid 🙂",
+      "createdAt": "2026-04-08T16:23:01.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that for sure doesn't work because the proposer has to trust the builder that the execution requests are valid, or you need to figure out what you do if they are invalid, like what do you do with the block, you could make it invalid retroactively when processing the payload but I think that is completely broken design",
+      "createdAt": "2026-04-08T16:29:26.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so agree on that point 100%",
+      "createdAt": "2026-04-08T16:29:43.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think having a state transition that is no longer state, block -> state is problematic",
+      "createdAt": "2026-04-08T16:30:32.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "to say the least 😅",
+      "createdAt": "2026-04-08T16:30:51.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "isn't my proposal strictly better here, you can pre-compute the epoch transition without relying on the payload itself which means you can run it earlier in the previous slot (as soon as you see the beacon block and are confident it won't be reorged)\n\nwhile in the current spec you would have to wait until the payload arrives or you have enough PTC votes (>50%) to be confident that the next block (when calling `get_head`) will be build on top of the post payload state (FULL) and not the post block state (EMPTY)\n\nso pratically, if you wanna be prepared for both cases, don't you even need to pre-compute two epoch transition, one based on `payload_states[parent]` and another based on `block_states[parent]`",
+      "createdAt": "2026-04-08T17:13:42.070000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> isn't my proposal strictly better here, you can pre-compute the epoch transition without relying on the payload itself which means you can run it earlier in the previous slot (as soon as you see the beacon block and are confident it won't be reorged)\nIn fact this is a good thing of this approach, we do this anyway only when the payload is late.",
+      "createdAt": "2026-04-08T17:35:26.081000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think the stf having a signature of state, block, optional<payload> -> state  works",
+      "createdAt": "2026-04-08T21:06:10.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you prefer that over not modyfing that signature at all?",
+      "createdAt": "2026-04-08T21:06:44.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "At this stage I prefer what we have now rather than redesigning forkchoice to see if it's safe with this signature. But I think it should work",
+      "createdAt": "2026-04-08T21:07:37.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Notice that you have it what way isn't it? You're getting the requests from the previous payload",
+      "createdAt": "2026-04-08T21:08:04.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was thinking about having an optional param like you said above\n\nbut my current design just adds them to the beacon block body\n\n```python\nclass BeaconBlockBody(Container):\n    # ...\n    signed_execution_payload_bid: SignedExecutionPayloadBid\n    payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]\n    # execution requests from parent's payload (empty if parent was EMPTY)\n    parent_execution_requests: ExecutionRequests\n```\n\nand updates `process_block`\n```python\ndef process_block(state: BeaconState, block: BeaconBlock) -> None:\n    # Process parent's deferred execution requests FIRST\n    # (uses state.latest_block_header.slot and state.latest_execution_payload_bid\n    #  which are overwritten by process_block_header and process_execution_payload_bid)\n    process_parent_execution_payload(state, block)\n    process_block_header(state, block)\n    # ...\n```\n\nI don't think it's strictly necessary from spec perspective but I am also not sure if changing the signature of `state_transition` is a good idea since it's stable `(state, block) -> state` since phase0\n\nin general, having everything that's needed to run stf seems like a good idea, it keeps it more self-contained",
+      "createdAt": "2026-04-08T21:18:06.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "unless I am completely missing something my proposal has no impact on fork choice",
+      "createdAt": "2026-04-08T21:19:42.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "in fact, it also fixes everything that is currently not correct in the spec like `store_target_checkpoint_state` and `is_within_weak_subjectivity_period` + restores checkpoint state and `dependent_root` semantics on the api",
+      "createdAt": "2026-04-08T21:22:40.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think this also makes optimistic sync slightly simpler but haven't look into too much detail yet",
+      "createdAt": "2026-04-08T22:07:53.254000+00:00",
+      "attachments": []
+    }
+  ]
+}

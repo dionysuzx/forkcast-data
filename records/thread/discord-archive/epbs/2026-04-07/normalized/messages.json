@@ -1,0 +1,442 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-07",
+  "messageCount": 54,
+  "sourceHash": "931973b026f9dbc4aeeeb078e90b50cc467d773e85be0ed2e2157f5ec8114a46",
+  "searchText": "Can we break this problem in two? There's a forkchoice bug and an API bug. I won't make any statements about the API bug but I want to fix the forkchoice one. To fix the forkchoice one we do not need to change any checkpoint type and in fact we can just remove the whole checkpoint state cache that is an artifact that leaks unnecessarily into implementations. We should have calls to get_ancestor and if spec maintainers want to optimize this by having an internal cache that is not leaked into the markdown that's fine https://github.com/ethereum/consensus-specs/pull/5073 the concern is about the payload of the skipped slot finalized checkpoint could be reorged but that's also something we want to avoid, to ensure forkchoice to have as less reorg as possible here I propose a candidate: - whenever a checkpoint is promoted to be finalized, also pin its payload_status, tracked as a new field `finalized_checkpoint_payload_status` in Store - reject blocks if it's NOT derived from that finalized checkpoint payload status so it should be certain to know which checkpoint state to be used as `finalized` endpoint please let me know your ideas cc <@755590043632140352> <@534934855113506836> <@586161934425128960> <@358120958726373381> <@602753420033785856> <@520034910149410861> I don't like this solution, because it changes the definition of finalized to be subjective and based on the node's local view. Even though it's unlikely to be divergent. yeah that's a true concern but first do you agree with that approach to not allow reorg the payload once a new finalized checkpoint is known? we can get from finalized_checkpoint_payload_status from BeaconState instead I think, that should be safer No, I don't agree with that approach. The payload is not actually finalized unless we change the definition of Checkpoint to represent that If we adopt anything like this, then it's possible for two nodes to have different ideas of \"finalization\" _without_ anyone getting slashed. It weakens the whole crypto-economic guarantee of finalization. I'm worried that an attacker could try to exploit this to create a permanent network split that could only be resolved manually (by checkpoint syncing half the network to the \"correct\" side) <@688748669268132001> has also realised that this ambiguity about payload presence creates an issue with the justified balances too. The \"justified checkpoint\" is no longer sufficient to uniquely determine the justified balances, so fork choice views can diverge (a lot) between nodes that have/don't have the justified block's payload. E.g. imagine justified block in epoch 1 is justified at epoch 20 (skips between epoch 1 and 20). The payload from this block is capable of (greatly) influencing the balances of validators at epoch 20 Issue for the justified balances issue here: <https://github.com/ethereum/consensus-specs/issues/5074> With this I am leaning towards just copping the change to the Checkpoint type. It feels like the conceptually correct change to make, with less tech debt. found the same issue yesterday, we discussed a few approaches internally but none seems to quite be right, see [summary](https://gist.github.com/lodekeeper/5da112623d62f9ee270130090a7d3f19). > With this I am leaning towards just copping the change to the Checkpoint type how would you deal with slot 0 FFG vote? Not sure how to deal with the slot 0 case, it's a bit terrible either way. We can't count it towards the full checkpoint, but also don't want to penalise those slot 0 attesters. Maybe they could be assessed for rewards based on their block_root + epoch only, but excluded from the FFG calculations :\\ so we'd lose 2 slots worth of validator balance from finalizaton. instead of 100% of validator balance, 15/16 of total active validator balance would be voting to finalize? maybe we could introduce a dedicated api, which just exposes finalized state for doing checkpoint sync, and leave the `/eth/v2/debug/beacon/states/finalized` unchanged. the new api will be equivalent to `/eth/v2/debug/beacon/states/finalized` in pre-gloas. I don't think it's possible with the current spec, if you wanna advance the state to epoch boundary you need to apply the payload which is only justified, so the state you return as finalized, actually isn't ye that's true. slot advancing is broken my gut feeling is that the second state transition in the same slot causes issues. I'd rather do the payload state transition as a pre-state transition to be applied right before the next beacon block state transition. I need to make more sense of it but I have this feeling now. This way a payload cannot change the state of the current slot. we won't even have the concept of payload states in that world I am working on exactly that since like 2 hours to competely remove the payload state transition, `execution_requests` are kinda of a pain to deal with and we would likely need to add them to the bid Getting rid of payload states would be very beneficial imo. Maintaining the 1-1 relationship between beaconBlockRoot and the state is a big deal. Maybe potuz has analyzed that already This seems to me that is getting out of hand over an API thing. The spec is rather clear that the justified/finalized state is the post CL state to the block with the checkpoint's root. There can't be any issues with justified balances nor any consensus split. There's an API problem with checkpoint sync that has some consumers and there's an issue with the python spec handling of a state cache. I do not see why we would go with dramatic systematic changes over this In short I strongly disagree with this: it doesn't make sense to change the consensus rules over what the checkpoint endpoint should return or over a Python optimization instead of using the attestation state for validation. The only way I know how to do this is to send the requests with the bid, fully cache them in the state, and execute them as part of state transition of the next beacon block if it builds on full. But even this (which was ditched early on because of all the bad things it brings) only patches the problem rather than solve it: you only know the actual post state of those requests after the next block arrives since the results may vary depending on how many missed slots there are. isn't the problem that you then have them as part of the post block state but they might be invalid and you only figure that out in the next slot, for withdrawals the state caching is fine but I see some issues with execution requests This is one of the problems. Being a noop is relatively fine cause it's just a one slot free DA. It requires a new engine method to call on new blocks I agree that having just one transition would be preferable but I thought long for this two years ago and could not find anything acceptable what about [payload as pre-state transition](https://gist.github.com/lodekeeper/6abbbc1f04bb1985f2f7bf165bfa0fa8), there might be gaps I am missing though You can avoid the engine call also aren't there also implications on networking layer? I believe the StatusMessage's finalized root is now a checkpoint state (advanced) This runs into problems with timing games, incentives of attesters, etc. It ultimately becomes exactly what I propose to just return the post CL block from the point of view of the consumers with bad off protocol incentives No, I think it's the checkpoint root ``` finalized_root: store.finalized_checkpoint.root according to fork choice. (Note this defaults to Root(b'\\x00' * 32) for the genesis finalized checkpoint). ``` That issue is invalid? Maybe we can flesh out exactly why on Github (I tagged you there) yeah indeed, seems all good in teku I do not say the issue is invalid: just that the cache itself is a Python optimization to not call `get_ancestor`. The notion of justified/finalized state should be the post CL-state with the current checkpoint tracking, so there should not be any ambiguity as to which state is used. What I disagree is on changing consensus over this (eg. changing the notion of Checkpoint) as this would be a dramatic change with unforseen problems over something that can be dealt offchain as is the checkpoint state cache in forkchoice I think the linked github issue is invalid tho and I am coming around to your position The checkpoint state cache indeed could be a problem though, <@688748669268132001> is right that it is a source of bugs if client implementers keep different checkpoints for attestation validation for example. I'm pretty sure that Prysm has this as a bug right now, so if we had a test with an entire epoch of missing blocks and the checkpoint payload including exits, I think we would produce the wrong validation. I don't really understand how my proposal changes anything wrt to timing games and attester incentives, it also get rid of `payload_states` altogether keeps checkpoint sync semantics the same (also might affect how we store checkpoint during non finality, so claiming this is \"just\" on the api isn't clear to me yet) what is \"just\" in the API is the current \"problem\", it's not a part of consensus. We can solve it without any changes to consensus. There are solutions with consensus changes, and yes, removing entirely the payload transition and tying it to the next beacon block is a way. The incentives problems are with regard to collusions builder/proposers, but most importantly an issue arises if the call to new Payload is valid and the processing of the requests is invalid. The payload needs to be rolled back in this case. This can be dealt with in a few ways, anyway any succesful block will have to reorg the payload, but it requires careful changes to the engine calls, since proposers that find out that the requests are invalid they need to send FCU with the parent block hash, thus the problem is that the invalidity of the payload itself is not checked with the payload but rather with the next beacon block which makes syncing also harder. I believe any of these drastic changes over this issue of what state is being returned on the beacon API are unwarranted and come with going back to the drawing board to analyze the safety of the whole consensus changes and this is what I strongly opppose So, correct me if I'm wrong. The mental model is that we should ignore the existence of payload states almost everywhere: gossip validations, everything around checkpoints, active balances, etc. The only place where they are used is pre-state selection of the next beacon block. Everything else remains as it is today: only post-beaconblock states matter. I think this is true. However, the situation that worries me is the following: The chain has a block in slot 31 and the next block is in slot 65 based on 31 full During slot 65 you get an attestation for 65 has head, 31 as target. We use a dependent root check to decide which state to use to validate the attestation: the dependent root for the head state coincides with the dependent root fot he target state advanced to 64 and thus we use the head state for validation. The problem is that the head state has the payload processed in that epoch transition and will have a different set of active validators. This is a real problem in implementations. As far as I can tell we use dependent root to decide if we can use the head state to validate two different things: - Is the proposer correct? - Is the attester/ptc attester etc in the right committee? The first one is fine because of the lookahead. The second one is not because it requires the active balance and that can change from head *even if the dependent root is the same*. The problem is here that the dependent root was a concept that was chosen to be the latest blockroot **because** it guarantees that if you have that root on chain you have the right epoch transition and have guarantees shufflings, etc. But now that dependent root is useless if the payload can change the epoch transition. So this requires changes about how we handle depe",
+  "excerpts": [
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Can we break this problem in two? There's a forkchoice bug and an API bug. I won't make any statements about the API bug but I want to fix the forkchoice one. To fix the forkchoice one we do not need to change any checkpoint type and in fact we can just remove the whole checkpoint state cache that is an artifact that leaks unnecessarily into implementations. We should have calls to get_ancestor and if spec maintainers want to optimize this by having an internal cache that is not leaked into the markdown that's fine",
+      "createdAt": "2026-04-07T00:39:54.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/pull/5073\nthe concern is about the payload of the skipped slot finalized checkpoint could be reorged\nbut that's also something we want to avoid, to ensure forkchoice to have as less reorg as possible\nhere I propose a candidate:\n- whenever a checkpoint is promoted to be finalized, also pin its payload_status, tracked as a new field `finalized_checkpoint_payload_status` in Store\n- reject blocks if it's NOT derived from that finalized checkpoint payload status\n\nso it should be certain to know which checkpoint state to be used as `finalized` endpoint\nplease let me know your ideas cc <@755590043632140352> <@534934855113506836> <@586161934425128960> <@358120958726373381> <@602753420033785856> <@520034910149410861>",
+      "createdAt": "2026-04-07T03:07:48.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't like this solution, because it changes the definition of finalized to be subjective and based on the node's local view. Even though it's unlikely to be divergent.",
+      "createdAt": "2026-04-07T04:13:13.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah that's a true concern\nbut first do you agree with that approach to not allow reorg the payload once a new finalized checkpoint is known?\nwe can get from finalized_checkpoint_payload_status from BeaconState instead I think, that should be safer",
+      "createdAt": "2026-04-07T04:26:35.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, I don't agree with that approach. The payload is not actually finalized unless we change the definition of Checkpoint to represent that",
+      "createdAt": "2026-04-07T04:27:21.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If we adopt anything like this, then it's possible for two nodes to have different ideas of \"finalization\" _without_ anyone getting slashed. It weakens the whole crypto-economic guarantee of finalization. I'm worried that an attacker could try to exploit this to create a permanent network split that could only be resolved manually (by checkpoint syncing half the network to the \"correct\" side)",
+      "createdAt": "2026-04-07T04:28:42.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@688748669268132001> has also realised that this ambiguity about payload presence creates an issue with the justified balances too. The \"justified checkpoint\" is no longer sufficient to uniquely determine the justified balances, so fork choice views can diverge (a lot) between nodes that have/don't have the justified block's payload. E.g. imagine justified block in epoch 1 is justified at epoch 20 (skips between epoch 1 and 20). The payload from this block is capable of (greatly) influencing the balances of validators at epoch 20",
+      "createdAt": "2026-04-07T04:31:11.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Issue for the justified balances issue here: <https://github.com/ethereum/consensus-specs/issues/5074>\n\nWith this I am leaning towards just copping the change to the Checkpoint type. It feels like the conceptually correct change to make, with less tech debt.",
+      "createdAt": "2026-04-07T04:44:12.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "found the same issue yesterday, we discussed a few approaches internally but none seems to quite be right, see [summary](https://gist.github.com/lodekeeper/5da112623d62f9ee270130090a7d3f19).\n\n> With this I am leaning towards just copping the change to the Checkpoint type\nhow would you deal with slot 0 FFG vote?",
+      "createdAt": "2026-04-07T07:30:49.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Not sure how to deal with the slot 0 case, it's a bit terrible either way. We can't count it towards the full checkpoint, but also don't want to penalise those slot 0 attesters. Maybe they could be assessed for rewards based on their block_root + epoch only, but excluded from the FFG calculations :\\",
+      "createdAt": "2026-04-07T07:37:51.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so we'd lose 2 slots worth of validator balance from finalizaton. instead of 100% of validator balance, 15/16 of  total active validator balance would be voting to finalize?",
+      "createdAt": "2026-04-07T07:51:36.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "maybe we could introduce a dedicated api, which just exposes finalized state for doing checkpoint sync, and leave the `/eth/v2/debug/beacon/states/finalized` unchanged. the new api will be equivalent to `/eth/v2/debug/beacon/states/finalized` in pre-gloas.",
+      "createdAt": "2026-04-07T07:54:48.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't think it's possible with the current spec, if you wanna advance the state to epoch boundary you need to apply the payload which is only justified, so the state you return as finalized, actually isn't",
+      "createdAt": "2026-04-07T07:56:27.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ye that's true. slot advancing is broken",
+      "createdAt": "2026-04-07T07:57:25.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "my gut feeling is that the second state transition in the same slot causes issues. I'd rather do the payload state transition as a pre-state transition to be applied right before the next beacon block state transition. I need to make more sense of it but I have this feeling now.\nThis way a payload cannot change the state of the current slot.",
+      "createdAt": "2026-04-07T10:28:21.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we won't even have the concept of payload states in that world",
+      "createdAt": "2026-04-07T10:30:28.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I am working on exactly that since like 2 hours to competely remove the payload state transition, `execution_requests` are kinda of a pain to deal with and we would likely need to add them to the bid",
+      "createdAt": "2026-04-07T10:37:53.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Getting rid of payload states would be very beneficial imo. Maintaining the 1-1 relationship between beaconBlockRoot and the state is a big deal. Maybe potuz has analyzed that already",
+      "createdAt": "2026-04-07T10:46:26.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This seems to me that is getting out of hand over an API thing. The spec is rather clear that the justified/finalized state is the post CL state to the block with the checkpoint's root. There can't be any issues with justified balances nor any consensus split. There's an API problem with checkpoint sync that has some consumers and there's an issue with the python spec handling of a state cache. I do not see why we would go with dramatic systematic changes over this",
+      "createdAt": "2026-04-07T10:48:11.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In short I strongly disagree with this: it doesn't make sense to change the consensus rules over what the checkpoint endpoint should return or over a Python optimization instead of using the attestation state for validation.",
+      "createdAt": "2026-04-07T10:58:23.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The only way I know how to do this is to send the requests with the bid, fully cache them in the state, and execute them as part of state transition of the next beacon block if it builds on full. \n\nBut even this (which was ditched early on because of all the bad things it brings) only patches the problem rather than solve it: you only know the actual post state of those requests after the next block arrives since the results may vary depending on how many missed slots there are.",
+      "createdAt": "2026-04-07T11:14:46.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "isn't the problem that you then have them as part of the post block state but they might be invalid and you only figure that out in the next slot, for withdrawals the state caching is fine but I see some issues with execution requests",
+      "createdAt": "2026-04-07T11:56:24.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is one of the problems. Being a noop is relatively fine cause it's just a one slot free DA. It requires a new engine method to call on new blocks",
+      "createdAt": "2026-04-07T12:01:38.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I agree that having just one transition would be preferable but I thought long for this two years ago and could not find anything acceptable",
+      "createdAt": "2026-04-07T12:02:25.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what about [payload as pre-state transition](https://gist.github.com/lodekeeper/6abbbc1f04bb1985f2f7bf165bfa0fa8), there might be gaps I am missing though",
+      "createdAt": "2026-04-07T12:03:31.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You can avoid the engine call also",
+      "createdAt": "2026-04-07T12:03:45.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "aren't there also implications on networking layer? I believe the StatusMessage's finalized root is now a checkpoint state (advanced)",
+      "createdAt": "2026-04-07T12:04:47.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This runs into problems with timing games, incentives of attesters, etc. It ultimately becomes exactly what I propose to just return the post CL block from the point of view of the consumers with bad off protocol incentives",
+      "createdAt": "2026-04-07T12:07:13.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, I think it's the checkpoint root",
+      "createdAt": "2026-04-07T12:11:04.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```\nfinalized_root: store.finalized_checkpoint.root according to fork choice. (Note this defaults to Root(b'\\x00' * 32) for the genesis finalized checkpoint).\n```",
+      "createdAt": "2026-04-07T12:11:37.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That issue is invalid? Maybe we can flesh out exactly why on Github (I tagged you there)",
+      "createdAt": "2026-04-07T13:09:12.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah indeed, seems all good in teku",
+      "createdAt": "2026-04-07T13:10:44.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do not say the issue is invalid: just that the cache itself is a Python optimization to not call `get_ancestor`. The notion of justified/finalized state should be the post CL-state with the current checkpoint tracking, so there should not be any ambiguity as to which state is used. What I disagree is on changing consensus over this (eg. changing the notion  of Checkpoint) as this would be a dramatic change with unforseen problems over something that can be dealt offchain as is the checkpoint state cache in forkchoice",
+      "createdAt": "2026-04-07T13:17:27.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the linked github issue is invalid tho",
+      "createdAt": "2026-04-07T13:22:51.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and I am coming around to your position",
+      "createdAt": "2026-04-07T13:23:28.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The checkpoint state cache indeed could be a problem though, <@688748669268132001> is right that it is a source of bugs if client implementers keep different checkpoints for attestation validation for example. I'm pretty sure that Prysm has this as a bug right now, so if we had a test with an entire epoch of missing blocks and the checkpoint payload including exits, I think we would produce the wrong validation.",
+      "createdAt": "2026-04-07T13:27:59.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't really understand how my proposal changes anything wrt to timing games and attester incentives, it also get rid of `payload_states` altogether keeps checkpoint sync semantics the same (also might affect how we store checkpoint during non finality, so claiming this is \"just\" on the api isn't clear to me yet)",
+      "createdAt": "2026-04-07T13:37:50.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what is \"just\" in the API is the current \"problem\", it's not a part of consensus. We can solve it without any changes to consensus. \n\nThere are solutions with consensus changes, and yes, removing entirely the payload transition and tying it to the next beacon block is a way. The incentives problems are with regard to collusions builder/proposers, but most importantly an issue arises if the call to new Payload is valid and the processing of the requests is invalid. The payload needs to be rolled back in this case. This can be dealt with in a few ways, anyway any succesful block will have to reorg the payload, but it requires careful changes to the engine calls, since proposers that find out that the requests are invalid they need to send FCU with the parent block hash, thus the problem is that the invalidity of the payload itself is not checked with the payload but rather with the next beacon block which makes syncing also harder. I believe any of these drastic changes over this issue of what state is being returned on the beacon API are unwarranted and come with going back to the drawing board to analyze the safety of the whole consensus changes",
+      "createdAt": "2026-04-07T13:48:10.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and this is what I strongly opppose",
+      "createdAt": "2026-04-07T13:48:17.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So, correct me if I'm wrong. The mental model is that we should ignore the existence of payload states almost everywhere: gossip validations, everything around checkpoints, active balances, etc. The only place where they are used is pre-state selection of the next beacon block. Everything else remains as it is today: only post-beaconblock states matter.",
+      "createdAt": "2026-04-07T13:59:43.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this is true. However, the situation that worries me is the following: The chain has a block in slot 31 and the next block is in slot 65 based on 31 full During slot 65 you get an attestation for 65 has head, 31 as target. We use a dependent root check to decide which state to use to validate the attestation: the dependent root for the head state coincides with the dependent root fot he target state advanced to 64 and thus we use the head state for validation. The problem is that the head state has the payload processed in that epoch transition and will have a different set of active validators. \n\nThis is a real problem in implementations. As far as I can tell we use dependent root to decide if we can use the head state to validate two different things:\n\n- Is the proposer correct?\n- Is the attester/ptc attester etc in the right committee?\n\nThe first one is fine because of the lookahead. The second one is not because it requires the active balance and that can change from head *even if the dependent root is the same*.\n\nThe problem is here that the dependent root  was a concept that was chosen to be the latest blockroot **because** it guarantees that if you have that root on chain you have the right epoch transition and have guarantees shufflings, etc. But now that dependent root is useless if the payload can change the epoch transition. \n\nSo this requires changes about how we handle dependent roots I believe. cc <@602753420033785856> <@688748669268132001> you guys had already thought about this too. A full epoch's worth of missing blocks would definitely cause trouble here, I am uncertain about just 31-->33 though, I think that one is just fine.",
+      "createdAt": "2026-04-07T14:15:39.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So I think in this situation it would be invalid to use head state to validate gossip objects, and that really sucks",
+      "createdAt": "2026-04-07T14:17:28.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It may still be fine with regards to justified balances though cause that is just keeping the right justified state. But it worries me the beacon committees",
+      "createdAt": "2026-04-07T14:26:52.575000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> The only place where they are used is pre-state selection of the next beacon block\nactually beacon block gossip validation requires the payload state (which is the prestate of that block)",
+      "createdAt": "2026-04-07T14:27:37.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, these are the things that worry me. If those payload states become relevant in some scenarios, it becomes VERY complicated to reason about.",
+      "createdAt": "2026-04-07T14:32:03.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(and obviously bug prone)",
+      "createdAt": "2026-04-07T14:33:46.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so my suggestion is that we should land on a very tight list of places where we need to use payload states. And this list must be exhaustive. Seems like a practical useful angle to look things from.",
+      "createdAt": "2026-04-07T14:37:35.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I won't even consider the head state to be a payload state if my assumption is true. (even if it would be inconsistent with forkchoice head)",
+      "createdAt": "2026-04-07T15:01:37.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, I think I did a fully detailed analysis of the possible divergence and I think the only *problem* can really arise after 5 epochs with missing blocks",
+      "createdAt": "2026-04-07T15:56:35.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Need to update my blog post, but I'm locked out of my own ssh server, can upload after I get back home",
+      "createdAt": "2026-04-07T15:56:58.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There is only a single subtlety which is the weird case in which we consider a switch to consolidation validator in the last payload of the epoch, and that validator happened to have more than 32.25ETH in the balance, this is the **only** difference that can actually happen because those 0.25ETH would count on the post-payload effective balance and they will not count in the post-CL block effective balance",
+      "createdAt": "2026-04-07T15:58:39.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So this case probably needs to be patched in case the attacker times a topup with a last payload inclusion of this consoludation request and manages to get an entire epoch worth of empty blocks right after",
+      "createdAt": "2026-04-07T16:00:01.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Heya,\nIt looks like there's a full outage of epbs-devnet-1 now.\nNo new block with payload since 12h - only some empty ones.\n\nI'm not fully up to date on what was going on before,  but I think the last status was that there is one prysm node (prysm-geth-3) + bootnode running the chain as all other nodes fall off sync right after gloas activation.\nBoth nodes are now throwing context deadline exceeded errors,  but nothing obvious bad like a block production error message :/",
+      "createdAt": "2026-04-07T16:59:59.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Does it make sense to restart from scratch, or even do a devnet2 with a more agreed-on genesis date when majority of clients are ready? Devnet1 happened during EthCC and then the holidays, so it was pretty hard to give it full attention, let alone spend time debugging",
+      "createdAt": "2026-04-07T17:04:22.890000+00:00",
+      "attachments": []
+    }
+  ]
+}

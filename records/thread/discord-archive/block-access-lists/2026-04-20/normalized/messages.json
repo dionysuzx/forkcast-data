@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "channel": "block-access-lists",
+  "date": "2026-04-20",
+  "messageCount": 20,
+  "sourceHash": "0bbb148c554031e9b286467aecd223c7e68c9b606d34dfd90da95cbde7b89023",
+  "searchText": "For today's BAL breakout as part of ACDT, I'd propose to use most of the time in the BAL breakout for 8037 discussions (cc <@968526635735326741>): For the first part of the breakout (EIP-7928), that's the proposed agenda: * Move BlockAccessIndex from `uint16` to `uint64`. * EIP update: https://github.com/ethereum/EIPs/pull/11535 * Specs update: https://github.com/ethereum/execution-specs/pull/2713 * Benchmarking updates Please lmk if there are any other agenda items to discuss. <@792404665068158998> i would like to discuss idea on how we can sort BAL items. The statements: * Sorting them by first access makes sense as you can load state with priority. * It is very complex to sort access of every sload/sstore, account load/write with reverts etc inside tx. We dont want this. * We can still have benefit if we order tx batches. * So proposal is, tx batch output gets sorted and appended in order to the BAL lists. * Upside ordered load (great), downside additional verification vector. If client are recreating BAL for verification than downside is maybe not of high impact. yes, good point that has also been brought up by other clients in the past, e.g. I remember <@628018527470616606> and <@316280621783580673> advocating for exploring this too. What would you define as a tx batch here? Multiple txs? one tx i meant batch as state reads/writes inside one tx I see, you we would not order by access within a tx, but by order of txs, and within a tx we keep it lexicographically ordered? Yes, imo it is too complex being in consensus if we order them by access within a tx. Yeah, let's discuss that today. I could see this being a good trade-off between adding gains with still minimized complexity. Would be great if you could summarize your idea briefly, how each item in the BAL would then be treated. E.g. storage reads would be ordered by actual access I assume? What about addresses inside the BAL? E.g. a worst-case would be I access an address in the first tx, by doing a simple call do it and then only in the last tx I read many storage slots (the actual work) of that address. In that case, I would trick your sorting approach, no? <@429719902363058177> If I understand correctly If we have slot 1 of account A that we will read in the first transaction, then slot 2 of account A read in the last transaction We will read the same storage at different times and therefore maybe not benefit from locality in the database If the storage of an account is not very large and we can have all its slots in the same RocksDB block, reading the first one will allow us to already have the second one in memory; with this proposition we risk losing the block because we will have other reads in between Since we're now getting first benchmarking results it's time to look closer into those and see what goes well and where there may be potential bugs. For that, I created the following page using benchmarkoor results (h/t <@131476523050860545>): https://nerolation.github.io/bal-dashboard/ For Besu, the benchmarks ran smoothly, look unsurprising, and in general very good: * clear benefits from parallel execution * clear benefits for state locations in the BAL (batch I/O) For geth the parallel exec benchmark look very good as well, but the batch I/O ones are sometimes weird/surprising. <@427903869226582018> For nethermind, erigon and reth, benchmarking results are underway or tbd. Lmk if you have feature requests regarding the page! cc <@&1460290804898861117> could be interesting to try also the proposition and compare but as it is changing a lot of code it will maybe not easy to have everything in the same branch with a flag we have already two tests playing with the bal item order. It's [`tests/benchmark/stateful/eip7928_block_level_access_lists/test_block_access_lists_max_sloads.py`](https://github.com/ethereum/execution-specs/blob/0345cf1feead986c867d07b7d47c40b510f2e249/tests/benchmark/stateful/eip7928_block_level_access_lists/test_block_access_lists_max_sloads.py#L64) There are two variants: 1) BAL items and actual access over txs align (txs read storage keys in the lexicographic order as they are in the BAL) 2) BAL items and actuall access over tx is reversed (txs read stroages keys in the reversed lexicographic order as they are in the BAL) E.g. for (2) is the first transaction reading the storage slots that are last in the BAL. You find the results of that on the page. It goes something like: * after tx is executed in revm we have state as a output of that execution. * We can take this state as list of account and order them by lexi sort. * In BAL we append accounts from tx to the list. so Accounts touched by later tx will be later in the list. As you mentioned <@792404665068158998> problem is with storage, as it is part of the account, there is double ordering. Good edge case. As agreed on ACDT, in the BAL breakout, we'll move from uint16|uint64 -> uint32. The main arguments were that it's big enough + we want to make sure we use the same across clients. Specs PR: https://github.com/ethereum/execution-specs/pull/2731 EIP PR: https://github.com/ethereum/EIPs/pull/11550 updated <https://notes.ethereum.org/@ethpandaops/bal-devnet-4>",
+  "excerpts": [
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For today's BAL breakout as part of ACDT, I'd propose to use most of the time in the BAL breakout for 8037 discussions (cc <@968526635735326741>):\n\nFor the first part of the breakout (EIP-7928), that's the proposed agenda:\n* Move BlockAccessIndex from `uint16` to `uint64`.\n  * EIP update: https://github.com/ethereum/EIPs/pull/11535\n  * Specs update: https://github.com/ethereum/execution-specs/pull/2713\n* Benchmarking updates \n\nPlease lmk if there are any other agenda items to discuss.",
+      "createdAt": "2026-04-20T10:06:44.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@792404665068158998> i would like to discuss idea on how we can sort BAL items. The statements:\n* Sorting them by first access makes sense as you can load state with priority.\n* It is very complex to sort access of every sload/sstore, account load/write with reverts etc inside tx. We dont want this.\n* We can still have benefit if we order tx batches.\n* So proposal is, tx batch output gets sorted and appended in order to the BAL lists.\n* Upside ordered load (great), downside additional verification vector. If client are recreating BAL for verification than downside is maybe not of high impact.",
+      "createdAt": "2026-04-20T10:29:20.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, good point that has also been brought up by other clients in the past, e.g. I remember <@628018527470616606> and <@316280621783580673> advocating for exploring this too.",
+      "createdAt": "2026-04-20T11:19:42.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What would you define as a tx batch here? Multiple txs?",
+      "createdAt": "2026-04-20T11:20:04.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "one tx",
+      "createdAt": "2026-04-20T11:20:13.244000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i meant batch as state reads/writes inside one tx",
+      "createdAt": "2026-04-20T11:20:28.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see, you we would not order by access within a tx, but by order of txs, and within a tx we keep it lexicographically ordered?",
+      "createdAt": "2026-04-20T11:20:50.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, imo it is too complex being in consensus if we order them by access within a tx.",
+      "createdAt": "2026-04-20T11:21:34.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah, let's discuss that today. I could see this being a good trade-off between adding gains with still minimized complexity.",
+      "createdAt": "2026-04-20T11:23:16.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Would be great if you could summarize your idea briefly, how each item in the BAL would then be treated. E.g. storage reads would be ordered by actual access I assume? What about addresses inside the BAL?\nE.g. a worst-case would be I access an address in the first tx, by doing a simple call do it and then only in the last tx I read many storage slots (the actual work) of that address. In that case, I would trick your sorting approach, no?\n<@429719902363058177>",
+      "createdAt": "2026-04-20T11:59:11.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If I understand correctly If we have slot 1 of account A that we will read in the first transaction, then slot 2 of account A read in the last transaction\n\nWe will read the same storage at different times and therefore maybe not benefit from locality in the database",
+      "createdAt": "2026-04-20T12:22:52.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If the storage of an account is not very large and we can have all its slots in the same RocksDB block, reading the first one will allow us to already have the second one in memory; with this proposition we risk losing the block because we will have other reads in between",
+      "createdAt": "2026-04-20T12:25:36.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Since we're now getting first benchmarking results it's time to look closer into those and see what goes well and where there may be potential bugs.\nFor that, I created the following page using benchmarkoor results (h/t <@131476523050860545>):\n\nhttps://nerolation.github.io/bal-dashboard/\n\nFor Besu, the benchmarks ran smoothly, look unsurprising, and in general very good:\n* clear benefits from parallel execution\n* clear benefits for state locations in the BAL (batch I/O)\n\nFor geth the parallel exec benchmark look very good as well, but the batch I/O ones are sometimes weird/surprising. <@427903869226582018> \n\nFor nethermind, erigon and reth, benchmarking results are underway or tbd.\n\nLmk if you have feature requests regarding the page!\ncc <@&1460290804898861117>",
+      "createdAt": "2026-04-20T12:42:22.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matkt0",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "could be interesting to try also the proposition and compare but as it is changing a lot of code it will maybe not easy to have everything in the same branch with a flag",
+      "createdAt": "2026-04-20T12:45:53.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have already two tests playing with the bal item order. It's\n[`tests/benchmark/stateful/eip7928_block_level_access_lists/test_block_access_lists_max_sloads.py`](https://github.com/ethereum/execution-specs/blob/0345cf1feead986c867d07b7d47c40b510f2e249/tests/benchmark/stateful/eip7928_block_level_access_lists/test_block_access_lists_max_sloads.py#L64)\nThere are two variants:\n1) BAL items and actual access over txs align (txs read storage keys in the lexicographic order as they are in the BAL)\n2) BAL items and actuall access over tx is reversed (txs read stroages keys in the reversed lexicographic order as they are in the BAL)\n\nE.g. for (2) is the first transaction reading the storage slots that are last in the BAL. You find the results of that on the page.",
+      "createdAt": "2026-04-20T12:53:19.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It goes something like:\n* after tx is executed in revm we have state as a output of that execution.\n* We can take this state as list of account and order them by lexi sort.\n* In BAL we append accounts from tx to the list. so Accounts touched by later tx will be later in the list.\n\nAs you mentioned <@792404665068158998> problem is with storage, as it is part of the account, there is double ordering. Good edge case.",
+      "createdAt": "2026-04-20T13:53:00.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "As agreed on ACDT, in the BAL breakout, we'll move from uint16|uint64 -> uint32. The main arguments were that it's big enough + we want to make sure we use the same across clients.",
+      "createdAt": "2026-04-20T15:09:05.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Specs PR:\nhttps://github.com/ethereum/execution-specs/pull/2731",
+      "createdAt": "2026-04-20T15:09:23.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "EIP PR:\nhttps://github.com/ethereum/EIPs/pull/11550",
+      "createdAt": "2026-04-20T15:11:07.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "updated <https://notes.ethereum.org/@ethpandaops/bal-devnet-4>",
+      "createdAt": "2026-04-20T18:22:16.930000+00:00",
+      "attachments": []
+    }
+  ]
+}

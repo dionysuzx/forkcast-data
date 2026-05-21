@@ -1,0 +1,810 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/Add EIP_ Independent CL_EL Sync by potuz...",
+  "date": "2026-05-13",
+  "messageCount": 100,
+  "sourceHash": "94a360f951b8c5da5a95dd383328ec141d2115e16f5d9f461b8c014b11af4a33",
+  "searchText": "the idea for hegota is to push https://eips.ethereum.org/EIPS/eip-7807 which solves the thing - I think unified clients in general are a red herring here - ie by writing a unified client, we get to observe complexity and can reason about _total complexity_ in the ethereum space in a different way - 8237 for example increases total complexity for ethereum - 7807 _reduces_ it - from a long-term protocol perspective, this reduction is what matters, not whether you have one binary or two (it's the same for execution proofs really - ie by using the same cryptographic primtiives on both el and cl we can avoid many of these debates and conflicts between the two worlds) It's just that *if* 7807 isn't happening in hegota (and if feels like big enough to not be happening alongside frame + focil) we won't improve the status quo for CL sync for another 2 years. It's quite a bet and 7807, just to improve CL sync, might not be sufficient motivation. Also, CL clients struggle with payload sync today. As of glamsterdam, they will have everything in place to sync payloads and the problem we see today might not be a big problem anymore - apart from the data still being duplicated on both layers of course. > Also, CL clients struggle with payload sync today. my understanding of the room was simply that some clients don't have it implemented yet and some do - of course the ones that did not yet implement it will uh .. struggle > we won't improve the status quo for CL sync for another 2 years I mean, this is not quite true - the only thing 8237 does is remove the need to use the EL to validate the block hash .. without 8237 you can still implement an independent sync I understood it as there were complications with serving the right payloads wrt the corresponding beacon blocks. you can ask the el to independently validate payload block hashes by calling it for each payload, _as is done today_ - this doesn't have to happen in lock-step true, it's not as pretty, but .. well, some clients have already implemented it so it's certainly doable True but you must download the payload in the CL to do so. And stopping downloading bodies etc on the EL requires changes for most CLs too at least based on the conversation in the room, this was deemed not a big problem to warrant the extra debt, from what I understood - hence we moved on to look for more principled ways to solve it (ie 7807) I guess this is the sticking point - I sometimes wonder exactly what the extra block hash check achieves though - I don't see the value in it to begin with, ie if a block has finalized it means a majority of the validators _should have_ checked that it's fine so it seems rather dubious that we would ever end up in a situation where the block hash is invalid with respect to the transactions and other data -> the attacks that have been mentioned are kind of weird, ie \"what if checkpoint-sync my cl to an invalid state\" at which point you're already fundamentally screwed checking the block hash of course is required for validating but then we already have payloads - for all syncing scenarios that are valid, I think an alternative to 8237 might actually be to investigate whether we can _remove_ the check altogether instead of introducing this hack - ie are the perceived attacks that this sync realistic and would they not be solved by the optimistic->nonoptimistic transition which by necessity includes a block hash check (since the block hash accumulates all past blocks) - this to me is a question worth asking the \"remove\" option is particularly interesting if the attacks are minor (the kind where we might lose an execution payload to a dishonest builder occasionally because it turned out invalid) and get properly solved with 7807 anyway - that said, deeper investigation would be needed here, this is not an area I'm deeply familiar with .. <@425572898787426305> might have a better view here Removing the block_hash check for the finalized part of the chain == removing the property that a local node never follows invalid chain even if that chain has been finalized ...which gets resolved on the first payload that does get cross-validated by cl-el? it is not, you don't know if payload content on the beacon chain, e.g. `execution_requests` matches the content of payloads that EL has been downloading for the segment of the chain that wasn't cross-validated what exactly does an attack look like here? attacker finalizes `B` which has `block_hash` referring to `P` at the same time `B` has `execution_requests` from `P'`. EL validates `P`, CL imports `P'` and everyone is happy even though `P != P'` but how does that happen, in a world where the majority of validators are following the chain and are applying payloads one by one, thus validating all payloads? the synced majority shoud discard that course of events? oh, ofc it requires majority to be malicious sooo .. if majority is malicious, why is the block hash in particular so important that it needs extra checking? it seems like a malicious majority could do far worse things, no? with all its power, it cannot trick you into following an invalid chain also, it's kind of odd to begin with - a checkpoint-synced el-cl pair does not sync all blocks - it syncs from the checkpoint onwards which is like 64 blocks .. why is it important to check those 64 blocks and not the rest? not if you're already following the chain it's not for the checkpoint sync where you do snap sync on EL and with checkpoints, you're screwed anyway if you were following it, got outage and return back catching up if you follow, you have to check block_hash for the unfinalized prefix anyway (not a range sync case) it's a choice to make whether we want to have this property or not. I would prefer we have it. I also proposed to have full payload headers on CL and make either CL switch to SSZ or make CL do RLP and then this issue wouldn't be a problem at a cost of duplicating payload headers between the layers so basically, I still don't understand against whom this is a viable attack .. * synced clients cannot be attacked this way (they validate in sync) * by-root catchups cannot be attacked this way (they validate in sync) * checkpoint-synced clients can be attacked regardless of check (they don't check historical payloads and pretty much do by-root catchups of recent history) * clients that were offline _during_ the attack and where their EL subsequently snap-syncs over the problematic range instead of replaying _can_ be attacked is that about correct? btw, not necessarily implement RLP on CL side. It can be deferred to EL via Engine API and a separate `engine_verifyBlockHash` fn it is correct, but no EL client do that: > clients that were offline during and where their EL subsequently snap-syncs over the problematic range instead of replaying can be attacked my understanding is some ELs snap sync if the gap is large ie offline-for-a-day large hmm, this is something that i wasn't aware of. this breaks the assumption that you need to trust only once when you do a from-scratch sync I have a vague recollection that it was geth that mentioned they snap sync in this scenario but I'm not sure - it came up during the 8237 discussion and I _think_ this is what was said (or I misunderstood the comment, so it needs double-checking) I see, i've heard the opposite from the geth team 😅 <@360491619402776577> does geth ever snap sync outside of the intial sync (ie after a day of being offline)? or are you aware of any el that does this? No, we don't. Not sure about others so .. assuming no el snap syncs, checkpoint sync clients are vulnerable both before and after 8237 .. and els that replay blocks one by one (from devp2p) .. are not vulnerable, because they would not accept a block hash history that is not valid? *EL switch to SSZ? EL would only fallback to snap sync, after finishing initial sync and switching to full sync, if there's a reorg past the first pivot block or if the db got corrupted. yeah the ELs wouldn't be tricked here but the CL could finalize a block with a block hash that is different to the block hash the EL has for that slot. From the EL's perspective the block hash history looks intact. It's the other way around, only clients that do snap sync are vulnerable, and at least geth and Nethermind are not I think that's what I wrote, ie replay els (those that don't do additional snap syncs) are _not_ vulnerable .. from what I understood, the scenario is that a malicious majority already finalized an invalid history, and we're considering if honest validators would accept an invalid chain as a result ie \"if I'm an honest validator and a dishonest majority has corrupted the chain somehow, how do I detect it?\" * if I'm following the chain, I will detect it * if I checkpoint sync (and my el snap syncs), I will _not_ detect it * if I run an el that replays blocks and I'm offline for a while, I _will_ detect it (but only once the el catches up and I do the opt->non-opt switch) this is irrespective of 8237, from what I understand > so assuming no el snap syncs, checkpoint sync clients are vulnerable. This sentence is false, if no el snap syncs it doesn't matter where the checkpoint sync is on the CL, those clients aren't vulnerable. But it's early and I may be misreading you And this is not about validators, it's about any full node well, els snap sync on _first_ setup - the snap sync question was what happens with els that are a day behind - do they replay blocks or re-snapsync They use devp2p to retrieve headers, bodies, bals etc and replay blocks yes, but assume I don't have any state at all - in that case, the el will snap sync to get a first state to work from? and my argument is that in this case, a freshly synced EL/CL is vulnerable irrespective of 8237 Yes a node operator that just starts up for first time can always be tricked yeah, so the question is, _who_ does the block hash check help - in <@425572898787426305> 's example, the dishonest majority created a chain with an invalid block hash, but it seems to me that the EL cannot be tricked to follow a chain that leads up to this invalid block hash, outside of snap sync scenarios that's my understanding as well. But the CL (a node that is just catching up and not downloading payloads) could be tricked accepting a block with a wrong block hash - even if the EL's chain is intact and fine. It helps those validators that don't want to do that check: I don't want to even download the Payloads at all Then the EIP helps those CLs to sync without downloading anything how? the EL chain is intact - we receive a gossip payload and give it to the EL - how can this payload line up with the history that the EL has? On a long period without finalization this is quite common we assume that you won't download the payloads in this scenario, so there is nothing to be passed to the EL except the hash This is not for gossip, this is for range syncing yes, but every range sync _ends with_ a gossip payload, ie you don't start validating until then once you reach head, you start getting the payloads via gossip? via gossip (?) as in \"from the CL via newPayload\", yeah Yes. The gossip ones you do download, before that I don't want to download any Payload And on finalization I want to prune everything So ideally i can checkpoint sync from the weak subjectivity checkpoint and only download 1 Payload to get to head I understand that too - so .. I'm doing my range sync .. my el is doing its thing .. I skip all the block hash checks ... then I reach head, I get a gossip payload and I give it to the EL ... from this one payload that I give to the EL, is there any case where: * my CL follows the wrong chain? * my el follows the wrong chain? ie is there any case where the EL does _not_ detect that the payloads in my corrupted CL history are not valid? Yes, without the accumulator that can happen so that was my original question - how? why would my EL accept the payload in this scenario? In the eve",
+  "excerpts": [
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the idea for hegota is to push https://eips.ethereum.org/EIPS/eip-7807 which solves the thing - I think unified clients in general are a red herring here - ie by writing a unified client, we get to observe complexity and can reason about _total complexity_ in the ethereum space in a different way - 8237 for example increases total complexity for ethereum - 7807 _reduces_ it - from a long-term protocol perspective, this reduction is what matters, not whether you have one binary or two",
+      "createdAt": "2026-05-13T08:23:08.670000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "(it's the same for execution proofs really - ie by using the same cryptographic primtiives on both el and cl we can avoid many of these debates and conflicts between the two worlds)",
+      "createdAt": "2026-05-13T08:27:51.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's just that *if* 7807 isn't happening in hegota (and if feels like big enough to not be happening alongside frame + focil) we won't improve the status quo for CL sync for another 2 years. It's quite a bet and 7807, just to improve CL sync, might not be sufficient motivation.\nAlso, CL clients struggle with payload sync today. As of glamsterdam, they will have everything in place to sync payloads and the problem we see today might not be a big problem anymore - apart from the data still being duplicated on both layers of course.",
+      "createdAt": "2026-05-13T08:29:05.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> Also, CL clients struggle with payload sync today. \nmy understanding of the room was simply that some clients don't have it implemented yet and some do - of course the ones that did not yet implement it will uh .. struggle",
+      "createdAt": "2026-05-13T08:31:49.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> we won't improve the status quo for CL sync for another 2 years\nI mean, this is not quite true - the only thing 8237 does is remove the need to use the EL to validate the block hash .. without 8237 you can still implement an independent sync",
+      "createdAt": "2026-05-13T08:33:15.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I understood it as there were complications with serving the right payloads wrt the corresponding beacon blocks.",
+      "createdAt": "2026-05-13T08:33:47.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you can ask the el to independently validate payload block hashes by calling it for each payload, _as is done today_ - this doesn't have to happen in lock-step",
+      "createdAt": "2026-05-13T08:34:13.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "true, it's not as pretty, but ..",
+      "createdAt": "2026-05-13T08:34:26.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well, some clients have already implemented it so it's certainly doable",
+      "createdAt": "2026-05-13T08:34:41.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "True but you must download the payload in the CL to do so. \nAnd stopping downloading bodies etc on the EL requires changes for most CLs too",
+      "createdAt": "2026-05-13T08:35:42.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "at least based on the conversation in the room, this was deemed not a big problem to warrant the extra debt,  from what I understood - hence we moved on to look for more principled ways to solve it (ie 7807)",
+      "createdAt": "2026-05-13T08:39:13.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess this is the sticking point - I sometimes wonder exactly what the extra block hash check achieves though - I don't see the value in it to begin with, ie if a block has finalized it means a majority of the validators _should have_ checked that it's fine so it seems rather dubious that we would ever end up in a situation where the block hash is invalid with respect to the transactions and other data -> the attacks that have been mentioned are kind of weird, ie \"what if checkpoint-sync my cl to an invalid state\" at which point you're already fundamentally screwed",
+      "createdAt": "2026-05-13T08:42:09.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "checking the block hash of course is required for validating but then we already have payloads - for all syncing scenarios that are valid, I think an alternative to 8237 might actually be to investigate whether we can _remove_ the check altogether instead of introducing this hack - ie are the perceived attacks that this sync realistic and would they not be solved by the optimistic->nonoptimistic transition which by necessity includes a block hash check (since the block hash accumulates all past blocks) - this to me is a question worth asking",
+      "createdAt": "2026-05-13T08:44:55.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the \"remove\" option is particularly interesting if the attacks are minor (the kind where we might lose an execution payload to a dishonest builder occasionally because it turned out invalid) and get properly solved with 7807 anyway - that said, deeper investigation would be needed here, this is not an area I'm deeply familiar with ..  <@425572898787426305> might have a better view here",
+      "createdAt": "2026-05-13T08:54:54.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Removing the block_hash check for the finalized part of the chain == removing the property that a local node never follows invalid chain even if that chain has been finalized",
+      "createdAt": "2026-05-13T09:01:05.183000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "...which gets resolved on the first payload that does get cross-validated by cl-el?",
+      "createdAt": "2026-05-13T09:03:07.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it is not, you don't know if payload content on the beacon chain, e.g. `execution_requests` matches the content of payloads that EL has been downloading for the segment of the chain that wasn't cross-validated",
+      "createdAt": "2026-05-13T09:04:47.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what exactly does an attack look like here?",
+      "createdAt": "2026-05-13T09:07:11.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "attacker finalizes `B` which has `block_hash` referring to `P` at the same time `B` has `execution_requests` from `P'`.\nEL validates `P`, CL imports `P'` and everyone is happy even though `P != P'`",
+      "createdAt": "2026-05-13T09:10:27.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but how does that happen, in a world where the majority of validators are following the chain and are applying payloads one by one, thus validating all payloads? the synced majority shoud discard that course of events?",
+      "createdAt": "2026-05-13T09:11:39.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "oh, ofc it requires majority to be malicious",
+      "createdAt": "2026-05-13T09:13:13.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "sooo .. if majority is malicious, why is the block hash in particular so important that it needs extra checking? it seems like a malicious majority could do far worse things, no?",
+      "createdAt": "2026-05-13T09:14:31.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "with all its power, it cannot trick you into following an invalid chain",
+      "createdAt": "2026-05-13T09:17:18.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also, it's kind of odd to begin with - a checkpoint-synced el-cl pair does not sync all blocks - it syncs from the checkpoint onwards which is like 64 blocks .. why is it important to check those 64 blocks and not the rest?",
+      "createdAt": "2026-05-13T09:17:27.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "not if you're already following the chain",
+      "createdAt": "2026-05-13T09:18:28.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's not for the checkpoint sync where you do snap sync on EL",
+      "createdAt": "2026-05-13T09:18:38.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and with checkpoints, you're screwed anyway",
+      "createdAt": "2026-05-13T09:18:38.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if you were following it, got outage and return back catching up",
+      "createdAt": "2026-05-13T09:19:27.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if you follow, you have to check block_hash for the unfinalized prefix anyway (not a range sync case)",
+      "createdAt": "2026-05-13T09:19:53.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's a choice to make whether we want to have this property or not. I would prefer we have it. I also proposed to have full payload headers on CL and make either CL switch to SSZ or make CL do RLP and then this issue wouldn't be a problem at a cost of duplicating payload headers between the layers",
+      "createdAt": "2026-05-13T09:21:56.814000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so basically, I still don't understand against whom this is a viable attack .. \n\n* synced clients cannot be attacked this way (they validate in sync)\n* by-root catchups cannot be attacked this way (they validate in sync)\n* checkpoint-synced clients can be attacked regardless of check (they don't check historical payloads and pretty much do by-root catchups of recent history)\n\n* clients that were offline _during_ the attack and where their EL subsequently snap-syncs over the problematic range instead of replaying _can_ be attacked\n\nis that about correct?",
+      "createdAt": "2026-05-13T09:25:23.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "btw, not necessarily implement RLP on CL side. It can be deferred to EL via Engine API and a separate `engine_verifyBlockHash` fn",
+      "createdAt": "2026-05-13T09:25:27.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it is correct, but no EL client do that:\n> clients that were offline during and where their EL subsequently snap-syncs over the problematic range instead of replaying can be attacked",
+      "createdAt": "2026-05-13T09:26:39.828000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "my understanding is some ELs snap sync if the gap is large",
+      "createdAt": "2026-05-13T09:26:58.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ie offline-for-a-day large",
+      "createdAt": "2026-05-13T09:27:33.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm, this is something that i wasn't aware of. this breaks the assumption that you need to trust only once when you do a from-scratch sync",
+      "createdAt": "2026-05-13T09:27:47.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I have a vague recollection that it was geth that mentioned they snap sync in this scenario",
+      "createdAt": "2026-05-13T09:28:29.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but I'm not sure - it came up during the 8237 discussion and I _think_ this is what was said (or I misunderstood the comment, so it needs double-checking)",
+      "createdAt": "2026-05-13T09:29:23.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I see, i've heard the opposite from the geth team 😅",
+      "createdAt": "2026-05-13T09:30:01.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@360491619402776577> does geth ever snap sync outside of the intial sync (ie after a day of being offline)? or are you aware of any el that does this?",
+      "createdAt": "2026-05-13T09:30:50.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No, we don't. Not sure about others",
+      "createdAt": "2026-05-13T09:36:46.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so .. assuming no el snap syncs, checkpoint sync clients are vulnerable both before and after 8237 .. and els that replay blocks one by one (from devp2p) .. are not vulnerable, because they would not accept a block hash history that is not valid?",
+      "createdAt": "2026-05-13T09:40:53.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "*EL switch to SSZ?",
+      "createdAt": "2026-05-13T09:47:00.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "EL would only fallback to snap sync, after finishing initial sync and switching to full sync, if there's a reorg past the first pivot block or if the db got corrupted.",
+      "createdAt": "2026-05-13T10:26:55.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah the ELs wouldn't be tricked here but the CL could finalize a block with a block hash that is different to the block hash the EL has for that slot. From the EL's perspective the block hash history looks intact.",
+      "createdAt": "2026-05-13T10:29:45.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's the other way around, only clients that do snap sync are vulnerable, and at least geth and Nethermind are not",
+      "createdAt": "2026-05-13T10:31:20.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think that's what I wrote, ie replay els (those that don't do additional snap syncs) are _not_ vulnerable ..",
+      "createdAt": "2026-05-13T10:32:44.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "from what I understood, the scenario is that a malicious majority already finalized an invalid history, and we're considering if honest validators would accept an invalid chain as a result",
+      "createdAt": "2026-05-13T10:33:52.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ie \"if I'm an honest validator and a dishonest majority has corrupted the chain somehow, how do I detect it?\"\n\n* if I'm following the chain, I will detect it \n* if I checkpoint sync  (and my el snap syncs), I will _not_ detect it\n* if I run an el that replays blocks and I'm offline for a while, I _will_ detect it (but only once the el catches up and I do the opt->non-opt switch)",
+      "createdAt": "2026-05-13T10:35:44.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is irrespective of 8237, from what I understand",
+      "createdAt": "2026-05-13T10:36:21.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> so assuming no el snap syncs, checkpoint sync clients are vulnerable. \n\nThis sentence is false, if no el snap syncs it doesn't matter where the checkpoint sync is on the CL, those clients aren't vulnerable. But it's early and I may be misreading you",
+      "createdAt": "2026-05-13T10:38:42.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And this is not about validators, it's about any full node",
+      "createdAt": "2026-05-13T10:39:16.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well, els snap sync on _first_ setup - the snap sync question was what happens with els that are a day behind - do they replay blocks or re-snapsync",
+      "createdAt": "2026-05-13T10:39:35.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "They use devp2p to retrieve headers, bodies, bals etc and replay blocks",
+      "createdAt": "2026-05-13T10:40:25.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, but assume I don't have any state at  all - in that case, the el will snap sync to get a first state to work from?",
+      "createdAt": "2026-05-13T10:41:18.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and my argument is that in this case, a freshly synced EL/CL is vulnerable irrespective of 8237",
+      "createdAt": "2026-05-13T10:41:55.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes a node operator that just starts up for first time can always be tricked",
+      "createdAt": "2026-05-13T10:41:58.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah, so the question is, _who_ does the block hash check help - in <@425572898787426305> 's example, the dishonest majority created a chain with an invalid block hash, but it seems to me that the EL cannot be tricked to follow a chain that leads up to this invalid block hash, outside of snap sync scenarios",
+      "createdAt": "2026-05-13T10:45:43.922000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's my understanding as well. But the CL (a node that is just catching up and not downloading payloads) could be tricked accepting a block with a wrong block hash - even if the EL's chain is intact and fine.",
+      "createdAt": "2026-05-13T10:47:45.553000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It helps those validators that don't want to do that check: I don't want to even download the Payloads at all",
+      "createdAt": "2026-05-13T10:48:09.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Then the EIP helps those CLs to sync without downloading anything",
+      "createdAt": "2026-05-13T10:48:39.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "how? the EL chain is intact - we receive a gossip payload and give it to the EL - how can this payload line up with the history that the EL has?",
+      "createdAt": "2026-05-13T10:48:44.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "On a long period without finalization this is quite common",
+      "createdAt": "2026-05-13T10:48:52.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we assume that you won't download the payloads in this scenario, so there is nothing to be passed to the EL except the hash",
+      "createdAt": "2026-05-13T10:49:16.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This is not for gossip, this is for range syncing",
+      "createdAt": "2026-05-13T10:49:22.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, but every range sync _ends with_ a gossip payload, ie you don't start validating until then",
+      "createdAt": "2026-05-13T10:50:04.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "once you reach head, you start getting the payloads via gossip?",
+      "createdAt": "2026-05-13T10:51:14.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "via gossip (?) as in \"from the CL via newPayload\", yeah",
+      "createdAt": "2026-05-13T10:53:21.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes. The gossip ones you do download, before that I don't want to download any Payload",
+      "createdAt": "2026-05-13T10:55:13.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And on finalization I want to prune everything",
+      "createdAt": "2026-05-13T10:55:48.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So ideally i can checkpoint sync from the weak subjectivity checkpoint and only download 1 Payload to get to head",
+      "createdAt": "2026-05-13T10:56:25.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I understand that too - so .. I'm doing my range sync .. my el is doing its thing .. I skip all the block hash checks ... then I reach head, I get a gossip payload and I give it to the EL ... from this one payload that I give to the EL, is there any case where:\n\n* my  CL follows the wrong chain?\n* my el follows the wrong chain?\n\nie is there any case where the EL does _not_ detect that the payloads in my corrupted CL history are not valid?",
+      "createdAt": "2026-05-13T10:57:22.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes, without the accumulator that can happen",
+      "createdAt": "2026-05-13T10:58:05.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so that was my original question - how? why would  my EL accept the payload in this scenario?",
+      "createdAt": "2026-05-13T10:58:31.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In the event of a malicious peer feeding me a bad range",
+      "createdAt": "2026-05-13T10:58:36.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The EL chain is valid from the EL side, but not compatible with the CL chain",
+      "createdAt": "2026-05-13T10:58:58.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Suppose there is a finalized block `F` and it's descendant block `S` .\nPayload of block `S` is valid and content of block `S` commits to `S.block_hash`, but that doesn't imply that block `F` content commits to `F.block_hash` unless block `F.block_hash` has been validated",
+      "createdAt": "2026-05-13T11:04:44.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Are you asking about why specificaly it is the case?",
+      "createdAt": "2026-05-13T11:05:40.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Just a nit pick but it doesn't need to involve finalization: I want to avoid *all* range syncs",
+      "createdAt": "2026-05-13T11:05:49.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what does it mean?",
+      "createdAt": "2026-05-13T11:06:09.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "That I only want to verify Payloads on gossip",
+      "createdAt": "2026-05-13T11:06:33.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "when do you want to start block_hash validation?",
+      "createdAt": "2026-05-13T11:06:43.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah, i see",
+      "createdAt": "2026-05-13T11:06:49.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so, no gossip implies no validity",
+      "createdAt": "2026-05-13T11:07:02.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "why not checking with the head at least?",
+      "createdAt": "2026-05-13T11:07:14.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I want to remove all sync methods, and keep the current code pre Gloas",
+      "createdAt": "2026-05-13T11:07:23.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The head is always over gossip",
+      "createdAt": "2026-05-13T11:07:39.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "oh, you never finalize the sync until receive a gossip, I see",
+      "createdAt": "2026-05-13T11:08:04.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And yes we need to request it by root if no one gives it by gossip",
+      "createdAt": "2026-05-13T11:08:16.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so in this case, does it matter whether the el snap syncs or not as part of its \"catch up\"? if the el chain is valid at every block leading up to `S.block_hash` from the EL perspective, it can snap sync all it wants?",
+      "createdAt": "2026-05-13T11:12:11.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it matters as if it doesn't snap sync and execute blocks it will validate e.g. `execution_requests` given by CL match `execution_requests` it got from the execution. While for snap sync it's not the case",
+      "createdAt": "2026-05-13T11:15:37.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We need the EL to sync every block so that we can verify the accumulator",
+      "createdAt": "2026-05-13T11:16:55.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so, the attack surface, if we skip block hash validation is the following:\n\n* there is a dishonest majority (ie CL safety broken already) that fabricates a a CL chain where at some point, `F.block_hash` does not correspond to execution requests / CL state\n* they construct an EL history such that `S.block_hash` leads up to it and is EL-valid\n* in the S history, the execution requests are valid with respect to S.block_hash\n\nnow, they attack:\n* CL's that are out of sync but within the weak subjectivity period and start performing a range sync with malicious nodes\n\nnot vulnerable:\n* honest, in sync - they are validating payloads and will mark `F` as invalid and thus (hopefully) never follow this history\n\nvulnerable anyway:\n* checkpoint syncers\n\nI guess one way to view the above is that a node _becomes_ out of sync  by not following F then restarts and forgets that F is invalid and now on the second attempt, accepts F has valid (because it didn't check the block hash) .. still pretty contrived though due to the fact that checkpoint sync nodes are vulnerable (and easier to attack I think)",
+      "createdAt": "2026-05-13T11:40:25.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so, bringing us back to 8237, it feels like one could also make the argument that we could simply enforce in the spec that continue _serving_ payloads on the CL side - CL clients can then choose whether they are bothered by the above attack and either implement payload downloading or not (some _already implement payload downloads, so for these clients it's obviously not a problem to keep doing so) - keeping in mind that this is a scenario where the validators are already dishonest and can do dishonest things ..",
+      "createdAt": "2026-05-13T11:54:12.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ie in that world we have 4 options for gloas:\n* implement 8237, don't serve payloads - breaks top-up sync\n* implement 8237, serve payloads - allows top-up sync, allows cl-side block hash checks\n* don't implement 8237, serve payloads - make block hash check _recommended_ instead of mandatory / quality-of-implemention -> clients implement payload downloading at their leisure (or they might mark/persist F as permanently broken so as not to enable the \"resync after restart\" attack)\n* don't implement 8237, serve and validate payloads as we do today (either by using RLP in CL or asking the EL to validate)\n\nregardless of 8237, I think 7807 is the better way to approach this whole problem space (in H*)",
+      "createdAt": "2026-05-13T12:02:15.943000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also, as a point of order - even if we decide that we have to validate payloads, the cl does not have to do so in sync / lock step, for gloas - in that sense, the two remain independent - it's just a matter of who does the work .. \n\nie consider the CL in gloas doing range requests - it needs to reach a state where each block has been verified as CL-valid _and_ block-hash-valid - it can go ahead and sync the CL chain to tip and _top up_ block hash checks as they arrive - it does not have to wait for the EL to perform the check, to continue processing CL blocks - it just needs to ensure that when it reaches head and wants to switch to \"follow-the-chain\" mode, it has validated all block hashes",
+      "createdAt": "2026-05-13T12:10:13.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "notice that it doesn't really need to be a dishonest majority either: you can be eclipsed by a peer that feeds you an invalid branch (even if it does not get the full forkchoice weight because the honest majority is not voting on it) you can take it as valid without the accumulator.",
+      "createdAt": "2026-05-13T12:29:28.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well, this self-corrects insofar as a single honest peer will disabuse you of that fake chain - ie eclipsing + low-weight chain is not a new threat in that sense",
+      "createdAt": "2026-05-13T14:02:07.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, but this lower the threshold of \"malicious majority\" to just a winning malicious chain. That is, an attacker with some much lower stake than 50% can make it appear as a valid chain is actually winning if the chain is already split.",
+      "createdAt": "2026-05-13T14:04:46.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "point is that this becomes dangerous in the non-finality case more than in the finalizing situation",
+      "createdAt": "2026-05-13T14:05:17.201000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,976 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-05-11",
+  "messageCount": 168,
+  "sourceHash": "0d3618bfb45a60ff643716fe59de325711829c7166e554421eddd208c3280639",
+  "searchText": "I think the reason these changes weren't btw <@363800010518822915> <@755590043632140352> prysm is completely offline on devnet-3 so is lighthouse <@358120958726373381> and grandine <@777935002263617576> yeah i couldnt sync, i tried all weekend but couldnt get peers to serve me envelopes :/ have you checked with your local post office? checking lodestar/teku seems to be carrying the network <@586161934425128960> are you guys serving envlopes ? i think i had trouble peering with lodestar, i can try again can you tell me by any chance which peer is 16Uiu2HAkzyQAaXFrnNt5rK61EcFSt2trHDuERQWYC6AXRQqeYbCU? I tried accessing https://dora.epbs-devnet-3.ethpandaops.io/ But it seems to be offline ahh stupid me it's not that name 🙂 ahhh nevermind, it's caplin sending any fork digest Prysm is on an old finalized checkpoint, it seems we did not like a finalization <@412614104222531604> analyzing I think this p2p check for the gas_limit of the bid seems wrong: https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/p2p-interface.md?plain=1#L350 where we check for `bid.gas_limit == proposer_preferences.gas_limit` We need to check the gas limit based on the parent block gas limit. This is how prysm does it today: https://github.com/OffchainLabs/prysm/blob/6a2dfaab953d1e87d51e39d03b1f7d3da550df96/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_bellatrix.go#L446 In the event of a gas limit update, lets say from 60M to 200M we would require bids post the update to have 200M gas limit bids but that is not feasible for the EL since the gas limit is updated over blocks <@358120958726373381> I am seeing some errors on PRysm trying to serve you but it's hard to find out cause we're broken anyway ``` [2026-05-11 11:06:37.86] DEBUG p2p: Peer disconnected agent=Lighthouse/v8.1.3-27cfa18/x86_64-linux direction=Outbound multiAddr=/ip4/178.105.51.90/udp/9001/quic-v1/p2p/16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk remainingActivePe ers=1 [2026-05-11 11:06:37.98] DEBUG sync: Could not send execution payload envelope chunk error=Application error 0x0 (local) [2026-05-11 11:06:37.98] DEBUG sync: Could not write to stream error=Application error 0x0 (local) [2026-05-11 11:06:37.98] DEBUG sync: Could not handle p2p RPC error=Application error 0x0 (local) peer=16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk topic=/eth2/beacon_chain/req/execution_payload_envelopes_by_range/1/ssz_snappy ``` hahah I sometimes have caplins in my dht when doing local kurtosis runs <@687974325072035882> it's probably worth fixing this, I remember this happened all the way back in holesky already and was a pain to debug at times I see a fork digest mistmatch on Prysm, I honestly don't even understand how we managed to sync for a couple of days 😅 I think we're failing to sync cause Lodestar/Teky is not serving payload by range correctly <@586161934425128960> <@504202741933932544>, so we are now in the same boat as LH. We can't sync past 23443 cause we're missing it. I haven't found the reason why we fell out of sync, but that's the reason we can't catch up I have a node synced to 34857, we have started a few full nodes in our dev infra to support the network more we should, I had done some analysis last week on some nodes and seems like lodestar peers are the only ones serving us data i cant get lodestar peers. when i try to add manually by enr lodestar is either unreachable or the libp2p handshake times out* This is the real reason it seems https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/15742 This block is finalized and Prysm did not like it at all, it seems to be a consensus bug ``` [2026-05-08 20:10:48.20] ERROR sync: Could not handle p2p pubsub error=payload withdrawals do not match expected withdrawals topic=/eth2/5cf894ad/execution_payload/ssz_snappy ``` cc <@363800010518822915> haven't checked if we're right or not, can I get access to a lodestar node <@412614104222531604> to get the block? but payload is orphaned? yeah i also keep seeing this yeah Dora is saying so seems like some caplin node subscribes to every network but I suspect we start breaking completely from Teku after they start sending us invalid payloads One man’s invalid is another man’s valid 🤣 I had a last from friday here https://gist.github.com/nflaig/5647e048594d21d2a24970d67dfc791a, but seems teku/nimbus, Enrico already found the issue you can directly curl the bn api endpoint those invalid payloads was also what broke us, they've been sending them for awhile though and prysm seemed fine until now Yeah then I see a bunch of Prysm downscoring peers for sending bad by range requests ``` [2026-05-09 20:59:11.36] DEBUG initial-sync: Failed to fetch payloads error=envelope does not match block: invalid data returned from peer ``` I really wish you guys hadn't dismissed my request to drop this path altogether we should have merged EIP 8237 We complain that someone is sending blocks and claiming there were no payloads when there were some cc <@504202741933932544> `16Uiu2HAmUALppyi9RBwftvZjGqtkq3iYEd923BL4Ta1LSts1Tbx`is Teku-geth-2 we ban you for lying on the payloads ``` [2026-05-09 20:59:11.23] DEBUG initial-sync: Failed to fetch payloads error=block with root 0xc648ffc5ee12b9aa51b6b818d4f8254d975d04d69d7fab4b1498f38f870b388f does not build on top of the empty block: invalid data returned from peer ``` how did lodestar sync to this then? No validation of the envelope? Most probably they don't care also why wouldn't prysm just fork it ? and don't check for consistency of the reply I rather be rigurous and catch these bugs early you can sync assuming your peers are honest and possibly buggy I'd expect lighthouse/prysm to have formed a fork where they would agree with each other I rather assume anyone sending me invalid data is malicious we can't cause we have a large majority of the chain telling us the chain is advancing and advertising higher head but then we request and we can't catch up both Prysm and LH are trying to do the same it seems so the only solution would be to slash all teku validators and fork abck to the prysm chain? we need to fix the serving of payloads, or --yet again-- ditch it entirely and just sync with blocks hm looks like buildoor's prysm is actually at the same head slot as tekus I did my analyzing for today, will wait till <@363800010518822915> may check if I'm right or not, moving to review PRs to not be fired buildoor's prysm is using a fork of your <@1386598056320831509>'s fork <@1386598056320831509> did you disable some envelope checking logic in your fork? Nah, probably that node was never restarted or never feel out of sync Why in the hell Discord replied to tomo instead of you hmm i m using the same prysm fork with just the proposer preferences event and payload attributes event i didn't explicitly disable any envelope checking logic That node probably never needed to request a range I was just chatting with <@1386598056320831509> about proposer preferences and gas limits. One can use a check like the following to ensure the bid commits to the right gas limit: ``` max_delta = parent_gas_limit // 1024 new_gas_limit = max( parent_gas_limit - max_delta, min( preferred_gas_limit, parent_gas_limit + max_delta, ), ) ``` One thing I was wondering, how does the interaction with the EL work here? E.g. I could have a CL flag increasing the gas limit (`--suggested-gas-limit`) and a EL flag that decreases it (`--miner.gaslimit`). Would my own bid be rejected by my CL or is there some exception for self-bidding? ah yeah thats possible if there was no new commit watchtower wouldn't pick it up EL won't have much say in it anymore I think I think we seriously need to move to have the CL choosing the gas limit instead of the el. This is needed also to implement a builder client. Have been talking to Nico about this. And we all seem to agree. Need to convince EL devs though EL devs are ignoring me https://discord.com/channels/595666850260713488/688075293562503241/1501977234078961774 😄 Bring it up today in ACDT yeah agree. Should be consolidated to only have one and it makes sense to have it on the CL. Would this mean we need to add it to `engine_forkchoiceUpdatedV*` ? Could we also bundle in a max gas limit while we are at it ? so we can't accidently kill the network? this is just the EIP-1559 caluclation? I suppose most (or all) CLs already have that implemented to ensure builders adhere to gas limit, eg. see [lodestar code](https://github.com/ChainSafe/lodestar/blob/unstable/packages/beacon-node/src/execution/builder/utils.ts) isn't gonna be a lot harder with 8073 tho? yeah i think we would have to run that in the gossip checks instead of checking for `bid.gas_limit == pref.gas_limit` why? I believe this can be handled on the EL side when we receive the payload, I don't think the CL needs to handle that calculation after gloas yeah, it's just that today, this isn't so critical as builders take care of it and relays make sure that they do things right. Now, with ePBS, the CL might want to actually check/enforce it. I think CLs do already, so the only open question is it's interaction with the gas limit set on the EL. My feeling is we should deprecate the flag on the EL and have the gas limit be passed with `engine_forkchoiceUpdatedV*`, as done in the PR you linked in execution-devs we could get into a situation where you accept a bid with an invalid gas limit right? we should reject a bid whose gas limit is invalid right? I would rather check the bid on gossip as we do today the gas limit is not in the bid, it's in the execution payload header whcih you only know when receiving the payload thanks i'll take a look! we have the gas limit in the bid: https://github.com/ethereum/consensus-specs/blob/031e521f0a82b0e475ecfc13f79dd251a6284fc2/specs/gloas/beacon-chain.md#L283 ```python class ExecutionPayloadBid(Container): parent_block_hash: Hash32 parent_block_root: Root block_hash: Hash32 prev_randao: Bytes32 fee_recipient: ExecutionAddress gas_limit: uint64 builder_index: BuilderIndex slot: Slot value: Gwei execution_payment: Gwei blob_kzg_commitments: List[KZGCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK] execution_requests_root: Root ``` so i think it is better to check in the gossip validation I do know that but is that the calclulated or desired gas limit? so the spec says that it must be the gas limit of the constructed payload: https://github.com/ethereum/consensus-specs/blob/031e521f0a82b0e475ecfc13f79dd251a6284fc2/specs/gloas/builder.md#L125 i believe its the calculated gas limit of the payload but proposer preferences have the target gas limit hmm so the bid check in spec seems wrong if that is the expected (actual) gas limit no, at least my reading was as yours Nico that the bid is not the expected actual gas limit, but what the guilder should signal That's the proposer's desired gas limit. Same as in mev-boost registrations today. that's the whole point of letting validators have gas limit exactly we should not check bid logic we should just let the CL drive the whole thing EL checks validity of 1559 that's what I thought, would allow us to remove the EL code from our code we might run into a situation where we choose a bid with the wrong updated gas limit, and the corresponding payload is invalidated right? if we don't check that the `bid.gas_limit` is correct from the parent gas limit would any clients oppose to set a max limit for the desried gas limit? e.g if we aim to hit 200m for glamsterdam but we do find some issues and we see that we could use 175M comfortably, then we should probably have an check where the user can override the default gas limit up till a max cap of 175 or whatever we deem safe? Similar idea to EIP-3756. there is some inconsistency in the spec we need to fix 1. `proposer_preferences.gas_limit` is the desired/target gas limit (eg. 60M) 2. the bid needs to adhere to that `bid.gas_limit == proposer_preferences.gas_limit` (gossip) 3. the payload needs to adhere to the bid `asser",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the reason these changes weren't",
+      "createdAt": "2026-05-11T07:31:17.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "btw <@363800010518822915> <@755590043632140352> prysm is completely offline on devnet-3\nso is lighthouse <@358120958726373381> and grandine <@777935002263617576>",
+      "createdAt": "2026-05-11T11:19:50.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah i couldnt sync, i tried all weekend but couldnt get peers to serve me envelopes :/",
+      "createdAt": "2026-05-11T11:22:01.990000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "have you checked with your local post office?",
+      "createdAt": "2026-05-11T11:22:27.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "checking",
+      "createdAt": "2026-05-11T11:22:48.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "lodestar/teku seems to be carrying the network",
+      "createdAt": "2026-05-11T11:23:09.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@586161934425128960> are you guys serving envlopes ?",
+      "createdAt": "2026-05-11T11:23:18.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think i had trouble peering with lodestar, i can try again",
+      "createdAt": "2026-05-11T11:23:39.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "can you tell me by any chance which peer is 16Uiu2HAkzyQAaXFrnNt5rK61EcFSt2trHDuERQWYC6AXRQqeYbCU? I tried accessing \nhttps://dora.epbs-devnet-3.ethpandaops.io/\n\nBut it seems to be offline",
+      "createdAt": "2026-05-11T11:34:49.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ahh stupid me",
+      "createdAt": "2026-05-11T11:34:51.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's not that name 🙂",
+      "createdAt": "2026-05-11T11:34:55.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ahhh nevermind, it's caplin sending any fork digest",
+      "createdAt": "2026-05-11T11:35:43.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Prysm is on an old finalized checkpoint, it seems we did not like a finalization <@412614104222531604>",
+      "createdAt": "2026-05-11T11:41:08.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "analyzing",
+      "createdAt": "2026-05-11T11:41:11.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think this p2p check for the gas_limit of the bid seems wrong: https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/p2p-interface.md?plain=1#L350 where we check for `bid.gas_limit == proposer_preferences.gas_limit`\nWe need to check the gas limit based on the parent block gas limit. This is how prysm does it today: https://github.com/OffchainLabs/prysm/blob/6a2dfaab953d1e87d51e39d03b1f7d3da550df96/beacon-chain/rpc/prysm/v1alpha1/validator/proposer_bellatrix.go#L446\nIn the event of a gas limit update, lets say from 60M to 200M we would require bids post the update to have 200M gas limit bids but that is not feasible for the EL since the gas limit is updated over blocks",
+      "createdAt": "2026-05-11T11:42:06.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@358120958726373381> I am seeing some errors on PRysm trying to serve you but it's hard to find out cause we're broken anyway\n```\n[2026-05-11 11:06:37.86] DEBUG p2p: Peer disconnected agent=Lighthouse/v8.1.3-27cfa18/x86_64-linux direction=Outbound multiAddr=/ip4/178.105.51.90/udp/9001/quic-v1/p2p/16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk remainingActivePe\ners=1\n[2026-05-11 11:06:37.98] DEBUG sync: Could not send execution payload envelope chunk error=Application error 0x0 (local)\n[2026-05-11 11:06:37.98] DEBUG sync: Could not write to stream error=Application error 0x0 (local)\n[2026-05-11 11:06:37.98] DEBUG sync: Could not handle p2p RPC error=Application error 0x0 (local) peer=16Uiu2HAkyYzoKommYCsEofJk7PzssLtTFQ7G36UZu7ZsbYZqQbwk topic=/eth2/beacon_chain/req/execution_payload_envelopes_by_range/1/ssz_snappy\n```",
+      "createdAt": "2026-05-11T11:46:34.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hahah I sometimes have caplins in my dht when doing local kurtosis runs <@687974325072035882> it's probably worth fixing this, I remember this happened all the way back in holesky already and was a pain to debug at times",
+      "createdAt": "2026-05-11T11:47:48.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see a fork digest mistmatch on Prysm, I honestly don't even understand how we managed to sync for a couple of days 😅",
+      "createdAt": "2026-05-11T11:50:28.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we're failing to sync cause Lodestar/Teky is not serving payload by range correctly <@586161934425128960> <@504202741933932544>, so we are now in the same boat as LH. We can't sync past 23443 cause we're missing it. I haven't found the reason why we fell out of sync, but that's the reason we can't catch up",
+      "createdAt": "2026-05-11T11:52:59.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have a node synced to 34857, we have started a few full nodes in our dev infra to support the network more",
+      "createdAt": "2026-05-11T11:55:23.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should, I had done some analysis last week on some nodes and seems like lodestar peers are the only ones serving us data",
+      "createdAt": "2026-05-11T11:56:45.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i cant get lodestar peers. when i try to add manually by enr lodestar is either unreachable or the libp2p handshake times out*",
+      "createdAt": "2026-05-11T11:56:49.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is the real reason  it seems https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/15742\n\nThis block is finalized and Prysm did not like it at all, it seems to be a consensus bug\n```\n[2026-05-08 20:10:48.20] ERROR sync: Could not handle p2p pubsub error=payload withdrawals do not match expected withdrawals topic=/eth2/5cf894ad/execution_payload/ssz_snappy\n```",
+      "createdAt": "2026-05-11T11:56:55.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@363800010518822915> haven't checked if we're right or not, can I get access to a lodestar node <@412614104222531604> to get the block?",
+      "createdAt": "2026-05-11T11:57:23.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but payload is orphaned?",
+      "createdAt": "2026-05-11T11:57:26.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah i also keep seeing this",
+      "createdAt": "2026-05-11T11:58:00.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah Dora is saying so",
+      "createdAt": "2026-05-11T11:58:16.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "seems like some caplin node subscribes to every network",
+      "createdAt": "2026-05-11T11:58:16.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but I suspect we start breaking completely from Teku after they start sending us invalid payloads",
+      "createdAt": "2026-05-11T11:58:38.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "One man’s invalid is another man’s valid 🤣",
+      "createdAt": "2026-05-11T11:59:10.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I had a last from friday here https://gist.github.com/nflaig/5647e048594d21d2a24970d67dfc791a, but seems teku/nimbus, Enrico already found the issue",
+      "createdAt": "2026-05-11T11:59:18.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can directly curl the bn api endpoint",
+      "createdAt": "2026-05-11T11:59:37.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "those invalid payloads was also what broke us, they've been sending them for awhile though and prysm seemed fine",
+      "createdAt": "2026-05-11T12:00:51.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "until now",
+      "createdAt": "2026-05-11T12:00:59.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah then I see a bunch of Prysm downscoring peers for sending bad by range requests\n```\n[2026-05-09 20:59:11.36] DEBUG initial-sync: Failed to fetch payloads error=envelope does not match block: invalid data returned from peer\n```\nI really wish you guys hadn't dismissed my request to drop this path altogether",
+      "createdAt": "2026-05-11T12:01:31.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should have merged EIP 8237",
+      "createdAt": "2026-05-11T12:01:43.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We complain that someone is sending blocks and claiming there were no payloads",
+      "createdAt": "2026-05-11T12:02:25.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when there were some",
+      "createdAt": "2026-05-11T12:02:29.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@504202741933932544> `16Uiu2HAmUALppyi9RBwftvZjGqtkq3iYEd923BL4Ta1LSts1Tbx`is Teku-geth-2",
+      "createdAt": "2026-05-11T12:03:03.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we ban you for lying on the payloads",
+      "createdAt": "2026-05-11T12:03:11.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```\n[2026-05-09 20:59:11.23] DEBUG initial-sync: Failed to fetch payloads error=block with root 0xc648ffc5ee12b9aa51b6b818d4f8254d975d04d69d7fab4b1498f38f870b388f does not build on top of the empty block: invalid data returned from peer\n```",
+      "createdAt": "2026-05-11T12:03:29.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "how did lodestar sync to this then? No validation of the envelope?",
+      "createdAt": "2026-05-11T12:03:34.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Most probably they don't care",
+      "createdAt": "2026-05-11T12:03:43.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also why wouldn't prysm just fork it ?",
+      "createdAt": "2026-05-11T12:03:47.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and don't check for consistency of the reply",
+      "createdAt": "2026-05-11T12:03:51.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I rather be rigurous and catch these bugs early",
+      "createdAt": "2026-05-11T12:03:58.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can sync assuming your peers are honest and possibly buggy",
+      "createdAt": "2026-05-11T12:04:20.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'd expect lighthouse/prysm to have formed a fork where they would agree with each other",
+      "createdAt": "2026-05-11T12:04:25.256000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I rather assume anyone sending me invalid data is malicious",
+      "createdAt": "2026-05-11T12:04:28.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we can't cause we have a large majority of the chain telling us the chain is advancing",
+      "createdAt": "2026-05-11T12:04:45.302000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and advertising higher head",
+      "createdAt": "2026-05-11T12:04:49.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but then we request and we can't catch up",
+      "createdAt": "2026-05-11T12:04:58.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "both Prysm and LH are trying to do the same it seems",
+      "createdAt": "2026-05-11T12:05:04.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so the only solution would be to slash all teku validators and fork abck to the prysm chain?",
+      "createdAt": "2026-05-11T12:05:33.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we need to fix the serving of payloads, or --yet again-- ditch it entirely and just sync with blocks",
+      "createdAt": "2026-05-11T12:05:34.442000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hm looks like buildoor's prysm is actually at the same head slot as tekus",
+      "createdAt": "2026-05-11T12:06:28.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I did my analyzing for today, will wait till <@363800010518822915> may check if I'm right or not, moving to review PRs to not be fired",
+      "createdAt": "2026-05-11T12:06:30.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "buildoor's prysm is using a fork of your <@1386598056320831509>'s fork",
+      "createdAt": "2026-05-11T12:06:54.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-05-11T12:07:01.794000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-11_at_14.06.58.png",
+          "content": "0cd949d33c0b0f514dc22c90816bc60cd83aee03d847a1a0217be1f2e52c3672"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@1386598056320831509> did you disable some envelope checking logic in your fork?",
+      "createdAt": "2026-05-11T12:07:20.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Nah, probably that node was never restarted or never feel out of sync",
+      "createdAt": "2026-05-11T12:11:09.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why in the hell Discord replied to tomo instead of you",
+      "createdAt": "2026-05-11T12:11:25.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hmm i m using the same prysm fork with just the proposer preferences event and payload attributes event",
+      "createdAt": "2026-05-11T12:11:34.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i didn't explicitly disable any envelope checking logic",
+      "createdAt": "2026-05-11T12:11:45.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That node probably never needed to request a range",
+      "createdAt": "2026-05-11T12:12:06.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I was just chatting with <@1386598056320831509> about proposer preferences and gas limits.\nOne can use a check like the following to ensure the bid commits to the right gas limit:\n```\nmax_delta = parent_gas_limit // 1024\n\nnew_gas_limit = max(\n    parent_gas_limit - max_delta,\n    min(\n        preferred_gas_limit,\n        parent_gas_limit + max_delta,\n    ),\n)\n```\n\nOne thing I was wondering, how does the interaction with the EL work here?\nE.g. I could have a CL flag increasing the gas limit (`--suggested-gas-limit`) and a EL flag that decreases it (`--miner.gaslimit`). Would my own bid be rejected by my CL or is there some exception for self-bidding?",
+      "createdAt": "2026-05-11T12:13:23.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah yeah thats possible if there was no new commit watchtower wouldn't pick it up",
+      "createdAt": "2026-05-11T12:13:31.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "EL won't have much say in it anymore I think",
+      "createdAt": "2026-05-11T12:14:20.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we seriously need to move to have the CL choosing the gas limit instead of the el. This is needed also to implement a builder client. Have been talking to Nico about this. And we all seem to agree. Need to convince EL devs though",
+      "createdAt": "2026-05-11T12:15:49.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "EL devs are ignoring me https://discord.com/channels/595666850260713488/688075293562503241/1501977234078961774 😄",
+      "createdAt": "2026-05-11T12:16:55.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Bring it up today in ACDT",
+      "createdAt": "2026-05-11T12:17:37.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah agree. Should be consolidated to only have one and it makes sense to have it on the CL. Would this mean we need to add it to `engine_forkchoiceUpdatedV*` ?",
+      "createdAt": "2026-05-11T12:19:43.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Could we also bundle in a max gas limit while we are at it ?",
+      "createdAt": "2026-05-11T12:20:35.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so we can't accidently kill the network?",
+      "createdAt": "2026-05-11T12:20:41.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is just the EIP-1559 caluclation? I suppose most (or all) CLs already have that implemented to ensure builders adhere to gas limit, eg. see [lodestar code](https://github.com/ChainSafe/lodestar/blob/unstable/packages/beacon-node/src/execution/builder/utils.ts)",
+      "createdAt": "2026-05-11T12:21:02.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "isn't gonna be a lot harder with 8073 tho?",
+      "createdAt": "2026-05-11T12:21:37.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah i think we would have to run that in the gossip checks instead of checking for `bid.gas_limit == pref.gas_limit`",
+      "createdAt": "2026-05-11T12:21:45.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "why? I believe this can be handled on the EL side when we receive the payload, I don't think the CL needs to handle that calculation after gloas",
+      "createdAt": "2026-05-11T12:23:40.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah, it's just that today, this isn't so critical as builders take care of it and relays make sure that they do things right. Now, with ePBS, the CL might want to actually check/enforce it. I think CLs do already, so the only open question is it's interaction with the gas limit set on the EL.\n\nMy feeling is we should deprecate the flag on the EL and have the gas limit be passed with `engine_forkchoiceUpdatedV*`, as done in the PR you linked in execution-devs",
+      "createdAt": "2026-05-11T12:24:05.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we could get into a situation where you accept a bid with an invalid gas limit right? we should reject a bid whose gas limit is invalid right?",
+      "createdAt": "2026-05-11T12:24:50.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I would rather check the bid on gossip as we do today",
+      "createdAt": "2026-05-11T12:25:06.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the gas limit is not in the bid, it's in the execution payload header whcih you only know when receiving the payload",
+      "createdAt": "2026-05-11T12:25:39.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thanks i'll take a look!",
+      "createdAt": "2026-05-11T12:26:03.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have the gas limit in the bid: https://github.com/ethereum/consensus-specs/blob/031e521f0a82b0e475ecfc13f79dd251a6284fc2/specs/gloas/beacon-chain.md#L283",
+      "createdAt": "2026-05-11T12:26:31.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "```python\nclass ExecutionPayloadBid(Container):\n    parent_block_hash: Hash32\n    parent_block_root: Root\n    block_hash: Hash32\n    prev_randao: Bytes32\n    fee_recipient: ExecutionAddress\n    gas_limit: uint64\n    builder_index: BuilderIndex\n    slot: Slot\n    value: Gwei\n    execution_payment: Gwei\n    blob_kzg_commitments: List[KZGCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK]\n    execution_requests_root: Root\n```",
+      "createdAt": "2026-05-11T12:26:43.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so i think it is better to check in the gossip validation",
+      "createdAt": "2026-05-11T12:26:55.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do know that but is that the calclulated or desired gas limit?",
+      "createdAt": "2026-05-11T12:27:01.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so the spec says that it must be the gas limit of the constructed payload: https://github.com/ethereum/consensus-specs/blob/031e521f0a82b0e475ecfc13f79dd251a6284fc2/specs/gloas/builder.md#L125",
+      "createdAt": "2026-05-11T12:27:59.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i believe its the calculated gas limit of the payload",
+      "createdAt": "2026-05-11T12:28:23.277000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but proposer preferences have the target gas limit",
+      "createdAt": "2026-05-11T12:29:26.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hmm so the bid check in spec seems wrong if that is the expected (actual) gas limit",
+      "createdAt": "2026-05-11T12:29:51.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, at least my reading was as yours Nico",
+      "createdAt": "2026-05-11T12:30:13.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that the bid is not the expected actual gas limit, but what the guilder should signal",
+      "createdAt": "2026-05-11T12:30:25.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's the proposer's desired gas limit. Same as in mev-boost registrations today.",
+      "createdAt": "2026-05-11T12:30:28.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's the whole point of letting validators have gas limit",
+      "createdAt": "2026-05-11T12:30:35.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "exactly",
+      "createdAt": "2026-05-11T12:30:40.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should not check bid logic",
+      "createdAt": "2026-05-11T12:30:47.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should just let the CL drive the whole thing",
+      "createdAt": "2026-05-11T12:30:55.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "EL checks validity of 1559",
+      "createdAt": "2026-05-11T12:31:21.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's what I thought, would allow us to remove the EL code from our code",
+      "createdAt": "2026-05-11T12:31:58.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we might run into a situation where we choose a bid with the wrong updated gas limit, and the corresponding payload is invalidated right?",
+      "createdAt": "2026-05-11T12:32:29.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if we don't check that the `bid.gas_limit` is correct from the parent gas limit",
+      "createdAt": "2026-05-11T12:33:07.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would any clients oppose to set a max limit for the desried gas limit? e.g if we aim to hit 200m for glamsterdam but we do find some issues and we see that we could use 175M comfortably, then we should probably have an check where the user can override the default gas limit up till a max cap of 175 or whatever we deem safe? Similar idea to EIP-3756.",
+      "createdAt": "2026-05-11T12:37:04.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there is some inconsistency in the spec we need to fix\n1. `proposer_preferences.gas_limit` is the desired/target gas limit (eg. 60M)\n2. the bid needs to adhere to that `bid.gas_limit == proposer_preferences.gas_limit` (gossip)\n3. the payload needs to adhere to the bid `assert payload.gas_limit == bid.gas_limit` (fc check)\n4. `payload.gas_limit` is the actual/expected gas limit (https://discord.com/channels/595666850260713488/874767108809031740/1503369429239595168)\n5. we don't pass `bid.gas_limit` to EL to validate this for us",
+      "createdAt": "2026-05-11T12:48:04.323000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If ‘payload.gas_limit’ doesn’t match ‘bid.gas_limit’, we would reject the payload before sending it to the EL anyways right. So the gas limit the EL is verifying is the bids gas limit? \nTo me it seems like the gossip check is the invalid one?",
+      "createdAt": "2026-05-11T12:54:11.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The payload gas limit would be the calculated gas limit",
+      "createdAt": "2026-05-11T12:54:22.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if `bid.gas_limit` is the calulcated gas limit then we need to fix taht gossip check, but questionable if the CL should have to deal with this, also <@412614104222531604> noted it might become more difficult with EIP-8073? Ideally the CL should only have to deal with the desired/target gas limit",
+      "createdAt": "2026-05-11T12:58:43.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We should discuss this in ACDT",
+      "createdAt": "2026-05-11T13:20:23.588000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "shit we may have spoken too soon",
+      "createdAt": "2026-05-11T15:12:55.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we do not store the *actual* gas used on the beacon state anymore",
+      "createdAt": "2026-05-11T15:13:11.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so doing 1559 in the CL is more problematic",
+      "createdAt": "2026-05-11T15:13:25.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I will open two PRs, one making the bid be the *actual* gas used and then the CL verifies 1559. Another with the bid being the target gas used and then storing the actual one in the state",
+      "createdAt": "2026-05-11T15:15:05.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "should I open a 2nd Pr on the engine?",
+      "createdAt": "2026-05-11T15:32:45.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we can go with just FCU on the engine for now",
+      "createdAt": "2026-05-11T15:33:09.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'll open the one requiring the bid to be the *actual* gas limit making the enforcement not a consensus breaking change",
+      "createdAt": "2026-05-11T15:33:37.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and then we can discuss if we want to move to the bid being the preferences as discussed in the call",
+      "createdAt": "2026-05-11T15:33:53.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/execution-apis/pull/796 is open",
+      "createdAt": "2026-05-11T15:34:26.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "let's see if they still ignore me 🙂",
+      "createdAt": "2026-05-11T15:34:39.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "specifying the target in fcuV4 seems distinct conceptually from the CL-verification of it",
+      "createdAt": "2026-05-11T15:35:15.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and the 1559 in CL is only salient for latter",
+      "createdAt": "2026-05-11T15:35:26.005000+00:00",
+      "attachments": []
+    }
+  ]
+}

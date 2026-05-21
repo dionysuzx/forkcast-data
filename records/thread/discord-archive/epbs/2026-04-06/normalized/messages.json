@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-06",
+  "messageCount": 46,
+  "sourceHash": "dd9f23aac4fa373dab93e49f1e5eddf347dd463720b210218069f85cca402f41",
+  "searchText": "Hmm I was able to sync a Prysm node yesterday I think I prolly got lucky and checkpoint synced during an epoch with no skipped boundary slot btw regarding checkpoint sync complexity, if we dont pre-emptively fetch the payload envelope from the checkpointz server we need special handling in range sync for importing the envelope at the checkpoint slot. its easier for us to just have checkpointz server enable `GET eth/v1/beacon/payload_envelopes/{block_id}` we get rate limited pretty quickly by prysm. issue is theres only really one or two nodes in the devnet that can serve us data... ill add some tighter self rate limiting rates for now would be nice to relax these rate limits for small devnets in the future i think also we've added a new by range request (envelopes) so thats going to eat at rate limits quicker than before we synced! When you range sync anyway you're making different requests aren't you? You can always request slot, slot+N for Payloads and slot+1, slot+1+N for blocks and works everytime we have this concept of “batches” in our range sync impl which is a grouping of ByRange requests for blocks columns and envelopes for a given epoch. The batch ID allows us to keep track of all the different requests and we couple all the responses for a given batch id and import everything together The coupling logic also prevents us from importing columns without a block. or envelopes without columns and block. etc anyways we can special case the first envelope but it becomes much simpler if we just fetch the envelope from the checkpoint server before letting range sync take over is this intended for the devnet only? I'm pretty sure this breaks checkpoint sync with lodestar on mainnet as we expect the state to be advanced to the epoch boundary, also per `store_target_checkpoint_state` that seems right. I also found previous discussion regarding this here https://github.com/ethereum/beacon-APIs/issues/423 I merged it in develop, happy to discuss this today in ACDT but in Gloas advancing it is strictly incorrect. If clients want to advance it then we need to return the post Payload state. I don't mind this (although this will be a rather subtle change in Prysm) but technically this will make the checkpoint server return something that can technically be reorged by honest nodes Oh, there's no ACDT today? we have a ACDT today? Jinx https://tenor.com/view/rabbit-clock-clock-rabbit-rabbit-time-time-rabbit-bunny-clock-gif-13639927522938410597 We should have a discussion and agree about this in any case, aren't there gaps in the spec still regarding this for gloas? Yes, I left most of the API intentionally out of the scope I targeted for no but I mean `store_target_checkpoint_state` is phase0 we need to redefine what a checkpoint state means it’s the block state that looks correct to me? not if it's required to be advanced I think we all understand the nuances, but setting it up in the spec is a little awkward, probably better to have a full writeup instead of dicussing here in the air. I'll write a full document on this issue, and have it ready in an hour or so Ok, sorry for the massive ping https://www.potuz.net/posts/gloas-finalized/ Need some opinion on the API aspects, cc <@586161934425128960> <@358120958726373381> <@602753420033785856> you guys had strong opinions on this before. Also we need to add the test mentioned in the last section <@592004585506340885> since I am pretty certain that we should be split/broken in this scenario. Finally cc <@520034910149410861> cause you're kind of the owner here, I can open a PR on forkchoice but every option is rather ugly. The simplest would be to modify `store.checkpoint_states` to take a pair of a checkpoint and a boolean for the payload. In the spec the change to account for these new target states is rather brutal, I think it's easier to just use the poststate of the blockroot that is being attested to verify the attestations, client implementers will use the target state anyway The spec would be much slower, but designing the spec because of the python implementation is rather stupid I think the whole `store_checkpoint_states` should not exist at all, it leaks into implementations but even removing this unnecessary dictionary is a big change in the spec 🙁 has anyone considered just updating `Checkpoint` to include payload status? Then we can keep the current checkpointing semantics and not try to patch at an implementation layer or accept degraded guarantees. There's a lot of work in the \"just\". XD it's in the writeup above I immediately dismissed this by looking at how many times we use `Checkpoints` in Prysm, and it does sound like a very large change to be making over this edge case here the changes to deal with this in the spec may look large and ugly, but on code are zero: we just need a state that is compatible with the seed in the same epoch as the attestation: every client already does this so I am very skeptical if turning this into a very large change when it should be no work at all for clients i think we'll also have to update the attestation as well which can get very ugly Oh yeah. > To preserve it directly on-chain, the spec would need to extend checkpoints themselves, > Yeah IMO it should be considered from spec correctness perspective, independent of implementation pain attestations don't really need much of a change anyway, I think changing the checkpoints is crazy and utterly unnecessary I would rather remove entirely this machinery of the checkpoint states from the specs store, there's no real need for them to be there, they are there **only** to make the python state to be manageable, not from a specification perspective we could use get_ancestor everywhere in the spec and it would be formally correct i see, you would just have attestation that point to old version of checkpoint.. and dont need to have a new `AttestationDataGloas` in principle we could remove the target checkpoint altogether from attestations at the cost of not being able to include votes from other branches, but even including the current checkpoint as-is, without any changes, we can still do the FFG counting on-chain to justify a new kind of checkpoint where it includes the payload information. I think this is just adding complexity just for intellectual masturbation few more considerations when we go with returning the post block state (without advancing) - weak subjectivity spec needs to be updated as well, specifically `is_within_weak_subjectivity_period` - the `finalized` state no longer has \"settled\" validator balances since we don't apply epoch transition - every donwstream consumer of `/eth/v2/debug/beacon/states/finalized` will need fork aware handling since `slot % 32 == 0` assumption is broken in my opinion this completely breaks the semantics of the checkpoint state concept Well the semantics of \"checkpoint\" is quite different now. Pre-gloas, checkpoint is a reference type. checkpoint -> state is a function. Current ePBS makes that ambiguous. All downstream consumers must disambiguate independently. Maybe thats fine. But retaining the existing semantics is worthy of being discussed and I don't think thats intellectual masturbation.",
+  "excerpts": [
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm I was able to sync a Prysm node yesterday",
+      "createdAt": "2026-04-06T00:41:10.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think I prolly got lucky and checkpoint synced during an epoch with no skipped boundary slot",
+      "createdAt": "2026-04-06T00:57:37.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "btw regarding checkpoint sync complexity, if we dont pre-emptively fetch the payload envelope from the checkpointz server we need special handling in range sync for importing the envelope at the checkpoint slot. its easier for us to just have checkpointz server enable `GET eth/v1/beacon/payload_envelopes/{block_id}`",
+      "createdAt": "2026-04-06T05:21:29.860000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we get rate limited pretty quickly by prysm. issue is theres only really one or two nodes in the devnet that can serve us data... ill add some tighter self rate limiting rates for now",
+      "createdAt": "2026-04-06T07:33:35.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would be nice to relax these rate limits for small devnets in the future i think\n\nalso we've added a new by range request (envelopes) so thats going to eat at rate limits quicker than before",
+      "createdAt": "2026-04-06T07:34:08.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we synced!",
+      "createdAt": "2026-04-06T07:42:05.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "When you range sync anyway you're making different requests aren't you? You can always request slot, slot+N for Payloads and slot+1, slot+1+N for blocks and works everytime",
+      "createdAt": "2026-04-06T09:32:58.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have this concept of “batches” in our range sync impl which is a grouping of ByRange requests for blocks columns and envelopes for a given epoch. The batch ID allows us to keep track of all the different requests and we couple all the responses for a given batch id and import everything together",
+      "createdAt": "2026-04-06T10:11:19.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The coupling logic also prevents us from importing columns without a block. or envelopes without columns and block. etc \n\nanyways we can special case the first envelope but it becomes much simpler if we just fetch the envelope from the checkpoint server before letting range sync take over",
+      "createdAt": "2026-04-06T10:13:17.303000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is this intended for the devnet only? I'm pretty sure this breaks checkpoint sync with lodestar on mainnet as we expect the state to be advanced to the epoch boundary, also per `store_target_checkpoint_state` that seems right.",
+      "createdAt": "2026-04-06T11:22:49.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I also found previous discussion regarding this here https://github.com/ethereum/beacon-APIs/issues/423",
+      "createdAt": "2026-04-06T11:22:54.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I merged it in develop, happy to discuss this today in ACDT but in Gloas advancing it is strictly incorrect. If clients want to advance it then we need to return the post Payload state. I don't mind this (although this will be a rather subtle change in Prysm) but technically this will make the checkpoint server return something that can technically be reorged by honest nodes",
+      "createdAt": "2026-04-06T11:25:56.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh, there's no ACDT today?",
+      "createdAt": "2026-04-06T11:26:11.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have a ACDT today?",
+      "createdAt": "2026-04-06T11:26:13.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Jinx",
+      "createdAt": "2026-04-06T11:26:19.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://tenor.com/view/rabbit-clock-clock-rabbit-rabbit-time-time-rabbit-bunny-clock-gif-13639927522938410597",
+      "createdAt": "2026-04-06T11:26:27.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We should have a discussion and agree about this",
+      "createdAt": "2026-04-06T11:26:33.105000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in any case, aren't there gaps in the spec still regarding this for gloas?",
+      "createdAt": "2026-04-06T11:26:43.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, I left most of the API intentionally out of the scope I targeted for",
+      "createdAt": "2026-04-06T11:27:17.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no but I mean `store_target_checkpoint_state` is phase0",
+      "createdAt": "2026-04-06T11:27:35.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we need to redefine what a checkpoint state means",
+      "createdAt": "2026-04-06T11:28:10.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it’s the block state",
+      "createdAt": "2026-04-06T11:31:12.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that looks correct to me?",
+      "createdAt": "2026-04-06T11:31:24.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not if it's required to be advanced",
+      "createdAt": "2026-04-06T11:31:36.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we all understand the nuances, but setting it up in the spec is a little awkward, probably better to have a full writeup instead of dicussing here in the air. I'll write a full document on this issue, and have it ready in an hour or so",
+      "createdAt": "2026-04-06T11:32:40.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, sorry for the massive ping \nhttps://www.potuz.net/posts/gloas-finalized/\n\nNeed some opinion on the API aspects, cc <@586161934425128960> <@358120958726373381> <@602753420033785856>  you guys had strong opinions on this before. \n\nAlso we need to add the test mentioned in the last section <@592004585506340885> since I am pretty certain that we should be split/broken in this scenario. \n\nFinally cc <@520034910149410861> cause you're kind of the owner here, I can open a PR on forkchoice but every option is rather ugly. The simplest would be to modify `store.checkpoint_states` to take a pair of a checkpoint and a boolean for the payload.",
+      "createdAt": "2026-04-06T15:48:57.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In the spec the change to account for these new target states is rather brutal, I think it's easier to just use the poststate of the blockroot that is being attested to verify the attestations, client implementers will use the target state anyway",
+      "createdAt": "2026-04-06T16:30:28.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The spec would be much slower, but designing the spec because of the python implementation is rather stupid I think",
+      "createdAt": "2026-04-06T16:31:24.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the whole `store_checkpoint_states` should not exist at all, it leaks into implementations",
+      "createdAt": "2026-04-06T16:31:53.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but even removing this unnecessary dictionary is a big change in the spec 🙁",
+      "createdAt": "2026-04-06T16:34:24.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "has anyone considered just updating `Checkpoint` to include payload status? Then we can keep the current checkpointing semantics and not try to patch at an implementation layer or accept degraded guarantees.",
+      "createdAt": "2026-04-06T17:58:13.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There's a lot of work in the \"just\". XD",
+      "createdAt": "2026-04-06T18:00:10.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's in the writeup above",
+      "createdAt": "2026-04-06T18:11:27.222000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I immediately dismissed this by looking at how many times we use `Checkpoints` in Prysm, and it does sound like a very large change to be making over this edge case here",
+      "createdAt": "2026-04-06T18:12:18.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the changes to deal with this in the spec may look large and ugly, but on code are zero: we just need a state that is compatible with the seed in the same epoch as the attestation: every client already does this",
+      "createdAt": "2026-04-06T18:13:01.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so I am very skeptical if turning this into a very large change when it should be no work at all for clients",
+      "createdAt": "2026-04-06T18:13:32.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think we'll also have to update the attestation as well which can get very ugly",
+      "createdAt": "2026-04-06T18:19:25.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh yeah.\n> To preserve it directly on-chain, the spec would need to extend checkpoints themselves,\n> \nYeah IMO it should be considered from spec correctness perspective, independent of implementation pain",
+      "createdAt": "2026-04-06T18:37:21.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "attestations don't really need much of a change",
+      "createdAt": "2026-04-06T18:45:34.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "anyway, I think changing the checkpoints is crazy and utterly unnecessary",
+      "createdAt": "2026-04-06T18:46:58.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I would rather remove entirely this machinery of the checkpoint states from the specs store, there's no real need for them to be there, they are there **only** to make the python state to be manageable, not from a specification perspective",
+      "createdAt": "2026-04-06T18:47:41.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we could use get_ancestor everywhere in the spec and it would be formally correct",
+      "createdAt": "2026-04-06T18:47:58.505000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i see, you would just have attestation that point to old version of checkpoint.. and dont need to have a new `AttestationDataGloas`",
+      "createdAt": "2026-04-06T18:53:06.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in principle we could remove the target checkpoint altogether from attestations at the cost of not being able to include votes from other branches, but even including the current checkpoint as-is, without any changes, we can still do the FFG counting on-chain to justify a new kind of checkpoint where it includes the payload information. I think this is just adding complexity just for intellectual masturbation",
+      "createdAt": "2026-04-06T18:55:32.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "few more considerations when we go with returning the post block state (without advancing)\n- weak subjectivity spec needs to be updated as well, specifically `is_within_weak_subjectivity_period`\n- the `finalized` state no longer has \"settled\" validator balances since we don't apply epoch transition\n- every donwstream consumer of `/eth/v2/debug/beacon/states/finalized` will need fork aware handling since `slot % 32 == 0` assumption is broken\nin my opinion this completely breaks the semantics of the checkpoint state concept",
+      "createdAt": "2026-04-06T21:37:44.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Well the semantics of \"checkpoint\" is quite different now. Pre-gloas, checkpoint is a reference type. checkpoint -> state is a function. Current ePBS makes that ambiguous. All downstream consumers must disambiguate independently. Maybe thats fine. But retaining the existing semantics is worthy of being discussed and I don't think thats intellectual masturbation.",
+      "createdAt": "2026-04-06T22:17:44.055000+00:00",
+      "attachments": []
+    }
+  ]
+}

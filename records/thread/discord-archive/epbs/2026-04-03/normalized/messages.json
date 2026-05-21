@@ -1,0 +1,314 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-03",
+  "messageCount": 38,
+  "sourceHash": "885fdab434a4f593ef305776b537963e201e1b5d288d7ba3e894da82236f4c53",
+  "searchText": "I got an error in our e2e test, forkchoice picked EMPTY as head when preparing for next slot the fix is to pull up the slot in that case by passing the next clock slot, to trigger `gloas` tie-breaker logic of `FULL vs EMPTY` https://github.com/ChainSafe/lodestar/pull/9164 instead of using store's currentSlot found it's a bit tricky since it's not in the spec so posting it here just for clarification suppose we're on a chain where every block slot `n % 32` is missed, no payload is missed for other slots the chain is justified and finalized in this case, given a finalized checkpoint of `(n, root)` where `n % 32 == 0` and no block + envelope for that slot `n` I think the finalized state is the post-envelope state of slot `n - 1` dialing to slot `n`, not the post-block state of slot `n - 1` because: - the envelope of `n - 1` happens before `n`, so it's considered finalized. And block `n + 1` is built on this envelope `n - 1` (FULL variant) instead of block `n - 1` (EMPTY variant) - when we download that finalized state, we should be able to sync from there so post block state of `n - 1` is the wrong one, should be the post-envelope state of `n - 1` dialing to `n` so finalized state could also be post-envelope state passing through epoch-transition in the case the block at checkpoint slot is skipped correct me if I'm wrong cc <@755590043632140352> <@491624610215886849> how do we know the full variant is the finalized one? assuming slot `n` is skipped, the only way we could know if `n-1` is the full variant is by looking at slot `n+1` which isnt finalized yet it seems like the finalized checkpoint state should always be the block state? and similarly for the justified state when you have a new justified/finalized checkpoint from a block/postBlock state, you can either use `execution_payload_availability` field there, or the forkchoice view of that block to see if FULL variant of `n-1` is on the canonical chain a checkpoint of `(n, root)` always have a true `n % 32 == 0`, same to checkpoint state so it must be the postEnvelope state dialing to `n` to me, if envelope is on the canonical chain (based on the above conclusion) both postBlock state and postEnvelope state of `n - 1` are not justified/finalized BeaconState it should always dial to `n` postBlock state of `(n - 1)` dialing to `n` cannot be the justified/finalized state in that case because we cannot use that state to sync we're talking about when slot n is skipped (and `n % 32 == 0`), correct? wouldn't both the full and empty payload variant of `n - 1 `be valid wrt to finalization? ofc we could check our view of the canonical chain, but it seems to me that the postBlock and postEnvelope state of `n-1` are technically valid if we broadcast the postEnvelope state as the finalized state any node consuming that data will reject any chain built on top of the empty state, even though its technically valid (i think?) > we're talking about when slot n is skipped (and n % 32 == 0), correct? yes > wouldn't both the full and empty payload variant of n - 1 be valid wrt to finalization? ofc we could check our view of the canonical chain, but it seems to me that the postBlock and postEnvelope state of n-1 are technically valid both of them are finalized, same to block/envelope state slot `n - 2` and we should pick the last one that is finalized that said postBlock state cannot be the checkpoint state because there is 1 state after it, and before `n` is finalized so to me postEnvelope state dialing to `n` is the finalized state this is important because: - when a checkpoint is finalized, beacon node needs to persist the correct BeaconState - when a node download a finalized state of (n, root) where `n % 32 == 0` it needs to be able to sync from there in this case, `postBlock` state dialing to `n` cannot be synced, only `postEnvelope` state dialing to `n` can I don't see how the postEnvelope state can be finalized in this case. attestations would be voting for target block root `n - 1` . It seems to me that all we can safely say is that the postBlock state for `n-1` is finalized. the node consuming that data would have to then try syncing the rest of the chain to figure out if `n - 1` has a full or empty payload my thinking is that a checkpoint of `slot, root` always has `slot % 32 == 0`, even through it's a skip slot a finalized state is always a checkpoint state, so finalized state must have `state.slot == 0 ` as well and that's correct up until fulu, `finalizedState.slot` has the slot respective to the checkpoint's epoch I'd make it backward compatible starting from gloas, so finalized state should be postEnvelope state dialing to `n` in my view > attestations would be voting for target block root n - 1 I agree this is also correct, but if we get `postBlock` state of `n-1` as the finalized state, then starting from gloas, it could happen that a finalized state has whatever slot, it's not necessarily has `slot % 32 == 0`, and especially the finalized state does not have the respective slot to the finalized checkpoint's epoch. This is not backward compatible. this could also be implementation specific in the case of lodestar, we always store checkpoint states, and all of them have `state.slot === 32`, and it's always respective to an epoch of checkpoint, the finalized state is always a checkpoint state it should help us avoid an epoch transition for whatever reorg scenario For skip slot, attestations do signal empty or full via committee index though, so i think post CL or EL state given attestations signal (or what you get from fork chice store) then advance up to the epoch is likely the correct thing to do here another questions is what do people do for finalized / justified block hash to pass for FCU.. do you take the parent block hash or post CL block hash in skip slot scenario agree with this it means to me the finalize state always have `slot % 32 == 0`, and it's respective to the finalized checkpoint's epoch in lodestar we track the finalized checkpoint along with `payloadStatus`, based on that we always have the exact ProtoBlock that's finalized and we pass `execution_payload_block_hash` of that ProtoBlock and `execution_payload_block_hash` is `parent_block_hash` for EMPTY variant and `block_hash` for FULL variant in short: - if the finalized proto block is an `EMPTY` variant, we pass `parent_block_hash` - if the finalized proto block is a `FULL` variant, we pass the `block_hash` that's consistent to my view about the finalized checkpoint state above so if there's no skip slot.. that it's slot 0, its empty right? yes, and in that case we pass `parent_block_hash` as the finalized block hash to fcu yeah attestations can signal empty or full but thats just for following head not for FFG, right? It doesn't seem to me that we could ever safely say that the post envelope state is finalized in the example above well i guess we could have some degree of safety, but it wouldn't be 100% certain like what a finalized state means currently pre-gloas right, we don't count on that to decide but my idea is the same: finalized state always have slot respective to the finalized checkpoint we can ignore everything before that finalized state. If a node has to restart, or another beacon-node requests that finalized state, we can start syncing from there, and it does range sync from the next epoch No, the finalized state is always post CL block, never post envelope You could always argue that finalization in fact does signal full or empty because the attestations for the descendents that contributed to finalization are based on full or empty. But we do not track this agree for LH we are struggling to do checkpoint sync at skipped slots because we can no longer advance the pending state from the prev epoch into the finalized epoch (need the payload) how does Prysm handle this? We request Payloads for the slot range of the finalized checkpoint and blocks from slot+1 And decide later what to apply you fetch this from the checkpoint server via HTTP? that seems to be still the case, I am not able to checkpoint sync, also very rough to get any peers No, we start requesting by range Just the same as now: you get the state from the server and we start requesting the range data starting from it Hmm ok, we don't really have a way of doing this easily. We need some finalized state in the DB in order to start the network layer. I'll see if we can loosen the constraint that the starting state must be epoch-aligned. Hmm I don't understand, the checkpoint state is epoch aligned, except the Payload if it's there, is this the problem? You assume that the state advanced to the epoch is canonical? That sameb problem is biting us in other areas my bad, i forgot, and we dont track this as the skipped slots attestations never get counted on chain right? we could if we want to but it seems like a lot of complexity for a minimal gain which geth branch supports reorg to a parent hash that's not tip of the chain? <@360491619402776577> epbs-devnet-1 and 0 iirc",
+  "excerpts": [
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I got an error in our e2e test, forkchoice picked EMPTY as head when preparing for next slot\nthe fix is to pull up the slot in that case by passing the next clock slot, to trigger `gloas` tie-breaker logic of `FULL vs EMPTY` https://github.com/ChainSafe/lodestar/pull/9164\ninstead of using store's currentSlot\nfound it's a bit tricky since it's not in the spec so posting it here",
+      "createdAt": "2026-04-03T03:44:12.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "just for clarification\nsuppose we're on a chain where every block slot `n % 32` is missed, no payload is missed for other slots\nthe chain is justified and finalized\nin this case, given a finalized checkpoint of `(n, root)` where `n % 32 == 0` and no block + envelope for that slot `n`\nI think the finalized state is the post-envelope state of slot `n - 1` dialing to slot `n`, not the post-block state of slot `n - 1` because:\n- the envelope of `n - 1` happens before `n`, so it's considered finalized. And block `n + 1` is built on this envelope `n - 1` (FULL variant) instead of block `n - 1` (EMPTY variant)\n- when we download that finalized state, we should be able to sync from there so post block state of `n - 1` is the wrong one, should be the post-envelope state of `n - 1` dialing to `n`\n\nso finalized state could also be post-envelope state passing through epoch-transition in the case the block at checkpoint slot is skipped\ncorrect me if I'm wrong cc <@755590043632140352> <@491624610215886849>",
+      "createdAt": "2026-04-03T04:25:55.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "how do we know the full variant is the finalized one? assuming slot `n` is skipped, the only way we could know if `n-1` is the full variant is by looking at slot `n+1` which isnt finalized yet",
+      "createdAt": "2026-04-03T05:40:54.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it seems like the finalized checkpoint state should always be the block state?",
+      "createdAt": "2026-04-03T05:41:39.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and similarly for the justified state",
+      "createdAt": "2026-04-03T05:43:08.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when you have a new justified/finalized checkpoint from a block/postBlock state, you can either use `execution_payload_availability` field there, or the forkchoice view of that block to see if FULL variant of `n-1` is on the canonical chain",
+      "createdAt": "2026-04-03T06:14:55.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "a checkpoint of `(n, root)` always have a true `n % 32 == 0`, same to checkpoint state\nso it must be the postEnvelope state dialing to `n` to me, if envelope is on the canonical chain (based on the above conclusion)\nboth postBlock state and postEnvelope state of `n - 1` are not justified/finalized BeaconState\nit should always dial to `n`",
+      "createdAt": "2026-04-03T06:17:53.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "postBlock state of `(n - 1)` dialing to `n` cannot be the justified/finalized state in that case because we cannot use that state to sync",
+      "createdAt": "2026-04-03T06:20:40.040000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we're talking about when slot n is skipped (and `n % 32 == 0`), correct? wouldn't both the full and empty payload variant of `n - 1 `be valid wrt to finalization? ofc we could check our view of the canonical chain, but it seems to me that the postBlock and postEnvelope state of `n-1` are technically valid",
+      "createdAt": "2026-04-03T06:23:50.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if we broadcast the postEnvelope state as the finalized state any node consuming that data will reject any chain built on top of the empty state, even though its technically valid (i think?)",
+      "createdAt": "2026-04-03T06:25:54.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> we're talking about when slot n is skipped (and n % 32 == 0), correct?\nyes\n> wouldn't both the full and empty payload variant of n - 1 be valid wrt to finalization? ofc we could check our view of the canonical chain, but it seems to me that the postBlock and postEnvelope state of n-1 are technically valid\nboth of them are finalized, same to block/envelope state slot `n - 2`\nand we should pick the last one that is finalized\nthat said postBlock state cannot be the checkpoint state because there is 1 state after it, and before `n` is finalized\nso to me postEnvelope state dialing to `n` is the finalized state\n\nthis is important because:\n- when a checkpoint is finalized, beacon node needs to persist the correct BeaconState\n- when a node download a finalized state of (n, root) where `n % 32 == 0` it needs to be able to sync from there\n\nin this case, `postBlock` state dialing to `n` cannot be synced, only `postEnvelope` state dialing to `n` can",
+      "createdAt": "2026-04-03T06:31:41.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't see how the postEnvelope state can be finalized in this case. attestations would be voting for target block root `n - 1` . It seems to me that all we can safely say is that the postBlock state for `n-1` is finalized. the node consuming that data would have to then try syncing the rest of the chain to figure out if `n - 1` has a full or empty payload",
+      "createdAt": "2026-04-03T06:46:42.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "my thinking is that a checkpoint of `slot, root` always has `slot % 32 == 0`, even through it's a skip slot\na finalized state is always a checkpoint state, so finalized state must have `state.slot == 0 ` as well\nand that's correct up until fulu, `finalizedState.slot` has the slot respective to the checkpoint's epoch\nI'd make it backward compatible starting from gloas, so finalized state should be postEnvelope state dialing to `n` in my view\n\n> attestations would be voting for target block root n - 1\nI agree this is also correct, but if we get `postBlock` state of `n-1` as the finalized state, then starting from gloas, it could happen that a finalized state has whatever slot, it's not necessarily has `slot % 32 == 0`, and especially the finalized state does not have the respective slot to the finalized checkpoint's epoch. This is not backward compatible.",
+      "createdAt": "2026-04-03T07:05:07.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this could also be implementation specific\nin the case of lodestar, we always store checkpoint states, and all of them have `state.slot === 32`, and it's always respective to an epoch of checkpoint, the finalized state is always a checkpoint state\nit should help us avoid an epoch transition for whatever reorg scenario",
+      "createdAt": "2026-04-03T07:09:50.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For skip slot, attestations do signal empty or full via committee index though, so i think post CL or EL state given attestations signal (or what you get from fork chice store) then advance up to the epoch is likely the correct thing to do here",
+      "createdAt": "2026-04-03T07:14:49.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "another questions is what do people do for finalized / justified block hash to pass for FCU.. do you take the parent block hash or post CL block hash in skip slot scenario",
+      "createdAt": "2026-04-03T07:16:59.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "agree with this\nit means to me the finalize state always have `slot % 32 == 0`, and it's respective to the finalized checkpoint's epoch",
+      "createdAt": "2026-04-03T07:18:46.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in lodestar we track the finalized checkpoint along with `payloadStatus`, based on that we always have the exact ProtoBlock that's finalized and we pass `execution_payload_block_hash` of that ProtoBlock\nand `execution_payload_block_hash` is `parent_block_hash` for EMPTY variant and `block_hash` for FULL variant\n\nin short:\n- if the finalized proto block is an `EMPTY` variant, we pass `parent_block_hash`\n- if the finalized proto block is a `FULL` variant, we pass the `block_hash`\n\nthat's consistent to my view about the finalized checkpoint state above",
+      "createdAt": "2026-04-03T07:28:58.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so if there's no skip slot.. that it's slot 0, its empty right?",
+      "createdAt": "2026-04-03T07:32:34.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, and in that case we pass `parent_block_hash` as the finalized block hash to fcu",
+      "createdAt": "2026-04-03T07:33:03.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah attestations can signal empty or full but thats just for following head not for FFG, right? It doesn't seem to me that we could ever safely say that the post envelope state is finalized in the example above",
+      "createdAt": "2026-04-03T07:41:54.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well i guess we could have some degree of safety, but it wouldn't be 100% certain like what a finalized state means currently pre-gloas",
+      "createdAt": "2026-04-03T07:42:51.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "right, we don't count on that to decide\nbut my idea is the same: finalized state always have slot respective to the finalized checkpoint\nwe can ignore everything before that finalized state. If a node has to restart, or another beacon-node requests that finalized state, we can start syncing from there, and it does range sync from the next epoch",
+      "createdAt": "2026-04-03T07:48:20.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, the finalized state is always post CL block, never post envelope",
+      "createdAt": "2026-04-03T10:50:23.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You could always argue that finalization in fact does signal full or empty because the attestations for the descendents that contributed to finalization are based on full or empty. But we do not track this",
+      "createdAt": "2026-04-03T10:52:25.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "agree\n\nfor LH we are struggling to do checkpoint sync at skipped slots because we can no longer advance the pending state from the prev epoch into the finalized epoch (need the payload)\n\nhow does Prysm handle this?",
+      "createdAt": "2026-04-03T10:53:25.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We request Payloads for the slot range of the finalized checkpoint and blocks from slot+1",
+      "createdAt": "2026-04-03T10:54:08.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And decide later what to apply",
+      "createdAt": "2026-04-03T10:54:16.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you fetch this from the checkpoint server via HTTP?",
+      "createdAt": "2026-04-03T11:29:21.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that seems to be still the case, I am not able to checkpoint sync, also very rough to get any peers",
+      "createdAt": "2026-04-03T11:41:49.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "No, we start requesting by range",
+      "createdAt": "2026-04-03T12:05:09.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Just the same as now: you get the state from the server and we start requesting the range data starting from it",
+      "createdAt": "2026-04-03T12:05:57.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm ok, we don't really have a way of doing this easily. We need some finalized state in the DB in order to start the network layer. I'll see if we can loosen the constraint that the starting state must be epoch-aligned.",
+      "createdAt": "2026-04-03T12:10:58.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm I don't understand, the checkpoint state is epoch aligned, except the Payload if it's there, is this the problem? You assume that the state advanced to the epoch is canonical?",
+      "createdAt": "2026-04-03T12:12:38.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That sameb problem is biting us in other areas",
+      "createdAt": "2026-04-03T12:13:16.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "my bad, i forgot, and we dont track this as the skipped slots attestations never get counted on chain right? we could if we want to but it seems like a lot of complexity for a minimal gain",
+      "createdAt": "2026-04-03T14:52:24.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "which geth branch supports reorg to a parent hash that's not tip of the chain? <@360491619402776577>",
+      "createdAt": "2026-04-03T17:35:45.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "epbs-devnet-1 and 0 iirc",
+      "createdAt": "2026-04-03T18:01:30.409000+00:00",
+      "attachments": []
+    }
+  ]
+}

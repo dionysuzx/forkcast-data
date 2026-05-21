@@ -1,0 +1,256 @@
+{
+  "schemaVersion": 1,
+  "channel": "8037-state-creat-gas",
+  "date": "2026-05-19",
+  "messageCount": 30,
+  "sourceHash": "4b6b66ebd2d42618f7d37da1165878344beef6dbe7367242a7e89d34245d77f7",
+  "searchText": "Consider a transaction with the following gas configuration: - Total gas limit: 20M - Regular gas: 16M - State reservoir: 4M - Floor gas: 15M (the minimum the transaction must be charged for) After execution, the actual gas consumption is: - Regular gas used: 12M - State gas used: 2M - Total used: 14M Since 14M is below the 15M floor, an additional 1M gas must be charged to bring the transaction up to the floor. Which bucket does this 1M come from? I guess the answer is it should come from regular, just want to confirm Ah, got it. Yes. It should go to regular. I can add a comment clarifying this in the EIP > State-gas accounting for CALL* and CREATE/CREATE2 operations is performed right before the respective call frame. > > **If the respective call frame reverts or halts exceptionally, the charged state-gas is refilled back to the state_gas_reservoir and execution_state_gas_used decreases by the same amount**. it's ambiguous. For Call, it's possible to terminate it earlier if (1) depth is too deep (2) insufficient balance for transfer. In these two scenarios, if transfer value is nonzero and destination is empty, the pre-charged account creation should be refunded, otherwise either the account creation will happen regardless of the execution result, or the account creation is never pre-charged so it shouldn't be refunded btw, at the block-level accounting, the contributed regular gas is inflated with the floor. > block_output.block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost) > in my example, the regular is 12m, state is 2m, floor is 15m, then - tx_gas_used is 15m (correct) - block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost) (the entire floor is added, 15m, the actual regular gas used is 13m, 12m + 1m floor inflation) - block_state_gas_used += tx_state_gas (2m, it's correct) the block_regular_gas_used may be over-reserved Small clarification on EIP-8038: https://github.com/ethereum/EIPs/pull/11696 On EIP-8038 `Special case for EXTCODESIZE and EXTCODECOPY` i think we should just add static cold read for bytecode (warm cose does not cover it). It is strange opcode as for some warm accounts (warmed with BALANCE opcode) there would be no need to load bytecode, so bytecode would be cold. But on other case if account is warmed with CALL we would load bytecode. So adding static cold cost for reading bytecode would overcharge it in some cases but we would not need to introduce a notion of cold/warm bytecode load. This is an interesting point. I didn't know that if the account is warmed with BALANCE no bytecode is loaded. Is this behavior consistent accross clients? we didn't load the bytecode as there was no need (balance was only needed), not sure if this is consistent with other clients. hm i see what you mean, every account load assumes that bytecode is loaded. To make sure I understand, are you saying that we can have an unsucessful CALL before entering the the new frame? And, in that case, we should also clarify that case and refill the reservoir Yeah, I think you have a point there. I am starting to think we should change it to: ```python tx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund) ``` What do you think, <@755913785620824175> and <@796570016966770688> ? Do we have test cases covering this? Also curious about your thoughts on this, <@792404665068158998> : should the call data floor be compared against the regular gas or the regular + state gas? > To make sure I understand, are you saying that we can have an unsucessful CALL before entering the the new frame? And, in that case, we should also clarify that case and refill the reservoir We do this in EELS and have a tests: `test_call_stack_depth_returns_reservoir`/`test_call_insufficient_balance_returns_reservoir`. So would be in favor of clarifying this behavior! So, you are saying that the current spec uses `tx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund)` instead of `tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost)`? Sorry updated the above comment, was for other point. For this I just updated the spec locally, and refilled the tests. They all pass so we do not have test cases covering it. No strong preference on updating it but does it mean we have the case now where `tx_gas_used > tx.gas`? > does it mean we have the case now where tx_gas_used > tx.gas? Yeah, this is the problem of doing `tx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund)`. If a big portion of the gas is used for state creation (which could happen in contract deployments), then tx.gas may not be enough to cover the floor plus the state creation costs. So, I guess we need to use `tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost)` afterall Yes, that's exactly what I meant. The call will terminate early if the call depth is exceeded or the caller has insufficient balance for the transfer. In these cases, account creation will not occur, even if it otherwise would have (i.e. the target account is empty and the transferred value is non-zero, so account creation gas has been pre-charged). However, the wording in the spec feels a bit misleading. Except for the two scenarios mentioned above, account creation will still occur regardless of whether the call frame itself eventually succeeds or reverts. I will updade the EIP This is why had the NOCODE variant 😅 This part of the spec is dead code now with fixed CSPB. 30M of prev limit can easily handle 16x SSTORE. CPSB is fixed, but can be updated with forks. I would prefer to keep this for future maintainability this kind of future proving usually goes sideways. Ask Toni about calldata tokens. Main problem is that this is not testable right now. So we can leave it in the spec, but we also have to test it every time the CSPB changes. Why is it not testable? All tests pass with the prev 30M limit. I see. And what is the downside of keeping the new system call limits? Data floor cap block accounting This is why had the NOCODE variant 😅 Quick question about 7825 and 8037 interaction. The idea behind 7825 was to avoid big txns that consume the entire gas limit of the block. But with 8037 we are back to allowing huge txns that consume a lot of state gas. Wouldn't it make sense to limit tx.gas_limit to 2 * TX_MAX_GAS_LIMIT instead of allowing it go unbounded? Quick question about 7825 and 8037 interaction. The idea behind 7825 was to avoid big txns that consume the entire gas limit of the block. But with 8037 we are back to allowing huge txns that consume a lot of state gas. Would it make sense to limit tx.gas_limit to something like 2 * TX_MAX_GAS_LIMIT instead of allowing it to go unbounded?",
+  "excerpts": [
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Consider a transaction with the following gas configuration:\n  - Total gas limit: 20M\n  - Regular gas: 16M\n  - State reservoir: 4M\n  - Floor gas: 15M (the minimum the transaction must be charged for)\n\nAfter execution, the actual gas consumption is:\n  - Regular gas used: 12M\n  - State gas used: 2M\n  - Total used: 14M\n\nSince 14M is below the 15M floor, an additional 1M gas must be charged to bring the transaction up to the floor. Which bucket does this 1M come from?",
+      "createdAt": "2026-05-19T03:52:35.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I guess the answer is it should come from regular, just want to confirm",
+      "createdAt": "2026-05-19T03:53:11.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Ah, got it. Yes. It should go to regular. I can add a comment clarifying this in the EIP",
+      "createdAt": "2026-05-19T05:18:10.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "> State-gas accounting for CALL* and CREATE/CREATE2 operations is performed right before the respective call frame. \n> \n> **If the respective call frame reverts or halts exceptionally, the charged state-gas is refilled back to the state_gas_reservoir and execution_state_gas_used decreases by the same amount**.\nit's ambiguous.\n\nFor Call, it's possible to terminate it earlier if (1) depth is too deep (2) insufficient balance for transfer. In these two scenarios, if transfer value is nonzero and destination is empty, the pre-charged account creation should be refunded, otherwise either the account creation will happen regardless of the execution result, or the account creation is never pre-charged so it shouldn't be refunded",
+      "createdAt": "2026-05-19T06:42:25.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "btw, at the block-level accounting, the contributed regular gas is inflated with the floor.\n\n> block_output.block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost)\n> \nin my example, the regular is 12m, state is 2m, floor is 15m, then\n-  tx_gas_used is 15m (correct)\n- block_regular_gas_used += max(tx_regular_gas, calldata_floor_gas_cost) (the entire floor is added, 15m, the actual regular gas used is 13m, 12m + 1m floor inflation)\n- block_state_gas_used += tx_state_gas (2m, it's correct)\n\nthe block_regular_gas_used may be over-reserved",
+      "createdAt": "2026-05-19T07:39:42.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Small clarification on EIP-8038: https://github.com/ethereum/EIPs/pull/11696",
+      "createdAt": "2026-05-19T10:19:33.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "On EIP-8038 `Special case for EXTCODESIZE and EXTCODECOPY`  i think we should just add static cold read for bytecode (warm cose does not cover it).\n\nIt is strange opcode as for some warm accounts (warmed with BALANCE opcode) there would be no need to load bytecode, so bytecode would be cold. But on other case if account is warmed with CALL we would load bytecode.\n\nSo adding static cold cost for reading bytecode would overcharge it in some cases but we would not need to introduce a notion of cold/warm bytecode load.",
+      "createdAt": "2026-05-19T11:57:08.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This is an interesting point. I didn't know that if the account is warmed with BALANCE no bytecode is loaded. Is this behavior consistent accross clients?",
+      "createdAt": "2026-05-19T12:13:02.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "we didn't load the bytecode as there was no need (balance was only needed), not sure if this is consistent with other clients. hm i see what you mean, every account load assumes that bytecode is loaded.",
+      "createdAt": "2026-05-19T12:15:47.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "To make sure I understand, are you saying that we can have an unsucessful CALL before entering the the new frame? And, in that case, we should also clarify that case and refill the reservoir",
+      "createdAt": "2026-05-19T12:16:51.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Yeah, I think you have a point there. I am starting to think we should change it to:\n\n```python\ntx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund)\n```\n\nWhat do you think, <@755913785620824175> and <@796570016966770688> ? Do we have test cases covering this?\nAlso curious about your thoughts on this, <@792404665068158998> : should the call data floor be compared against the regular gas or the regular + state gas?",
+      "createdAt": "2026-05-19T12:18:53.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "> To make sure I understand, are you saying that we can have an unsucessful CALL before entering the the new frame? And, in that case, we should also clarify that case and refill the reservoir\n\nWe do this in EELS and have a tests: `test_call_stack_depth_returns_reservoir`/`test_call_insufficient_balance_returns_reservoir`. So would be in favor of clarifying this behavior!",
+      "createdAt": "2026-05-19T12:41:04.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "So, you are saying that the current spec uses `tx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund)` instead of `tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost)`?",
+      "createdAt": "2026-05-19T12:44:47.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Sorry updated the above comment, was for other point. For this I just updated the spec locally, and refilled the tests. They all pass so we do not have test cases covering it. No strong preference on updating it but does it mean we have the case now where `tx_gas_used > tx.gas`?",
+      "createdAt": "2026-05-19T12:48:24.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "> does it mean we have the case now where tx_gas_used > tx.gas?\n\nYeah, this is the problem of doing `tx_gas_used = tx_gas_used_after_refund + max(0, calldata_floor_gas_cost - tx_regular_gas_after_refund)`. If a big portion of the gas is used for state creation (which could happen in contract deployments), then tx.gas may not be enough to cover the floor plus the state creation costs. So, I guess we need to use `tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost)` afterall",
+      "createdAt": "2026-05-19T13:01:12.420000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Yes, that's exactly what I meant. The call will terminate early if the call depth is exceeded or the caller has insufficient balance for the transfer. In these cases, account creation will not occur, even if it otherwise would have (i.e. the target account is empty and the transferred value is non-zero, so account creation gas has been pre-charged).\n\nHowever, the wording in the spec feels a bit misleading. Except for the two scenarios mentioned above, account creation will still occur regardless of whether the call frame itself eventually succeeds or reverts.",
+      "createdAt": "2026-05-19T13:39:54.097000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I will updade the EIP",
+      "createdAt": "2026-05-19T13:42:09.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ben_a_adams",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This is why had the NOCODE variant 😅",
+      "createdAt": "2026-05-19T13:58:07.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This part of the spec is dead code now with fixed CSPB.",
+      "createdAt": "2026-05-19T14:01:08.288000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "c401068b92a1e59b6cda9284db68889a8e00e9269c3c8775ba13903f67419aac"
+        }
+      ]
+    },
+    {
+      "author": "chfast",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "30M of prev limit can easily handle 16x SSTORE.",
+      "createdAt": "2026-05-19T14:01:51.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "CPSB is fixed, but can be updated with forks. I would prefer to keep this for future maintainability",
+      "createdAt": "2026-05-19T14:02:49.922000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "this kind of future proving usually goes sideways. Ask Toni about calldata tokens.",
+      "createdAt": "2026-05-19T14:04:08.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Main problem is that this is not testable right now. So we can leave it in the spec, but we also have to test it every time the CSPB changes.",
+      "createdAt": "2026-05-19T14:07:03.648000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Why is it not testable?",
+      "createdAt": "2026-05-19T14:08:10.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "chfast",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "All tests pass with the prev 30M limit.",
+      "createdAt": "2026-05-19T14:08:49.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I see. And what is the downside of keeping the new system call limits?",
+      "createdAt": "2026-05-19T14:14:47.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Data floor cap block accounting",
+      "createdAt": "2026-05-19T14:16:14.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "This is why had the NOCODE variant 😅",
+      "createdAt": "2026-05-19T14:31:07.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Quick question about 7825 and 8037 interaction. The idea behind 7825 was to avoid big txns that consume the entire gas limit of the block. But with 8037 we are back to allowing huge txns that consume a lot of state gas. Wouldn't it make sense to limit tx.gas_limit to 2 * TX_MAX_GAS_LIMIT instead of allowing it go unbounded?",
+      "createdAt": "2026-05-19T17:56:11.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Quick question about 7825 and 8037 interaction. The idea behind 7825 was to avoid big txns that consume the entire gas limit of the block. But with 8037 we are back to allowing huge txns that consume a lot of state gas. Would it make sense to limit tx.gas_limit to something like 2 * TX_MAX_GAS_LIMIT instead of allowing it to go unbounded?",
+      "createdAt": "2026-05-19T20:13:53.987000+00:00",
+      "attachments": []
+    }
+  ]
+}

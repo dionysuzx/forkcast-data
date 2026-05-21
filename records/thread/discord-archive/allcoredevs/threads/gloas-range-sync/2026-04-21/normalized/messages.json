@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "channel": "allcoredevs/_threads/Gloas Range Sync",
+  "date": "2026-04-21",
+  "messageCount": 43,
+  "sourceHash": "3dc681d775bff5c6e9afcd43409f5d1dab06f7d7f9f9a25acb5c33287dc8362e",
+  "searchText": "One exception is manual chain rewind. Geth provides a RPC endpoint `debug_setHead` which allows you to rewind the chain back to arbitrary block. If the target block is prior to the pivot block, the local block will be directly rewound to Genesis and chain will be \"stateless\". After the call, the snap sync will be re-triggered Yes it's true. We need to think about if it makes sense to still support it. In the snap/1, it's very easy to utilize the existing state data locally and state healer will fix the state inconsistency very quickly in this scenario. In snap/2, it's definitely more complicated. - If the target block is after the pivot block and geth has corresponding reverse diffs available, then state can be reverted with these reverse diffs, no snap sync required; - If the target block is prior to the pivot block and with no reverse diffs available - Shall we terminate the rewind? Any benefits by keeping doing this? - If we keep rewinding, the local state should be reset and run the snap/2 again > i would assume the EL would only fetch the finalized state It's not correct. There is no guarantee the last finalized state is still accessible over the network. Geth by default keep the states of latest 128 blocks, namely ~25 minutes time window for state sync. If the chain is un-finalized for whatever reason, then it's impossible to sync up to the last finalized state today, snap sync takes downloads the state at HEAD-64, without any guarantees that we have finalized. q3: I think the answer is \"yes, a node can be tricked\" unless block hash is verified for each payload on the chain between `S` and `F`. My answer assumes that block hash trust assumption hasn't changed in Gloas which I am not sure about. Block hash commits to e.g. execution requests which are given to CL and if that commitment isn't validated on the boundary between CL and EL then EL validation of execution requests doesn't matter as the EL block between `S` and `F` may have a different block hash, not the one that CL is aware of. I think this is why we have different sync strategies for CLs today: some of them are capable of verifying block hash on their own, some of them are not and defer that to EL. I am not sure I understand this. What exactly can be simplified in your view? We can sync without even requesting ever the Payloads. But this is only true is we do not need to verify the Blockhash you mean to communicate only gossiped payloads to the EL? Let me think about the request discrepancy this seems triviallly fixable and it would be stupid to require clients to download payloads just for this Yes And also some requested by root to catch up requests were one of the examples, we have to verify block hash of each payload to ensure that EL will be getting payloads from p2p that are secured by CL, not any arbitrary payloads The Blockhash is committed in the CL? I don't understand: I give you a hash and that hash commits to all the parent ones block hash commits to EL block, but it's an important property that the payload content which block hash commits to corresponds to the block hash that is in the CL block I don't understand There can be the situation where you validated block hash of pre-`S` and post-`F` only but didn't not run that validation for anything in between, right? Yes but the chain of hashes is committed both in the CL and El EL fetches payloads from this range from p2p, and block hashes of those payloads doesn't match the ones that we have in the corresponding beacon blocks This is impossible: the parent hash for the latest one I gave you is committed in the latest block hash which latest block hash? the latest block hash at the `HEAD` when you have complete the sync? hmm, maybe I am missing something with the parent hash? so the parent hash check would be enough to avoid such a problem? let me attempt to find a proper counter example So, the situation I am trying to analyze is the following: `S <- M <- ... <- F`, where `M` is a malicious beacon block which associated with the `block_hash` of existing payload `P'` while content of `M` match the content of payload `P`. EL will fetch `P'` from p2p and import it without a problem as it's a valid EL block, then all blocks built on top of `M` including `F` will be validated as well. What am I missing here? that the EL could not possibly tell you that F is valid in that case the execution follows P and the hash chain follows P' so F cannot be valid why the execution would not follow the chain rooted at `P'`? So I believe all we need to do is to ascertain that the hash chain matches both sides, this should also cover requests at the same time Execution will follow whatever chain, but if it reaches F then it has followed a chain that reaches F which commits all of its ancestry block hashes of each block rooted at `P'` are enshrined into beacon blocks starting from `M` till the head of the chain. It's an extreme case where malicious block is finalized Misha I swear I can't understand a word of what you're saying, we could schedule a call later tomorrow perhaps? I don't understand how F can pass validation in the EL side in the example you give above, assuming that the chain of parent hash is checked. Which currently it's not if we only sync blocks on the CL let's have a call, i might be getting something wrong too. In the meantime i will think more into the case above ping me with a timezone, although if you're still in GMT+? then probably it'll have to be Thursday, I'm driving back home tomorrow I'll DM I think just adding an accumulator of hashes to the envelope guarantees the consistency of both chains and takes care of requests as well To the block, sorry, not the envelope So if I understand this correctly, when I send the first gossipped payload to the engine, and the engine tells me VALID, I am guaranteed that its parent block had the right blockhash even though I never checked it. But I do not get that guarantee about it's grandparent. The reason being that the parent block's parent hash in the EL may be different than the one committed in the CL. So in order to prevent such an attack from a malicious majority of validators, it'd be enough to add a single entry to the envelope (it could be in the envelope or the block, it could even be in the engine API and not committed onchain) that is part of validity on the EL and on the CL. The entry, called `accumulated_hash` is simply updated by `accumulated_hash = hash(accumulated_hash, block_hash)`. The CL checks that the update is correct (it only needs the hashes to check this and does not need the actual payload) and the EL checks this in addition to actually checking the hashes. Thus, when I send the payload for validation to the EL and it returns VALID, then the CL has the guarantee that the whole chain of hashes is exactly committed and satisifed both in the EL and the CL, will this solve any of your concerns <@425572898787426305> ? This way I think the CL doesn't even need to keep payloads for anything only the last unfinalized ones to serve by root and not drop clients into optimistic mode Seems like a trivial addition to the CL+EL that would really simplify syncing **a lot** on the CL side It would make nodes much more resilient in the event of lack of finality, being able to very fast catch up on consensus",
+  "excerpts": [
+    {
+      "author": "garyrong",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "One exception is manual chain rewind. Geth provides a RPC endpoint `debug_setHead` which allows you to rewind the chain back to arbitrary block. If the target block is prior to the pivot block, the local block will be directly rewound to Genesis and chain will be \"stateless\". After the call, the snap sync will be re-triggered",
+      "createdAt": "2026-04-21T01:06:46.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Yes it's true. We need to think about if it makes sense to still support it. In the snap/1, it's very easy to utilize the existing state data locally and state healer will fix the state inconsistency very quickly in this scenario. In snap/2, it's definitely more complicated.\n\n- If the target block is after the pivot block and geth has corresponding reverse diffs available, then state can be reverted with these reverse diffs, no snap sync required;\n- If the target block is prior to the pivot block and with no reverse diffs available\n    - Shall we terminate the rewind? Any benefits by keeping doing this?\n    - If we keep rewinding, the local state should be reset and run the snap/2 again",
+      "createdAt": "2026-04-21T01:07:20.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "> i would assume the EL would only fetch the finalized state\nIt's not correct. There is no guarantee the last finalized state is still accessible over the network. \n\nGeth by default keep the states of latest 128 blocks, namely ~25 minutes time window for state sync. If the chain is un-finalized for whatever reason, then it's impossible to sync up to the last finalized state",
+      "createdAt": "2026-04-21T01:13:58.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "today, snap sync takes downloads the state at HEAD-64, without any guarantees that we have finalized.",
+      "createdAt": "2026-04-21T07:15:34.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "q3: I think the answer is \"yes, a node can be tricked\" unless block hash is verified for each payload on the chain between `S` and `F`. My answer assumes that block hash trust assumption hasn't changed in Gloas which I am not sure about. Block hash commits to e.g. execution requests which are given to CL and if that commitment isn't validated on the boundary between CL and EL then EL validation of execution requests doesn't matter as the EL block between `S` and `F` may have a different block hash, not the one that CL is aware of. I think this is why we have different sync strategies for CLs today: some of them are capable of verifying block hash on their own, some of them are not and defer that to EL.",
+      "createdAt": "2026-04-21T09:02:24.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "I am not sure I understand this. What exactly can be simplified in your view?",
+      "createdAt": "2026-04-21T09:11:23.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "We can sync without even requesting ever the Payloads. But this is only true is we do not need to verify the Blockhash",
+      "createdAt": "2026-04-21T09:56:28.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "you mean to communicate only gossiped payloads to the EL?",
+      "createdAt": "2026-04-21T09:57:45.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Let me think about the request discrepancy this seems triviallly fixable and it would be stupid to require clients to download payloads just for this",
+      "createdAt": "2026-04-21T09:58:18.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Yes",
+      "createdAt": "2026-04-21T09:58:26.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "And also some requested by root to catch up",
+      "createdAt": "2026-04-21T09:59:02.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "requests were one of the examples, we have to verify block hash of each payload to ensure that EL will be getting payloads from p2p that are secured by CL, not any arbitrary payloads",
+      "createdAt": "2026-04-21T10:01:04.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "The Blockhash is committed in the CL? I don't understand: I give you a hash and that hash commits to all the parent ones",
+      "createdAt": "2026-04-21T10:05:54.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "block hash commits to EL block, but it's an important property that the payload content which block hash commits to corresponds to the block hash that is in the CL block",
+      "createdAt": "2026-04-21T10:08:22.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "I don't understand",
+      "createdAt": "2026-04-21T10:08:55.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "There can be the situation where you validated block hash of pre-`S` and post-`F` only but didn't not run that validation for anything in between, right?",
+      "createdAt": "2026-04-21T10:09:57.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Yes but the chain of hashes is committed both in the CL and El",
+      "createdAt": "2026-04-21T10:11:51.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "EL fetches payloads from this range from p2p, and block hashes of those payloads doesn't match the ones that we have in the corresponding beacon blocks",
+      "createdAt": "2026-04-21T10:12:08.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "This is impossible: the parent hash for the latest one I gave you is committed in the latest block hash",
+      "createdAt": "2026-04-21T10:13:00.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "which latest block hash? the latest block hash at the `HEAD` when you have complete the sync?",
+      "createdAt": "2026-04-21T10:14:25.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "hmm, maybe I am missing something with the parent hash? so the parent hash check would be enough to avoid such a problem?",
+      "createdAt": "2026-04-21T10:18:53.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "let me attempt to find a proper counter example",
+      "createdAt": "2026-04-21T10:19:34.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "So, the situation I am trying to analyze is the following:\n`S <- M <- ... <- F`, where `M` is a malicious beacon block which associated with the `block_hash` of existing payload `P'` while content of `M` match the content of payload `P`. EL will fetch `P'` from p2p and import it without a problem as it's a valid EL block, then all blocks built on top of `M` including `F` will be validated as well.\n\nWhat am I missing here?",
+      "createdAt": "2026-04-21T10:29:32.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "that the EL could not possibly tell you that F is valid in that case",
+      "createdAt": "2026-04-21T10:51:23.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "the execution follows P and the hash chain follows P'",
+      "createdAt": "2026-04-21T10:51:49.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "so F cannot be valid",
+      "createdAt": "2026-04-21T10:51:53.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "why the execution would not follow the chain rooted at `P'`?",
+      "createdAt": "2026-04-21T10:52:40.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "So I believe all we need to do is to ascertain that the hash chain matches both sides, this should also cover requests at the same time",
+      "createdAt": "2026-04-21T10:52:52.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Execution will follow whatever chain, but if it reaches F then it has followed a chain that reaches F which commits all of its ancestry",
+      "createdAt": "2026-04-21T10:54:09.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "block hashes of each block rooted at `P'` are enshrined into beacon blocks starting from `M` till the head of the chain. It's an extreme case where malicious block is finalized",
+      "createdAt": "2026-04-21T10:55:33.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Misha I swear I can't understand a word of what you're saying, we could schedule a call later tomorrow perhaps?",
+      "createdAt": "2026-04-21T11:05:40.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "I don't understand how F can pass validation in the EL side in the example you give above, assuming that the chain of parent hash is checked.",
+      "createdAt": "2026-04-21T11:06:22.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Which currently it's not if we only sync blocks on the CL",
+      "createdAt": "2026-04-21T11:06:49.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "let's have a call, i might be getting something wrong too. In the meantime i will think more into the case above",
+      "createdAt": "2026-04-21T11:35:58.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "ping me with a timezone, although if you're still in GMT+? then probably it'll have to be Thursday, I'm driving back home tomorrow",
+      "createdAt": "2026-04-21T11:37:15.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "I'll DM",
+      "createdAt": "2026-04-21T11:49:21.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "I think just adding an accumulator of hashes to the envelope guarantees the consistency of both chains and takes care of requests as well",
+      "createdAt": "2026-04-21T12:31:36.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "To the block, sorry, not the envelope",
+      "createdAt": "2026-04-21T12:32:03.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "So if I understand this correctly, when I send the first gossipped payload to the engine, and the engine tells me VALID, I am guaranteed that its parent block had the right blockhash even though I never checked it. But I do not get that guarantee about it's grandparent. The reason being that the parent block's parent hash in the EL may be different than the one committed in the CL. So in order to prevent such an attack from a malicious majority of validators, it'd be enough to add a single entry to the envelope (it could be in the envelope or the block, it could even be in the engine API and not committed onchain) that is part of validity on the EL and on the CL. The entry, called `accumulated_hash` is simply updated by `accumulated_hash = hash(accumulated_hash, block_hash)`.  The CL checks that the update is correct (it only needs the hashes to check  this and does not need the actual payload) and the EL checks this in addition to actually checking the hashes. \n\nThus, when I send the payload for validation to the EL and it returns VALID, then the CL has the guarantee that the whole chain of hashes is exactly committed and satisifed both in the EL and the CL, will this solve any of your concerns <@425572898787426305> ?",
+      "createdAt": "2026-04-21T19:20:53.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "This way I think the CL doesn't even need to keep payloads for anything",
+      "createdAt": "2026-04-21T19:21:13.846000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "only the last unfinalized ones to serve by root and not drop clients into optimistic mode",
+      "createdAt": "2026-04-21T19:21:30.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "Seems like a trivial addition to the CL+EL that would really simplify syncing **a lot** on the CL side",
+      "createdAt": "2026-04-21T19:22:22.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "allcoredevs",
+      "content": "It would make nodes much more resilient in the event of lack of finality, being able to very fast catch up on consensus",
+      "createdAt": "2026-04-21T19:22:48.554000+00:00",
+      "attachments": []
+    }
+  ]
+}

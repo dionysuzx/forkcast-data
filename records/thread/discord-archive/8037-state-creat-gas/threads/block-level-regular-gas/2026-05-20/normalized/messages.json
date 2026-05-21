@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "channel": "8037-state-creat-gas/_threads/block-level regular gas",
+  "date": "2026-05-20",
+  "messageCount": 13,
+  "sourceHash": "8571bdd68b2622616e80eb67563e468c80c737fcc70400cc830bed8fffd706f5",
+  "searchText": "Hey, I am trying to wrap my head around this. It does make sense to not use floor for `block_regular_gas_used` . Just to confirm: * We want `block_regular_gas_used` to be without floor. As it is not a work that was done. * We want floor only to be included for `tx_gas_used`, as tx to pay more if floor is not hit. Maybe confusing thing for me, for `tx_gas_used` should floor only be accounted for `regular+state` gas or just `regular` part? i think it's `regular+state` maria just opened a pr to clarify it https://github.com/ethereum/EIPs/pull/11706/changes > We want block_regular_gas_used to be without floor. As it is not a work that was done. I think you may be right. I was going from the current spec, which included the floor, but the spec before 8037 was actually: ```python block_output.block_gas_used += tx_gas_used_after_refund ``` So it does not incldue the floor. <@402853454126776320> , in that case, this should be simpler. The formula would be: ```python tx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used tx_regular_gas = tx_gas_used_after_refund - tx_state_gas block_output.block_regular_gas_used += tx_state_gas block_output.block_state_gas_used += tx_state_gas ``` And after 7778, we would do: ```python tx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used tx_regular_gas = tx_gas_used_before_refund - tx_state_gas block_output.block_regular_gas_used += tx_state_gas block_output.block_state_gas_used += tx_state_gas ``` Would this make sense, <@429719902363058177> ? > We want block_regular_gas_used to be without floor. As it is not a work that was done. Why is this the case here? Can't figure this one out We want for `block_regular_gas_used` to contain only gas that was spend on CPU work, this was a reason why refund was removed, and it is same idea why we dont want to use floor gas in its calculation. You still want to charge the tx user for this gas, but you want to pack block with transactions that actually did the work. As an example, if a transaction triggers the call data floor, it will be charged a higher call data cost and the total gas used charged to the user is higher than the gas used during execution. The question is - how should block fullness be defined? Should it only be the execution work that was actually performed or should it be the higher call data cost that tje suer paid? e.g., in a world without state-gas, should a transaction with a 15M call data floor and 10M gas used contrinute with 10M or 15M to the block's gas used? Slight correction on formulas: ``` 1. tx_gas_used_before_refund = tx.gas - tx_output.gas_left - tx_output.state_gas_reservoir 2. tx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used 3. tx_regular_gas = tx_gas_used_before_refund - tx_state_gas 4. block_output.block_regular_gas_used += tx_regular_gas 5. block_output.block_state_gas_used += tx_state_gas ``` And `tx_gas_used` would become: ``` 6. tx_gas_refund = min(tx_gas_used_before_refund // 5, tx_output.refund_counter) 7. tx_gas_used_after_refund = tx_gas_used_before_refund - tx_gas_refund 8. tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost) ``` I guess it does not make sense to add floor or tie to `block_regular_gas_used` as they are done on `tx_gas_used_before_refund` (state+regular) So from this formulas, line 6: maximum refund is 1/5 of both (state+regular) gas line 8: floor gas takes into account both state gas and regular gas. This should be okay i guess.",
+  "excerpts": [
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "",
+      "createdAt": "2026-05-20T10:55:30.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "Hey, I am trying to wrap my head around this. It does make sense to not use floor for `block_regular_gas_used` .\n\nJust to confirm:\n* We want `block_regular_gas_used` to be without floor. As it is not a work that was done.\n* We want floor only to be included for `tx_gas_used`, as tx to pay more if floor is not hit.\n\nMaybe confusing thing for me, for `tx_gas_used` should floor only be accounted for `regular+state` gas or just `regular` part?",
+      "createdAt": "2026-05-20T10:55:31.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "i think it's `regular+state`",
+      "createdAt": "2026-05-20T11:28:04.077000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "maria just opened a pr to clarify it https://github.com/ethereum/EIPs/pull/11706/changes",
+      "createdAt": "2026-05-20T11:28:26.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "> We want block_regular_gas_used to be without floor. As it is not a work that was done.\n\nI think you may be right. I was going from the current spec, which included the floor, but the spec before 8037 was actually:\n\n```python\nblock_output.block_gas_used += tx_gas_used_after_refund\n```\n\nSo it does not incldue the floor. <@402853454126776320> , in that case, this should be simpler. The formula would be:\n\n```python\ntx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used\ntx_regular_gas = tx_gas_used_after_refund - tx_state_gas\n\nblock_output.block_regular_gas_used += tx_state_gas\nblock_output.block_state_gas_used += tx_state_gas\n```\n\nAnd after 7778, we would do:\n```python\ntx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used\ntx_regular_gas = tx_gas_used_before_refund - tx_state_gas\n\nblock_output.block_regular_gas_used += tx_state_gas\nblock_output.block_state_gas_used += tx_state_gas\n```\n\nWould this make sense, <@429719902363058177> ?",
+      "createdAt": "2026-05-20T11:53:23.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "spencer_tb",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "> We want block_regular_gas_used to be without floor. As it is not a work that was done.\nWhy is this the case here? Can't figure this one out",
+      "createdAt": "2026-05-20T12:22:32.365000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "We want for `block_regular_gas_used` to contain only gas that was spend on CPU work, this was a reason why refund was removed, and it is same idea why we dont want to use floor gas in its calculation.",
+      "createdAt": "2026-05-20T13:16:33.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "You still want to charge the tx user for this gas, but you want to pack block with transactions that actually did the work.",
+      "createdAt": "2026-05-20T13:17:07.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "As an example, if a transaction triggers the call data floor, it will be charged a higher call data cost and the total gas used charged to the user is higher than the gas used during execution. The question is - how should block fullness be defined? Should it only be the execution work that was actually performed or should it be the higher call data cost that tje suer paid?",
+      "createdAt": "2026-05-20T13:50:37.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "e.g., in a world without state-gas, should a transaction with a 15M call data floor and 10M gas used contrinute with 10M or 15M to the block's gas used?",
+      "createdAt": "2026-05-20T13:51:47.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "Slight correction on formulas:\n```\n1. tx_gas_used_before_refund = tx.gas - tx_output.gas_left - tx_output.state_gas_reservoir\n2. tx_state_gas = intrinsic_state_gas + tx_output.execution_state_gas_used\n3. tx_regular_gas = tx_gas_used_before_refund - tx_state_gas\n\n4. block_output.block_regular_gas_used += tx_regular_gas\n5. block_output.block_state_gas_used += tx_state_gas\n```\n\nAnd `tx_gas_used` would become:\n```\n6. tx_gas_refund = min(tx_gas_used_before_refund // 5, tx_output.refund_counter)\n7. tx_gas_used_after_refund = tx_gas_used_before_refund - tx_gas_refund\n8. tx_gas_used = max(tx_gas_used_after_refund, calldata_floor_gas_cost)\n```",
+      "createdAt": "2026-05-20T14:28:01.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "I guess it does not make sense to add floor or tie to `block_regular_gas_used` as they are done on `tx_gas_used_before_refund` (state+regular)",
+      "createdAt": "2026-05-20T14:29:04.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "8037-state-creat-gas",
+      "content": "So from this formulas,\nline 6: maximum refund is 1/5 of both (state+regular) gas\nline 8: floor gas takes into account both state gas and regular gas. This should be okay i guess.",
+      "createdAt": "2026-05-20T14:32:43.151000+00:00",
+      "attachments": []
+    }
+  ]
+}

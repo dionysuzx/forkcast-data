@@ -1,0 +1,406 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2026-05-15",
+  "messageCount": 48,
+  "sourceHash": "2a9267b7d9916a08d922211262e1e4c96cb5419c44e437070c488f7c25f8dfda",
+  "searchText": "Any el implementations support https://github.com/ethereum/execution-apis/pull/796 ? cc <@&1460290804898861117> i guess ppl are waiting got it to be merged first https://github.com/NethermindEth/nethermind/pull/11611 <@504202741933932544> teku gloas genesis is still borked with: ``` Teku failed to start java.util.concurrent.CompletionException: java.lang.IllegalArgumentException: Genesis block root 0x316defb5155612b407d7a39175d20e976acb5743baa644429ae052d07a6bf9c4 does not match genesis state latest block root 0x58b9dfa4fb457a3a6a363f3d27bce330c1ee853e36d9cdeab7741f57f56fffce ``` <@363800010518822915> seems like there are also some issues with prysm's gloas genesis. `[2026-05-15 08:31:22.59] DEBUG sync: Requesting blocks by root count=1 peer=16Uiu2HAmVc6h7JWmeJRhbGt4QX9iqGMu8xtkfYtqAgigswosXnoN roots=[0x0000000000000000000000000000000000000000000000000000000000000000]` just gets stuck on slot 0 <@358120958726373381> looks like lighthouse also having some random issues: `May 15 11:44:50.069 WARN Not publishing block - not gossip verified slot: 7, error: InternalError(\"Invalid variant\"), validation_level: Gossip` this is using the latest glam dev 3 branch with fulu genesis, mainnet preset, failing to build blocks on slot 7 (which is fulu regression) yes we know we are not yet compatible. we will soon tm <@822741226088169479> looks like nimbus is now forking at the fork boundary: past few enclaves I was able to reproduce the fork always at the fork boundry: as soon as we do gloas fork I see: ``` DBG 2026-05-15 12:24:26.135+00:00 Dropping attestation topics=\"gossip_eth2\" reason=\"(Ignore, \\\"SingleAttestation: execution payload not yet seen\\\")\" attestation=\"(committee_index: 0, attester_index: 178, data: (slot: 32, index: 1, beacon_block_root: b19f75e0, source: 0:00000000, target: 1:b19f75e0), signature: a35f2aa1)\" subnet_id=0 wallSlot=32 ``` so we currently seem to have issues with: teku - can't handle gloas genesis prysm - can't handle gloas genesis lighthouse - can't even handle fulu due to \"invalid variant\", but then works fine with gloas 🤔 nimbus - forks off at gloas fork epoch https://github.com/catwith1hat/beacon-breaker/tree/master/items/079#nimbus for Nimbus forking at Gloas? Seems like the FC implementation is missing. wow this is cool, how did you generate this? https://www.reddit.com/r/ClaudeAI/comments/1su7q51/thats_me_and_claud/ essentially 😄 right but is it off of glamsterdam-devnet-3? Or a local test? It's a bit more structured, but there is a METHODOLOGY.md in there, which is outdated but kinda still gives the picture. Once the agent has enough context, it can generate investigation items reasonably well. Then I had subagents move the investigation items into a structured form and write test code around it to confirm testing hypothesis. At the end, I had git presubmit hammer the individual investigation items into a rigid form, so that I could generate the main README.md tables and ITEM_TOC.md from the forced included metadata I think that's exactly the branch, I picked for the investigation. Let me check. There are git commit hashes at the top of every item (another forced requirement) I think that's exactly the branch, I How to reproduce? Cc <@755590043632140352> ```yaml participants_matrix: el: - el_type: geth el_image: ethpandaops/geth:bal-devnet-6 cl: - cl_type: lighthouse cl_image: ethpandaops/lighthouse:glamsterdam-devnet-3 - cl_type: prysm cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-3 - cl_type: lodestar cl_image: ethpandaops/lodestar:glamsterdam-devnet-3 - cl_type: grandine cl_image: ethpandaops/grandine:glamsterdam-devnet-2 count: 1 network_params: preset: mainnet gloas_fork_epoch: 0 ``` ah you gotta yeet teku, as they would fail to startup Is it using `gloas_fork_epoch: 0`? Does buildoor support BALs? I’m getting some serialization errors with the payload reveal and wondering if maybe it’s BAL related yeah it does could you send me a log of the errors? https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/65055 this is a buildoor built block and you can see the BAL but buildoor seems to have been wrecked a few mins ago: ``` time=\"2026-05-15T16:43:32Z\" level=error msg=\"Failed to build payload from attributes\" component=builder-service error=\"failed to request payload build: forkchoiceUpdated failed: Invalid forkchoice state\" slot=65106 ``` will check I see a lot of orphaned payloads from buildoor checking it oh I meant the buildoor package for kurtosis is there a buildoor image param I need to specify maybe? ahh just use the latest image, thats what we are running on devnet-3 https://hub.docker.com/layers/ethpandaops/buildoor/main-latest/images/sha256-35cbcfe63285f24ef787839d8fd84dec3e25aa51921dc1e445d55c9a1e333500 you can use this image something bad happened on glamsterdam-devnet-3 about 30mins ago. looks like a huuge fork party, not sure which client to start looking into deeper 😅 damn it looks bad lol Teku sent some invalid withdrawals: ``` │ 17:36:25 │ 65370 │ WITHDRAWALS │ nimbus-geth-1 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:44:14 │ 65409 │ WITHDRAWALS │ teku-geth-1 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:44:24 │ 65410 │ WITHDRAWALS │ teku-geth-2 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:44:49 │ 65412 │ WITHDRAWALS │ teku-geth-1 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:45:02 │ 65413 │ WITHDRAWALS │ teku-geth-1 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:45:14 │ 65414 │ WITHDRAWALS │ teku-geth-2 │ ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤ │ 17:45:36 │ 65416 │ WITHDRAWALS │ teku-geth-1 │ ├───────────────┼───────────────┼─────────────┼─────────────── ``` cc <@&836981489430036500> We are aware about that issue, I think Teku should reject it as well in this case, I am on phone, hard to check now i think we have a bug, ill leave it here <@755590043632140352> <@360491619402776577> if you want to review it we are stuck / cant propose a block because of this we first have a long reorg: ``` Chain reorg occurred commonAncestorRoot=0xb2d5ea02 depth=12 distance=21 newRoot=0xb15b2422 newSlot=65476 oldRoot=0xe7f49c17 oldSlot=65479 ``` then geth vs prysm head are: ``` - Prysm CL: head = #48688 (0xbcfc5a) - Geth EL: head = #48691 (0x189d60) ``` for some reason we are 3 behind.. then every FCU+ attribute call we got this from geth: ``` Ignoring beacon update to old head ``` then from prysm we got: ``` Engine did not return a payload ID for the fork choice update with attributes ``` The fact that we are 3 behind for head execution payload is odd, i dont know how we ended up in such situation Oh that sounds like my aisle! could be a forkchoice issue, the node is still in this situation? Yep I won't restart. It'll be like this for a while confirmed, our self-buil breaks with withdrawals. we have a fix in pipeline. and there is also another bug, in self-build again. i'm also seeing that we reject several payloads we built selecting a remote bid logs say the reveiled payload has a wrong parent hash ``` Selected remote bid (value: 0.580732 ETH, builder index: 0, EL block: 9a0ed6..81c2) for block at slot 65424 .... Rejecting invalid execution payload at slot 65424 with builder 0 and block root 0xa6959161ba6a6b255880fe74e748c28c0f764a220a3ba42ed81b6eea262f0a3c because FAILED_VERIFICATION ... ... ExecutionPayloadVerificationException: Parent hash of the payload is not consistent with the previous execution payload ``` I indeed decoded the payload and it was containing parentHash: `0x8befbe2b1578f81e4efd293e080e8b820052225542d604b48ca28b7d557c76dc` instead of `0x829a91c3784b7ef8b4831c12b82a808031282764a60d9c210febe7f92fcd4454`",
+  "excerpts": [
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "Any el implementations support https://github.com/ethereum/execution-apis/pull/796 ?",
+      "createdAt": "2026-05-15T03:18:03.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@&1460290804898861117>",
+      "createdAt": "2026-05-15T07:10:58.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "i guess ppl are waiting got it to be merged first",
+      "createdAt": "2026-05-15T07:11:13.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/NethermindEth/nethermind/pull/11611",
+      "createdAt": "2026-05-15T08:25:29.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@504202741933932544> teku gloas genesis is still borked with:\n```\nTeku failed to start\njava.util.concurrent.CompletionException: java.lang.IllegalArgumentException: Genesis block root 0x316defb5155612b407d7a39175d20e976acb5743baa644429ae052d07a6bf9c4 does not match genesis state latest block root 0x58b9dfa4fb457a3a6a363f3d27bce330c1ee853e36d9cdeab7741f57f56fffce\n```",
+      "createdAt": "2026-05-15T08:28:06.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@363800010518822915> seems like there are also some issues with prysm's gloas genesis. `[2026-05-15 08:31:22.59] DEBUG sync: Requesting blocks by root count=1 peer=16Uiu2HAmVc6h7JWmeJRhbGt4QX9iqGMu8xtkfYtqAgigswosXnoN roots=[0x0000000000000000000000000000000000000000000000000000000000000000]`",
+      "createdAt": "2026-05-15T08:31:57.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "just gets stuck on slot 0",
+      "createdAt": "2026-05-15T08:32:15.309000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-15_at_10.32.09.png",
+          "content": "50e3d74e3d3d81b479652ee709d2d92ca6d4fd6a364f218097368a72a8bb06ec"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@358120958726373381> looks like lighthouse also having some random issues:\n`May 15 11:44:50.069 WARN  Not publishing block - not gossip verified    slot: 7, error: InternalError(\"Invalid variant\"), validation_level: Gossip`",
+      "createdAt": "2026-05-15T11:46:31.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is using the latest glam dev 3 branch with fulu genesis, mainnet preset, failing to build blocks on slot 7 (which is fulu regression)",
+      "createdAt": "2026-05-15T11:47:00.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes we know we are not yet compatible. we will soon tm",
+      "createdAt": "2026-05-15T12:05:05.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@822741226088169479> looks like nimbus is now forking at the fork boundary: \npast few enclaves I was able to reproduce the fork always at the fork boundry:",
+      "createdAt": "2026-05-15T12:28:50.755000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-15_at_14.28.47.png",
+          "content": "1e6ff71868167cf58f15bade901f98cbf5817f33867671e7f61b564aa729a4d0"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "as soon as we do gloas fork I see:\n```\nDBG 2026-05-15 12:24:26.135+00:00 Dropping attestation                       topics=\"gossip_eth2\" reason=\"(Ignore, \\\"SingleAttestation: execution payload not yet seen\\\")\" attestation=\"(committee_index: 0, attester_index: 178, data: (slot: 32, index: 1, beacon_block_root: b19f75e0, source: 0:00000000, target: 1:b19f75e0), signature: a35f2aa1)\" subnet_id=0 wallSlot=32\n```",
+      "createdAt": "2026-05-15T12:31:07.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "so we currently seem to have issues with:\nteku - can't handle gloas genesis\nprysm - can't handle gloas genesis\nlighthouse - can't even handle fulu due to \"invalid variant\", but then works fine with gloas 🤔 \nnimbus - forks off at gloas fork epoch",
+      "createdAt": "2026-05-15T12:34:34.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "catwith1hat",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/catwith1hat/beacon-breaker/tree/master/items/079#nimbus for Nimbus forking at Gloas? Seems like the FC implementation is missing.",
+      "createdAt": "2026-05-15T13:05:54.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "wow this is cool, how did you generate this?",
+      "createdAt": "2026-05-15T13:08:28.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "catwith1hat",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://www.reddit.com/r/ClaudeAI/comments/1su7q51/thats_me_and_claud/ essentially 😄",
+      "createdAt": "2026-05-15T13:15:27.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "right but is it off of glamsterdam-devnet-3? Or a local test?",
+      "createdAt": "2026-05-15T13:15:53.908000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "catwith1hat",
+      "category": "Testing",
+      "parent": "",
+      "content": "It's a bit more structured, but there is a METHODOLOGY.md in there, which is outdated but kinda still gives the picture. Once the agent has enough context, it can generate investigation items reasonably well. Then I had subagents move the investigation items into a structured form and write test code around it to confirm testing hypothesis. At the end, I had git presubmit hammer the individual investigation items into a rigid form, so that I could generate the main README.md tables and ITEM_TOC.md from the forced included metadata",
+      "createdAt": "2026-05-15T13:17:26.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "catwith1hat",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think that's exactly the branch, I picked for the investigation. Let me check. There are git commit hashes at the top of every item (another forced requirement)",
+      "createdAt": "2026-05-15T13:18:10.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "catwith1hat",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think that's exactly the branch, I",
+      "createdAt": "2026-05-15T13:43:26.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "How to reproduce? Cc <@755590043632140352>",
+      "createdAt": "2026-05-15T13:47:44.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "```yaml\nparticipants_matrix:\n  el:\n    - el_type: geth\n      el_image: ethpandaops/geth:bal-devnet-6\n\n  cl:\n    - cl_type: lighthouse\n      cl_image: ethpandaops/lighthouse:glamsterdam-devnet-3\n    - cl_type: prysm\n      cl_image: ethpandaops/prysm-beacon-chain:glamsterdam-devnet-3\n    - cl_type: lodestar\n      cl_image: ethpandaops/lodestar:glamsterdam-devnet-3\n    - cl_type: grandine\n      cl_image: ethpandaops/grandine:glamsterdam-devnet-2\n\n  count: 1\n\nnetwork_params:\n  preset: mainnet\n  gloas_fork_epoch: 0\n```",
+      "createdAt": "2026-05-15T13:49:07.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "ah you gotta yeet teku, as they would fail to startup",
+      "createdAt": "2026-05-15T13:49:54.208000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xshum",
+      "category": "Testing",
+      "parent": "",
+      "content": "Is it using `gloas_fork_epoch: 0`?",
+      "createdAt": "2026-05-15T14:04:47.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "Does buildoor support BALs? I’m getting some serialization errors with the payload reveal and wondering if maybe it’s BAL related",
+      "createdAt": "2026-05-15T16:32:05.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah it does",
+      "createdAt": "2026-05-15T16:38:42.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "could you send me a log of the errors?",
+      "createdAt": "2026-05-15T16:39:11.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://dora.glamsterdam-devnet-3.ethpandaops.io/slot/65055 this is a buildoor built block and you can see the BAL",
+      "createdAt": "2026-05-15T16:41:00.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "but buildoor seems to have been wrecked a few mins ago:\n```\ntime=\"2026-05-15T16:43:32Z\" level=error msg=\"Failed to build payload from attributes\" component=builder-service error=\"failed to request payload build: forkchoiceUpdated failed: Invalid forkchoice state\" slot=65106\n```\nwill check",
+      "createdAt": "2026-05-15T16:45:08.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see a lot of orphaned payloads from buildoor",
+      "createdAt": "2026-05-15T16:59:06.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "checking it",
+      "createdAt": "2026-05-15T16:59:18.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "oh I meant the buildoor package for kurtosis",
+      "createdAt": "2026-05-15T17:28:57.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "is there a buildoor image param I need to specify maybe?",
+      "createdAt": "2026-05-15T17:30:57.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "ahh just use the latest image, thats what we are running on devnet-3",
+      "createdAt": "2026-05-15T17:34:40.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://hub.docker.com/layers/ethpandaops/buildoor/main-latest/images/sha256-35cbcfe63285f24ef787839d8fd84dec3e25aa51921dc1e445d55c9a1e333500",
+      "createdAt": "2026-05-15T17:37:03.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "",
+      "content": "you can use this image",
+      "createdAt": "2026-05-15T17:37:06.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "",
+      "content": "something bad happened on glamsterdam-devnet-3 about 30mins ago.\nlooks like a huuge fork party,   not sure which client to start looking into deeper 😅",
+      "createdAt": "2026-05-15T18:10:24.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "damn it looks bad lol",
+      "createdAt": "2026-05-15T18:34:59.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "Teku sent some invalid withdrawals:\n```\n  │ 17:36:25      │ 65370         │ WITHDRAWALS │ nimbus-geth-1                        │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:44:14      │ 65409         │ WITHDRAWALS │ teku-geth-1                          │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:44:24      │ 65410         │ WITHDRAWALS │ teku-geth-2                          │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:44:49      │ 65412         │ WITHDRAWALS │ teku-geth-1                          │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:45:02      │ 65413         │ WITHDRAWALS │ teku-geth-1                          │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:45:14      │ 65414         │ WITHDRAWALS │ teku-geth-2                          │\n  ├───────────────┼───────────────┼─────────────┼──────────────────────────────────────┤\n  │ 17:45:36      │ 65416         │ WITHDRAWALS │ teku-geth-1                          │\n  ├───────────────┼───────────────┼─────────────┼───────────────\n```",
+      "createdAt": "2026-05-15T18:37:40.983000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "cc <@&836981489430036500>",
+      "createdAt": "2026-05-15T18:47:59.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "We are aware about that issue, I think Teku should reject it as well in this case, I am on phone, hard to check now",
+      "createdAt": "2026-05-15T18:49:19.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think we have a bug, ill leave it here <@755590043632140352> <@360491619402776577> if you want to review it\nwe are stuck / cant propose a block because of this\nwe first have a long reorg:\n```\n  Chain reorg occurred commonAncestorRoot=0xb2d5ea02 depth=12 distance=21\n    newRoot=0xb15b2422 newSlot=65476 oldRoot=0xe7f49c17 oldSlot=65479\n```\nthen geth vs prysm head are:\n```\n  - Prysm CL: head = #48688 (0xbcfc5a)\n  - Geth EL: head = #48691 (0x189d60)\n```\nfor some reason we are 3 behind.. then every FCU+ attribute call we got this from geth:\n```\nIgnoring beacon update to old head\n```\nthen from prysm we got:\n```\nEngine did not return a payload ID for the fork choice update with attributes\n```\nThe fact that we are 3 behind for head execution payload is odd, i dont know how we ended up in such situation",
+      "createdAt": "2026-05-15T19:12:44.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Oh that sounds like my aisle! could be a forkchoice issue, the node is still in this situation?",
+      "createdAt": "2026-05-15T19:24:34.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "Yep I won't restart. It'll be like this for a while",
+      "createdAt": "2026-05-15T19:46:55.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "confirmed, our self-buil breaks with withdrawals. we have a fix in pipeline.",
+      "createdAt": "2026-05-15T20:24:27.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "and there is also another bug, in self-build again.",
+      "createdAt": "2026-05-15T20:50:28.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "i'm also seeing that we reject several payloads we built selecting a remote bid\nlogs say the reveiled payload has a wrong parent hash\n```\nSelected remote bid (value: 0.580732 ETH, builder index: 0, EL block: 9a0ed6..81c2) for block at slot 65424\n....\nRejecting invalid execution payload at slot 65424 with builder 0 and block root 0xa6959161ba6a6b255880fe74e748c28c0f764a220a3ba42ed81b6eea262f0a3c because FAILED_VERIFICATION\n...\n... ExecutionPayloadVerificationException: Parent hash of the payload is not consistent with the previous execution payload\n```",
+      "createdAt": "2026-05-15T21:08:43.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "",
+      "content": "I indeed decoded the payload and it was containing  parentHash: `0x8befbe2b1578f81e4efd293e080e8b820052225542d604b48ca28b7d557c76dc` instead of `0x829a91c3784b7ef8b4831c12b82a808031282764a60d9c210febe7f92fcd4454`",
+      "createdAt": "2026-05-15T21:30:34.040000+00:00",
+      "attachments": []
+    }
+  ]
+}

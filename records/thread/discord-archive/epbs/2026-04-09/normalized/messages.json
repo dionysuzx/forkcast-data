@@ -1,0 +1,626 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-09",
+  "messageCount": 77,
+  "sourceHash": "84ecaa4306d5a4ab1c2b9b0557e4adcf47aa0d438f3b35213c922ec347e24509",
+  "searchText": "The argument for why its wrong is that the state without the payload applied dialed to that epoch would typically not be part of the canonical chain but part of a competing chain. The balance calculations the protocol chooses should always be from the canonical chain. - justified balances are pulled from the post-state of a justified root, importantly, dialed to the justified epoch if necessary (skip slots). - current gloas spec requires the payload to be applied/processed before the epoch transition. - payload processing affects balances - thus payload status is a required element in determining the correct balances The situation described is the same scenario as, after the end of an epoch, 2/3 - 1 target votes for block at slot 30, and 1 target vote for a descendant at slot 31. We don't worry that we should have justified root from 30 because that chain transitively got enough weight. FFG votes tally towards consensus of the view of the chain at an epoch boundary (after the epoch transition). So it doesn't matter if a supermajority agreed on the chain state at slot 30. By the time the epoch rolled around, they had diverged! The threshold for consensus FFG cares about was not met. So really what's framed as a problem is actually a good thing that is masked right now. Current gloas spec weakens the consensus protocol's FFG guarantee by failing to definitively come to consensus on an epoch with prior skip slot -- without extra-consensus-protocol information, fork choice info. This is the regression from mainnet that should be fixed one way or another. I think <@586161934425128960> 's proposal ^ does the trick without changing checkpoint tho just apply exe requests to the state after epoch processing, and the coherence of checkpoint states is restored this is not true, attestations today are for block_roots, not pairs block+hash. To justify 30 as target and not 31 then there must have been a fork and a chain voting descending from 30 and not containing 31. However, with the current vote counting on Gloas, it could happen that we justify 31 without it's payload and still the payload be canonical. Of course we *could* deal with this situation as well and make it analogous to the situation you describe of 30/31, in which case we should count also target votes as different justification targets and consider the fork of full/empty at 31. That is, any vote for say, a block in 37 that descends from full and that votes for target 31, count for justification of (31,full) and **not** count for justification of (31,empty), and a vote for a block that descends from (31, empty) using the root of 31 for target to count for (31,empty) and **not** count for 31, full, but this then leads to even deeper consensus changes. All over issues that are not consensus breaking. by the way, Nico's proposal does not change at all the situation on FFG guarantees: today the guarantee is on the post CL block of the justified root, and that would be exactly the case with Nico's change, as that would be the only post-state Yes, with the current gloas spec, this situation is obscured. Payload applied before epoch boundary vs not applied is a fork. But attesters on both sides of the fork are voting for 'the same thing'. Fixing this issue is a big gloas spec change, but its just preserving the guarantees of phase0-fulu. it does preserve the same guarantees, that is the whole point, the target vote is always for tha post-CL block, the justified checkpoint is that state, it was before Gloas, it continues to be after gloas, and it would be even if we adopt Nico's change. His proposal does change the FFG guarantees. > today the guarantee is on the post CL block of the justified root This is not the full picture, tho. It's the post CL block of the justified root, critically at the justified epoch. So I continue to streess: there is currently no consensus-breaking issue in the spec, there are tons of bug prone complexities due to having separate state transitions, there are API calls that are broken, semantics of dependent roots that are broken, etc. But there is no consensus breaking change that is not the case, the spec only defines justified checkpoint, not states, the API for checkpoint sync is what imposed this condition of advaning the state. And that API was discussed in the issue linked above. Before that discussion, no notion of \"justified state\" existed. Thats not correct tho. Its in the fork choice spec. This is mechanically how justified balances are calculated -- from the justified checkpoint state That is not broken as far as I can tell And again, if we move to Nico's design, the outcome would be that the balances used would be exactly the balances that we would use today in the situation of a missing block in slot 32 so absolutely nothing would change except just calling a state boundary aligned yes but the difference is that there's no ambiguity in the FFG vote any more. Theres no more information loss. Imo restores a lot of sanity there is no ambiguity today either I claim, we really would just move literally to the exact same situation as today, except that the \"state\" would be forced to be an epoch boundary state. I do recognize some big advantage on not having to deal with two official state transition, with some disadvanteges of having to change the signature of the STF, but there are no consensus changes as far as I can tell notice that with Nico's change the exact situation can still happen after justification/finalization, the last payload can be reorged, there is no ambiguity and no extra FFG guarantees at all and most importantly there is the exact same loss of information we aren't counting the votes for full that the desending chain has cast The **only** way of accounting for the full votes and preventing the last full payload from being reorged is to change entirely the full justification/finalization in-state approach its more a matter of what the chain claims consensus over. In Nico's proposal, even tho fork choice determines payload existance / validity in the current slot in the second phase, the chain/consensus defers that fully to the next slot today it is exactly the same thing, attestations are for the post-CL block and the payload validity is deferred until the next slot Its not the same thing because there are two different possible states at the end of a slot, before the next block is built. And our on-chain consensus loses information and blurs both outcomes (which are divergent) into one. we are going in circles, there is the exact same loss of information in both approaches: the CL chain has achieved consensus that the target was slot 31, the votes were enough to justify 31 full, but we do not keep track of this, the block in 33 can build on top of both 31 full or 31 empty and all of the voting for 31 full are neglected in either scenario we still have the exact same information on chain This is why its not a loss of information. In nico's approach, FFG checkpoints lead to a single state. There is no claim about processing that happens after a checkpoint epoch start slot. In the current gloas spec, FFG checkpoints have two outcomes, determined by off-chain fork choice. But the chain has made a claim about what has happened up to that checkpoint epoch start slot. This is the loss of information. this is not the case, the state that is used for balance counting is exactly the same! in both today Gloas or Nico's approach, there are no two different outcomes of FFG checkpoints today, it is the post-CL block advanced. and that will be in Nico's approach The beauty of Nico's approach is that that state advanced will be the state to which we would apply the payload if if existed, which is not the case on today's Gloas that is the main difference of having it aligned or not but it's not a consensus change And the whole point that I am making is that that state in either case has no information about the existence of the payload associated to that root moreover notice that it doesn't really help you on checkpoint sync either: since you can't sync the next block unless you request the previous epoch payload anyway, on both approaches you **will** need to request previous epoch's payloads as well, the mechanics of checkpoint sync wont change at all! only difference is when you make the epoch transition > In [current] Gloas ... it is the post-CL block advanced The problem conceptually with that is that is that you end up using a non-canonical state to get justified balances! It's consistent, but wrong. I understand this complain, which again is a semantics issue, not a consensus problem and it is just giving a different name to the exact same state that will have to be kept in memory anyway So as far as I can see you don't fix the problem of checkpoint sync, you do not change what state is kept in forkchoice, but there are some gains in not having two state transitions, and dependent roots work unchanged Dependent roots working unchanged is the biggest win IMO So perhaps the only thing that would be lost with this approach is the ability to prove post-EL blocks states Its a really important semantic point to nail down and preserve. (Keep checkpoint -> state function, or alternatively, don't let checkpoints lose information or require additional information) Will break a lot less of our thinking and our code. And anyone using the chain's code. Yeah exactly, EL on-chain processing moves entirely to the next block not only that, you don't have an intermediate state-root to prove against, but that was probably useless anyway and you gain a usable intermediate state state after epoch processing (this is the \"checkpoint state\") (this fits nicely into lodestar's caching architecture) yeah that's what I am not sure about, I think implementing this approach would be actually more complex than the current approach for us. Right now it is simpler to reason about when to perform a state transition, and when to preemtively cache epoch transition. This probably is not that big of a change in this regard, things we do post-payload would be moved to post-block, but range syncing would be fundamentally different with this approach for us at least technically the only difference is in a single change of ordering between epoch processing and the last payload processing that's the whole content of the change (besides having to remove the state_root from the envelope) in my proposal, the previous slot's executions requests are embedded in the child beacon block and applied during `state_transition`, so correctness should be guaranteed by the `state_root`, meaning for checkpoint sync only having the finalized state + next block should be sufficient (same as pre-gloas) you will send the requests in the child block in full? in which case you need to assert that they correspond to the requests that were in the payload before anyway and so you still need the payload to validate the block or am I missing something? if there is a commitment in the bid that can be solved So I have a few problems with the proposal, most importantly the fact that I think this should be dealt at the API level (eg relax checkpoint sync and change dependent roots to signal the payload). But even if we decide to go with this, I think it makes our caching more complicated. We currently pick head as soon as the block/payload arrives and we cache that state that will be the head state to apply the next block immediately. With this approach we can do this right after the CL block. If it's slot 31 we can immediately execute epoch transition which is a big plus. But in general it is a problem because it makes slot advancing more complicated: For a regular block we would do this: - Get the CL block, execute state transition. Preemptively do epoch transition if it's slot 31. - Get the EL block. Execute the requests to cache the next state that will be used to apply the next block. - If there's no new block, then we need to remove that cached",
+  "excerpts": [
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The argument for why its wrong is that the state without the payload applied dialed to that epoch would typically not be part of the canonical chain but part of a competing chain. The balance calculations the protocol chooses should always be from the canonical chain.\n- justified balances are pulled from the post-state of a justified root, importantly, dialed to the justified epoch if necessary (skip slots).\n- current gloas spec requires the payload to be applied/processed before the epoch transition.\n- payload processing affects balances\n- thus payload status is a required element in determining the correct balances",
+      "createdAt": "2026-04-09T14:31:54.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The situation described is the same scenario as, after the end of an epoch, 2/3 - 1 target votes for block at slot 30, and 1 target vote for a descendant at slot 31. We don't worry that we should have justified root from 30 because that chain transitively got enough weight. FFG votes tally towards consensus of the view of the chain at an epoch boundary (after the epoch transition). So it doesn't matter if a supermajority agreed on the chain state at slot 30. By the time the epoch rolled around, they had diverged! The threshold for consensus FFG cares about was not met.\n\nSo really what's framed as a problem is actually a good thing that is masked right now. Current gloas spec weakens the consensus protocol's FFG guarantee by failing to definitively come to consensus on an epoch with prior skip slot -- without extra-consensus-protocol information, fork choice info. This is the regression from mainnet that should be fixed one way or another.",
+      "createdAt": "2026-04-09T14:32:35.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think <@586161934425128960> 's proposal ^ does the trick without changing checkpoint tho",
+      "createdAt": "2026-04-09T14:35:08.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "just apply exe requests to the state after epoch processing, and the coherence of checkpoint states is restored",
+      "createdAt": "2026-04-09T14:35:48.195000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is not true, attestations today are for block_roots, not pairs block+hash.  To justify 30 as target and not 31 then there must have been a fork and a chain voting descending from 30 and not containing 31. However, with the current vote counting on Gloas, it could happen that we justify 31 without it's payload and still the payload be canonical. \n\nOf course we *could* deal with this situation as well and make it analogous to the situation you describe of 30/31, in which case we should count also target votes as different justification targets and consider the fork of full/empty at 31. That is, any vote for say, a block in 37 that descends from full and that votes for target 31, count for justification of (31,full) and **not** count for justification of (31,empty), and a vote for a block that descends from (31, empty)  using the root of 31 for target to count for (31,empty) and **not** count for 31, full, but this then leads to even deeper consensus changes.\n\nAll over issues that are not consensus breaking.",
+      "createdAt": "2026-04-09T14:41:05.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "by the way, Nico's proposal does not change at all the situation on FFG guarantees: today the guarantee is on the post CL block of the justified root, and that would be exactly the case with Nico's change, as that would be the only post-state",
+      "createdAt": "2026-04-09T14:43:47.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes, with the current gloas spec, this situation is obscured. Payload applied before epoch boundary vs not applied is a fork. But attesters on both sides of the fork are voting for 'the same thing'. Fixing this issue is a big gloas spec change, but its just preserving the guarantees of phase0-fulu.",
+      "createdAt": "2026-04-09T14:51:26.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it does preserve the same guarantees, that is the whole point, the target vote is always for tha post-CL block, the justified checkpoint is that state, it was before Gloas, it continues to be after gloas, and it would be even if we adopt Nico's change.",
+      "createdAt": "2026-04-09T14:52:44.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "His proposal does change the FFG guarantees.\n> today the guarantee is on the post CL block of the justified root\nThis is not the full picture, tho. It's the post CL block of the justified root, critically at the justified epoch.",
+      "createdAt": "2026-04-09T14:53:33.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So I continue to streess: there is currently no consensus-breaking issue in the spec, there are tons of bug prone complexities due to having separate state transitions, there are API calls that are broken, semantics of dependent roots that are broken, etc. But there is no consensus breaking change",
+      "createdAt": "2026-04-09T14:53:47.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that is not the case, the spec only defines justified checkpoint, not states, the API for checkpoint sync is what imposed this condition of advaning the state.",
+      "createdAt": "2026-04-09T14:55:02.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And that API was discussed in the issue linked above. Before that discussion, no notion of \"justified state\" existed.",
+      "createdAt": "2026-04-09T14:55:24.399000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thats not correct tho. Its in the fork choice spec. This is mechanically how justified balances are calculated -- from the justified checkpoint state",
+      "createdAt": "2026-04-09T14:56:14.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That is not broken as far as I can tell",
+      "createdAt": "2026-04-09T14:57:04.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And again, if we move to Nico's design, the outcome would be that the balances used would be exactly the balances that we would use today in the situation of a missing block in slot 32",
+      "createdAt": "2026-04-09T14:58:46.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so absolutely nothing would change except just calling a state boundary aligned",
+      "createdAt": "2026-04-09T14:59:12.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes but the difference is that there's no ambiguity in the FFG vote any more. Theres no more information loss. Imo restores a lot of sanity",
+      "createdAt": "2026-04-09T14:59:53.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there is no ambiguity today either I claim, we really would just move literally to the exact same situation as today, except that the \"state\" would be forced to be an epoch boundary state. I do recognize some big advantage on not having to deal with two official state transition, with some disadvanteges of having to change the signature of the STF, but there are no consensus changes as far as I can tell",
+      "createdAt": "2026-04-09T15:01:53.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "notice that with Nico's change the exact situation can still happen after justification/finalization, the last payload can be reorged, there is no ambiguity and no extra FFG guarantees at all",
+      "createdAt": "2026-04-09T15:04:09.755000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and most importantly there is the exact same loss of information",
+      "createdAt": "2026-04-09T15:04:29.133000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we aren't counting the votes for full that the desending chain has cast",
+      "createdAt": "2026-04-09T15:04:41.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The **only** way of accounting for the full votes and preventing the last full payload from being reorged is to change entirely the full justification/finalization in-state approach",
+      "createdAt": "2026-04-09T15:06:15.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "its more a matter of what the chain claims consensus over. In Nico's proposal, even tho fork choice determines payload existance / validity in the current slot in the second phase, the chain/consensus defers that fully to the next slot",
+      "createdAt": "2026-04-09T15:06:57.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "today it is exactly the same thing, attestations are for the post-CL block",
+      "createdAt": "2026-04-09T15:07:44.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and the payload validity is deferred until the next slot",
+      "createdAt": "2026-04-09T15:07:54.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Its not the same thing because there are two different possible states at the end of a slot, before the next block is built. And our on-chain consensus loses information and blurs both outcomes (which are divergent) into one.",
+      "createdAt": "2026-04-09T15:08:45.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we are going in circles, there is the exact same loss of information in both approaches: the CL chain has achieved consensus that the target was slot 31, the votes were enough to justify 31 full, but we do not keep track of this, the block in 33 can build on top of both 31 full or 31 empty and all of the voting for 31 full are neglected",
+      "createdAt": "2026-04-09T15:10:14.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in either scenario",
+      "createdAt": "2026-04-09T15:10:21.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we still have the exact same information on chain",
+      "createdAt": "2026-04-09T15:10:44.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is why its not a loss of information. In nico's approach, FFG checkpoints lead to a single state. There is no claim about processing that happens after a checkpoint epoch start slot. In the current gloas spec, FFG checkpoints have two outcomes, determined by off-chain fork choice. But the chain has made a claim about what has happened up to that checkpoint epoch start slot. This is the loss of information.",
+      "createdAt": "2026-04-09T15:12:43.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is not the case, the state that is used for balance counting is exactly the same! in both today Gloas or Nico's approach, there are no two different outcomes of FFG checkpoints today, it is the post-CL block advanced.",
+      "createdAt": "2026-04-09T15:13:44.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and that will be in Nico's approach",
+      "createdAt": "2026-04-09T15:13:50.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The beauty of Nico's approach is that that state advanced will be the state to which we would apply the payload if if existed, which is not the case on today's Gloas",
+      "createdAt": "2026-04-09T15:14:16.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that is the main difference of having it aligned or not",
+      "createdAt": "2026-04-09T15:14:28.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but it's not a consensus change",
+      "createdAt": "2026-04-09T15:14:34.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And the whole point that I am making is that that state in either case has no information about the existence of the payload associated to that root",
+      "createdAt": "2026-04-09T15:15:17.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "moreover notice that it doesn't really help you on checkpoint sync either: since you can't sync the next block unless you request the previous epoch payload anyway, on both approaches you **will** need to request previous epoch's payloads as well, the mechanics of checkpoint sync wont change at all!",
+      "createdAt": "2026-04-09T15:18:57.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "only difference is when you make the epoch transition",
+      "createdAt": "2026-04-09T15:19:20.381000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> In [current] Gloas ... it is the post-CL block advanced\nThe problem conceptually with that is that is that you end up using a non-canonical state to get justified balances! It's consistent, but wrong.",
+      "createdAt": "2026-04-09T15:20:12.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I understand this complain, which again is a semantics issue, not a consensus problem",
+      "createdAt": "2026-04-09T15:20:43.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and it is just giving a different name to the exact same state",
+      "createdAt": "2026-04-09T15:20:58.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that will have to be kept in memory anyway",
+      "createdAt": "2026-04-09T15:21:05.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So as far as I can see you don't fix the problem of checkpoint sync, you do not change what state is kept in forkchoice,  but there are some gains in not having two state transitions, and dependent roots work unchanged",
+      "createdAt": "2026-04-09T15:22:18.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Dependent roots working unchanged is the biggest win IMO",
+      "createdAt": "2026-04-09T15:23:22.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So perhaps the only thing that would be lost with this approach is the ability to prove post-EL blocks states",
+      "createdAt": "2026-04-09T15:30:56.485000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Its a really important semantic point to nail down and preserve. (Keep checkpoint -> state function, or alternatively, don't let checkpoints lose information or require additional information) Will break a lot less of our thinking and our code. And anyone using the chain's code.",
+      "createdAt": "2026-04-09T15:30:57.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah exactly, EL on-chain processing moves entirely to the next block",
+      "createdAt": "2026-04-09T15:31:57.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "not only that, you don't have an intermediate state-root to prove against, but that was probably useless anyway",
+      "createdAt": "2026-04-09T15:32:21.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and you gain a usable intermediate state state after epoch processing  (this is the \"checkpoint state\")",
+      "createdAt": "2026-04-09T15:33:48.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(this fits nicely into lodestar's caching architecture)",
+      "createdAt": "2026-04-09T15:34:08.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah that's what I am not sure about, I think implementing this approach would be actually more complex than the current approach for us.  Right now it is simpler to reason about when to perform a state transition, and when to preemtively cache epoch transition. This probably is not that big of a change in this regard, things we do post-payload would be moved to post-block, but range syncing would be fundamentally different with this approach for us at least",
+      "createdAt": "2026-04-09T15:36:44.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "technically the only difference is in a single change of ordering between epoch processing and the last payload processing",
+      "createdAt": "2026-04-09T15:37:11.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's the whole content of the change (besides having to remove the state_root from the envelope)",
+      "createdAt": "2026-04-09T15:37:31.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in my proposal, the previous slot's executions requests are embedded in the child beacon block and applied during `state_transition`, so correctness should be guaranteed by the `state_root`, meaning for checkpoint sync only having the finalized state + next block should be sufficient (same as pre-gloas)",
+      "createdAt": "2026-04-09T15:50:23.627000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you will send the requests in the child block in full? in which case you need to assert that they correspond to the requests that were in the payload before anyway",
+      "createdAt": "2026-04-09T15:59:25.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and so you still need the payload to validate the block",
+      "createdAt": "2026-04-09T15:59:37.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or am I missing something?",
+      "createdAt": "2026-04-09T15:59:44.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if there is a commitment in the bid that can be solved",
+      "createdAt": "2026-04-09T16:00:02.529000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So I have a few problems with the proposal, most importantly the fact that I think this should be dealt at the API level (eg relax checkpoint sync and change dependent roots to signal the payload). But even if we decide to go with this, I think it makes our caching more complicated.  We currently pick head as soon as the block/payload arrives and we cache that state that will be the head state to apply the next block immediately. With this approach we can do this right after the CL block. If it's slot 31 we can immediately execute epoch transition which is a big plus. But in general it is a problem because it makes slot advancing more complicated: For a regular block we would do this:\n\n- Get the CL block, execute state transition.  Preemptively do epoch transition if it's slot 31. \n- Get the EL block. Execute the requests to cache the next state that will be used to apply the next block. \n- If there's no new block, then we need to remove that cached state with the requests applied, advance the slot on that and reapply the requests again. \n\nEvery slot that passes we invalidate some state and recompute the cached head to be able to apply a block. \n\nToday the situation is much simpler: any object is missing we just do nothing or we just advance the block to the next slot. \n\nOur next slot cache is probably the single piece of most complicated code for block processing, and this will destroy it. I'm a bit scared of such a change. Perhaps the simplest approach is to *not* cache the requests applied, but this feels incredibly suboptimal to me",
+      "createdAt": "2026-04-09T16:11:07.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "during checkpoint sync, you would fetch the finalized `anchor_state` and `anchor_block`, and the state here is the post `state_transition` state of the anchor block, as a node you can run `state_transition` on the anchor block and should produce the same `state_root` as the `anchor_state`, if the previous payload was not valid, then validators would not vote for that state at all so it wouldn't be finalized in the first place",
+      "createdAt": "2026-04-09T16:20:42.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "how do you jknow that the anchor block has the right requests?",
+      "createdAt": "2026-04-09T16:21:47.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if it doesn't it would produce a different `state_root`",
+      "createdAt": "2026-04-09T16:22:15.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the block has a post-state root not a pre-state root",
+      "createdAt": "2026-04-09T16:22:30.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or now blocks will have two state roots?",
+      "createdAt": "2026-04-09T16:22:38.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't see why it's needed `assert anchor_block.state_root == hash_tree_root(anchor_state)` isn't that the only condition we need to verify when bootstrapping from a finalized checkpoint state?",
+      "createdAt": "2026-04-09T16:27:30.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If the justified checkpoint is say block 31, you will get the post state of 31 advanced to 32. And the first block you need to apply is 33 that is based on 31. The state of 31 does not have the requests of its payload (it was full) so the root does not have this. The block 33 includes these requests, that need to be validated against the payload of 31. You can't do this without its payload.",
+      "createdAt": "2026-04-09T16:31:05.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> Get the EL block. Execute the requests to cache the next state that will be used to apply the next block.\n\nwhy would you execute the requests as the EL block arrives, instead of waiting next beacon block?",
+      "createdAt": "2026-04-09T16:53:16.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "maybe this is a implementation details how clients checkpoint sync, the simplest approach is how Lighthouse does it and I believe this should be the same post-gloas under my proposal\n- 1. `GET /eth/v2/debug/beacon/states/finalized` --> `anchor_state`\n- 2. `GET /eth/v2/beacon/blocks/{state.latest_block_header.slot}` --> `anchor_block`\n- 3.  `get_forkchoice_store(anchor_state, anchor_block)`\n\na equivalent for step 2. would be `GET /eth/v2/beacon/blocks/finalized`, maybe LH does this to avoid a race condition? but either way you have a finalized state and a finalized block, I don't see why you require the previous payload",
+      "createdAt": "2026-04-09T17:09:29.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "client might not do step 2. and request the block from the network (lodestar for example) in which case you might need to fetch the previous payload but even that is fine, as the main point is to keep pre-gloas checkpoint state semantics (state advanced to the epoch boundary)",
+      "createdAt": "2026-04-09T17:11:35.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".pinehearst",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I've a quick question - conceptually, mev-boost won't be available post glamsterdam, am I right?",
+      "createdAt": "2026-04-09T17:50:05.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "was talking with <@534934855113506836> about this, we can add the `execution_requests_root` to the bid, also if data duplication is a concern, I think we don't even need `execution_requests` in the `ExecutionPayloadEnvelope` anymore but that would require `engine_newPayload` to return them instead",
+      "createdAt": "2026-04-09T17:54:10.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".shreee",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hello folks, I was reading the eip and discussion associated regarding ePBS and wrote a small piece to solidify my understanding. its mostly me blurting out my notes what i understood and asking gpt to structure it properly. I’d genuinely appreciate corrections or pointers.\n\nhttps://hackmd.io/@shreee/HkXWKpV2-l",
+      "createdAt": "2026-04-09T17:59:57.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why do you execute slot transition before the block arrives? Same reason",
+      "createdAt": "2026-04-09T18:12:39.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You have this, so at this point you have the post state of block 31 in your root of your store, and you have the block for 31, but you do not have the paylaod for 31, so the first block you request is 33 (32 was missed) how do you validate 33 without having the payload for 31?",
+      "createdAt": "2026-04-09T18:16:08.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I do not understand at all how do you avoid the change in the STF signature",
+      "createdAt": "2026-04-09T18:17:24.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And in fact I believe it to be impossible to do",
+      "createdAt": "2026-04-09T18:17:51.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but if i understand correctly that execution request execution wont ever trigger an epoch transition, which is the heavy thing. It will be just as today, in which we process them with the block and we don't have any special care (the only thing that changes is that we execute the requests from the previous block). Maybe i'm missing something",
+      "createdAt": "2026-04-09T20:28:10.215000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,822 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/@potuz @terence I have not seen this",
+  "date": "2026-03-31",
+  "messageCount": 100,
+  "sourceHash": "f61deaa0cdfb9ec36fbe4117a2fc6dd129e90fb4290e7a5119e586dd9a883d54",
+  "searchText": "```sh [2026-03-31 12:32:12.00] WARN client: Failed to submit proposer preferences error=rpc error: code = DeadlineExceeded desc = context deadline exceeded [2026-03-31 12:32:12.00] ERROR client: Could not check if any validator is a sync committee aggregator error=sign sync selection proofs: can't fetch sync subcommittee index: rpc error: code = DeadlineExceeded desc = context deadline exceeded [2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect [2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect [2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect ``` this was right after the fork ``` [2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0x8e067862cbc9 slot=160 [2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb5a906a208af slot=160 [2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb50a2ff88a94 slot=160 [2026-03-31 12:32:24.00] WARN client: Failed to submit proposer preferences error=rpc error: code = DeadlineExceeded desc = context deadline exceeded ``` cc <@884836500037066862> Hm.. proposer preference is def james.. but `attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb5a906a208af slot=160` is very weird, what did we chagne there thats different from devnet0... we didn't change this at all and if this wasn't failing in KT I'm worried the images may have been corrupted? are you running the right VC/BN combo? question is why is prysm validator requesting an old slot, we normally dont do this, i know other clients may could be a deadlock but if it's not at all in KT it's weird `[2026-03-31 11:34:05.13] INFO main: Prysm Validator started version=Prysm/v7.1.3-rc.3/b6ae4d9457f677120d38e3847824cab90476889a. Built at: 2026-03-31 08:21:22+00:00` we haven't changed anything here this looks good to me commit hash matches the only thing that changed from devnet 0 is the proposer preferences so we better ping <@884836500037066862> wonder if lodestar messed smth up? without attestations this will not finalize, restart the VC <@412614104222531604> see if the error remains restarting at any rate, I rather work on the builder side than diagnose a half cooked devnet 🙂 https://dora.epbs-devnet-1.ethpandaops.io/slot/160 so this looks ok https://dora.epbs-devnet-1.ethpandaops.io/slot/0x506099cbc8406fe3ee45e0145e79a56011c5e7027c3c4a173e8e4060d2eea71f this looks orphaned wonder if this triggered smth in prysm? `[2026-03-31 12:56:45.36] WARN client: Failed to submit proposer preferences error=rpc error: code = Internal desc = Could not broadcast signed proposer preferences (broadcast 0/3): could not publish message: unable to find requisite number of peers for topic /eth2/3ad1efa8/proposer_preferences/ssz_snappy, 0 peers found to publish to: context deadline exceeded` prysm vc keeps crashing crashing? WTF well not crashing just the could not request ... for each slot even after restarting the vc ah ok, yes, the context deadline on the proposer preferences is a bad sign, perhaps there's a deadlock trying to find peers on the topic ok network looks pretty dead 😂 yeah, just wrap it up, test on KT with Lodestar and wait for James to fix this if it's on Prysm side I'll have the builder working by then for what its worth i synced up to slot 256 here before losing all my peers lol yeah very sus that we got to 256 😂 we haven't had a single slot since then Why didn't this appear in KT? not sure I've tested with minimal preset till 50 epochs but haven't really played around with mainnet preset doubt that this would be diff tho lodestar just reorged 3 epochs so we have nobody producing slots ``` [2026-03-31 13:10:36.00] ERROR client: Could not check if any validator is a sync committee aggregator error=sign sync selection proofs: can't fetch sync subcommittee index: rpc error: code = DeadlineExceeded desc = context deadline exceeded [2026-03-31 13:10:36.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 352 is not the current slot 353 pubkey=0xa46d8127e248 slot=352 ``` are we supposed to have buildProposerPreferences once per slot or one per epoch? one per epoch which tz is James in ? wonder if we can try to fix this network, or its dead in the water ya that was my suspect too looks like there were some reverted changes terence's force push strikes again? 😂 `Interesting - the mid-epoch guard was in the ac94073876 commit but seems to have been lost. Let me check HEAD:` `So the mid-epoch guard commit (ac94073876) was never merged into the current branch. That's a separate issue but worth noting. The current code atHEAD just has slots.ToEpoch(slot) < params.BeaconConfig().GloasForkEpoch which means it runs every slot post-gloas.` we probably didnt bring in develop changes there are some open prs but still proposer preference not working shoudlnt break the devnet, this is a bug itself 27 commits behind the breaking is the vc unable to propose blocks due to this (or smth else) another thing.. `could not publish message: unable to find requisite number of peers for topic /eth2/3ad1efa8/proposer_preferences/ssz_snappy, 0 peers found to publish to: context deadline exceeded`. Is a `3ad1efa8` fulu digest ya i think that's the bug, waiting for james, i can look into it in a few hours if no one jumps in, i gotta to get lunch now, haven't eaten all day and its already 3 <@363800010518822915> can you merge in https://github.com/OffchainLabs/prysm/pull/16588 to epbs-devnet-1? https://github.com/OffchainLabs/prysm/pull/16611 also this is to deal with the stupid launching in the middle of the epoch edge case? I don't understand why the !@#$ the API people tend to add complexity for these stupid cases. Proposer preferences should be sent *only* by validators that propose next epoch and *only* one slot per epoch <@884836500037066862> this is prio I've now forked prysm to merge in all these fixes and see if I can recover the network (low hopes, but lets see) catching up on this now I thought https://github.com/OffchainLabs/prysm/pull/16585 fixed the peering issue and https://github.com/OffchainLabs/prysm/pull/16588 still needs re approval to merge in that includes a few more fixes can someone rebase epbs-devnet-1 branch on top of latest develop? that might be enough? this isn't merged yet ah 16585 was merged days ago so this must have made it in in so 16585 alone isn't enough there were these other 2 bug fixes for transitioning from fulu to gloas https://github.com/OffchainLabs/prysm/pull/16588/changes/161c2c71796e702381efb13ab5af9230ca1ea024 yeah there were other fixes needed from my pr working on local merge and testing how is it going? I wasn't able to repro the bug on local you mean with my pr merged? i'm running into something with peer disconnection , but i'm a bit surprised maybe i missed something. i did test the above pr though on local withouth epbs-devnet-1 and it was doing ok i wasn't able to repro `Failed to submit proposer preferences error=rpc error` on epbs-devnet-1 branch on kt but yeah the devnet is cooked so would be good to try to get any fixes in so we can at least finalize again I'm a bit worried we not gonna be able to repro this edge case otherwise i haven't pushed anything, are you starting kt on gloas or in fulu? you should see failures starting kt from fulu i'm still running into issues on local testing still debugging fulu genesis gloas at epoch 1 fyi, develop introduced a bug on ptc duties if you are trying to hack up something, it's being worked on due to ptc look ahead I'm running into that bug bharath identified still trying to see what an appropriate solution is <@412614104222531604> i pushed some changes to epbs-devnet-1",
+  "excerpts": [
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "",
+      "createdAt": "2026-03-31T12:52:13.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```sh\n[2026-03-31 12:32:12.00]  WARN client: Failed to submit proposer preferences error=rpc error: code = DeadlineExceeded desc = context deadline exceeded\n[2026-03-31 12:32:12.00] ERROR client: Could not check if any validator is a sync committee aggregator error=sign sync selection proofs: can't fetch sync subcommittee index: rpc error: code = DeadlineExceeded desc = context deadline exceeded\n[2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect\n[2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect\n[2026-03-31 12:32:12.00] ERROR client: Could not request payload attestation data error=PayloadAttestationData: rpc error: code = InvalidArgument desc = payload attestation data is only available for current slot: requested 160, current 161: could not connect\n```",
+      "createdAt": "2026-03-31T12:52:14.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this was right after the fork",
+      "createdAt": "2026-03-31T12:52:18.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```\n[2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0x8e067862cbc9 slot=160\n[2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb5a906a208af slot=160\n[2026-03-31 12:32:12.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb50a2ff88a94 slot=160\n[2026-03-31 12:32:24.00]  WARN client: Failed to submit proposer preferences error=rpc error: code = DeadlineExceeded desc = context deadline exceeded\n```",
+      "createdAt": "2026-03-31T12:52:25.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "cc <@884836500037066862>",
+      "createdAt": "2026-03-31T12:53:07.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hm.. proposer preference is def james.. but `attestation data: invalid request: slot 160 is not the current slot 161 pubkey=0xb5a906a208af slot=160` is very weird, what did we chagne there thats different from devnet0...",
+      "createdAt": "2026-03-31T12:53:48.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we didn't change this at all",
+      "createdAt": "2026-03-31T12:54:01.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and if this wasn't failing in KT I'm worried the images may have been corrupted? are you running the right VC/BN combo?",
+      "createdAt": "2026-03-31T12:54:28.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "question is why is prysm validator requesting an old slot, we normally dont do this, i know other clients may",
+      "createdAt": "2026-03-31T12:54:56.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "could be a deadlock",
+      "createdAt": "2026-03-31T12:55:14.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but if it's not at all in KT it's weird",
+      "createdAt": "2026-03-31T12:55:22.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`[2026-03-31 11:34:05.13]  INFO main: Prysm Validator started version=Prysm/v7.1.3-rc.3/b6ae4d9457f677120d38e3847824cab90476889a. Built at: 2026-03-31 08:21:22+00:00`",
+      "createdAt": "2026-03-31T12:55:26.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we haven't changed anything here",
+      "createdAt": "2026-03-31T12:55:26.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this looks good to me",
+      "createdAt": "2026-03-31T12:55:35.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "commit hash matches",
+      "createdAt": "2026-03-31T12:55:37.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the only thing that changed from devnet 0 is the proposer preferences",
+      "createdAt": "2026-03-31T12:55:39.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so we better ping <@884836500037066862>",
+      "createdAt": "2026-03-31T12:55:47.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "wonder if lodestar messed smth up?",
+      "createdAt": "2026-03-31T12:56:08.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "without attestations this will not finalize, restart the VC <@412614104222531604>",
+      "createdAt": "2026-03-31T12:56:10.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "see if the error remains",
+      "createdAt": "2026-03-31T12:56:15.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "restarting",
+      "createdAt": "2026-03-31T12:56:32.489000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "at any rate, I rather work on the builder side than diagnose a half cooked devnet 🙂",
+      "createdAt": "2026-03-31T12:56:49.683000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://dora.epbs-devnet-1.ethpandaops.io/slot/160",
+      "createdAt": "2026-03-31T12:56:53.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so this looks ok",
+      "createdAt": "2026-03-31T12:56:56.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://dora.epbs-devnet-1.ethpandaops.io/slot/0x506099cbc8406fe3ee45e0145e79a56011c5e7027c3c4a173e8e4060d2eea71f this looks orphaned",
+      "createdAt": "2026-03-31T12:57:09.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "wonder if this triggered smth in prysm?",
+      "createdAt": "2026-03-31T12:57:14.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`[2026-03-31 12:56:45.36]  WARN client: Failed to submit proposer preferences error=rpc error: code = Internal desc = Could not broadcast signed proposer preferences (broadcast 0/3): could not publish message: unable to find requisite number of peers for topic /eth2/3ad1efa8/proposer_preferences/ssz_snappy, 0 peers found to publish to: context deadline exceeded`",
+      "createdAt": "2026-03-31T12:57:31.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "prysm vc keeps crashing",
+      "createdAt": "2026-03-31T12:57:36.296000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "crashing?",
+      "createdAt": "2026-03-31T12:58:14.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "WTF",
+      "createdAt": "2026-03-31T12:58:16.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well not crashing",
+      "createdAt": "2026-03-31T12:58:19.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "just the could not request ...",
+      "createdAt": "2026-03-31T12:58:27.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for each slot",
+      "createdAt": "2026-03-31T12:58:31.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "even after restarting the vc",
+      "createdAt": "2026-03-31T12:58:40.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah ok, yes, the context deadline on the proposer preferences is a bad sign, perhaps there's a deadlock trying to find peers on the topic",
+      "createdAt": "2026-03-31T12:58:43.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok network looks pretty dead 😂",
+      "createdAt": "2026-03-31T12:59:23.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah, just wrap it up, test on KT with Lodestar and wait for James to fix this if it's on Prysm side",
+      "createdAt": "2026-03-31T12:59:53.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'll have the builder working by then",
+      "createdAt": "2026-03-31T13:00:07.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for what its worth i synced up to slot 256 here before losing all my peers lol",
+      "createdAt": "2026-03-31T13:06:04.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah very sus that we got to 256",
+      "createdAt": "2026-03-31T13:06:22.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "😂",
+      "createdAt": "2026-03-31T13:06:23.904000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we haven't had a single slot since then",
+      "createdAt": "2026-03-31T13:06:45.571000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Why didn't this appear in KT?",
+      "createdAt": "2026-03-31T13:07:46.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "not sure",
+      "createdAt": "2026-03-31T13:08:08.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I've tested with minimal preset till 50 epochs",
+      "createdAt": "2026-03-31T13:08:18.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but haven't really played around with mainnet preset",
+      "createdAt": "2026-03-31T13:08:26.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "doubt that this would be diff tho",
+      "createdAt": "2026-03-31T13:08:33.551000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "lodestar just reorged 3 epochs",
+      "createdAt": "2026-03-31T13:10:30.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so we have nobody producing slots",
+      "createdAt": "2026-03-31T13:10:37.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```\n[2026-03-31 13:10:36.00] ERROR client: Could not check if any validator is a sync committee aggregator error=sign sync selection proofs: can't fetch sync subcommittee index: rpc error: code = DeadlineExceeded desc = context deadline exceeded\n[2026-03-31 13:10:36.00] ERROR client: Could not request attestation to sign at slot error=rpc error: code = InvalidArgument desc = Could not get attestation data: invalid request: slot 352 is not the current slot 353 pubkey=0xa46d8127e248 slot=352\n```",
+      "createdAt": "2026-03-31T13:11:08.268000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "are we supposed to have buildProposerPreferences once per slot or one per epoch?",
+      "createdAt": "2026-03-31T13:20:44.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "one per epoch",
+      "createdAt": "2026-03-31T13:21:01.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "",
+      "createdAt": "2026-03-31T13:21:20.996000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-31_at_15.21.17.png",
+          "content": "8e5044b17e67944ea387397750434bbd32fee70ade15fc58312933ba180601e4"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which tz is James in ?",
+      "createdAt": "2026-03-31T13:22:18.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "wonder if we can try to fix this network, or its dead in the water",
+      "createdAt": "2026-03-31T13:22:30.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ya that was my suspect too",
+      "createdAt": "2026-03-31T13:23:08.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "looks like there were some reverted changes",
+      "createdAt": "2026-03-31T13:23:21.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "terence's force push strikes again?",
+      "createdAt": "2026-03-31T13:23:29.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "😂",
+      "createdAt": "2026-03-31T13:23:30.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`Interesting - the mid-epoch guard was in the ac94073876 commit but seems to have been lost. Let me check HEAD:`",
+      "createdAt": "2026-03-31T13:23:56.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`So the mid-epoch guard commit (ac94073876) was never merged into the current branch. That's a separate issue but worth noting. The current code atHEAD just has slots.ToEpoch(slot) < params.BeaconConfig().GloasForkEpoch which means it runs every slot post-gloas.`",
+      "createdAt": "2026-03-31T13:24:18.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we probably didnt bring in develop changes",
+      "createdAt": "2026-03-31T13:25:09.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "there are some open prs",
+      "createdAt": "2026-03-31T13:25:17.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but still proposer preference not working shoudlnt break the devnet, this is a bug itself",
+      "createdAt": "2026-03-31T13:25:41.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "27 commits behind",
+      "createdAt": "2026-03-31T13:25:47.548000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-03-31_at_15.25.41.png",
+          "content": "6a40e06d869b45282448e121070d9ee929ddff9e41be3034156d0fa1884a57ff"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the breaking is the vc unable to propose blocks",
+      "createdAt": "2026-03-31T13:26:02.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "due to this (or smth else)",
+      "createdAt": "2026-03-31T13:26:10.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "another thing.. `could not publish message: unable to find\nrequisite number of peers for topic /eth2/3ad1efa8/proposer_preferences/ssz_snappy, 0 peers found to publish to: context deadline exceeded`. Is a `3ad1efa8` fulu digest",
+      "createdAt": "2026-03-31T13:26:11.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ya i think that's the bug, waiting for james, i can look into it in a few hours if no one jumps in, i gotta to get lunch now, haven't eaten all day and its already 3",
+      "createdAt": "2026-03-31T13:26:43.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@363800010518822915> can you merge in https://github.com/OffchainLabs/prysm/pull/16588 to epbs-devnet-1?",
+      "createdAt": "2026-03-31T13:36:24.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://github.com/OffchainLabs/prysm/pull/16611 also",
+      "createdAt": "2026-03-31T13:37:18.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is to deal with the stupid launching in the middle of the epoch edge case? I don't understand why the !@#$ the API people tend to add complexity for these stupid cases. Proposer preferences should be sent *only* by validators that propose next epoch and *only* one slot per epoch",
+      "createdAt": "2026-03-31T13:40:52.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@884836500037066862> this is prio",
+      "createdAt": "2026-03-31T13:45:25.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I've now forked prysm to merge in all these fixes and see if I can recover the network (low hopes, but lets see)",
+      "createdAt": "2026-03-31T13:45:44.643000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "catching up on this now",
+      "createdAt": "2026-03-31T13:46:19.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I thought https://github.com/OffchainLabs/prysm/pull/16585 fixed the peering issue and https://github.com/OffchainLabs/prysm/pull/16588 still needs re approval to merge in that includes a few more fixes",
+      "createdAt": "2026-03-31T13:50:57.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "can someone rebase epbs-devnet-1 branch on top of latest develop?",
+      "createdAt": "2026-03-31T13:52:51.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that might be enough?",
+      "createdAt": "2026-03-31T13:52:57.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this isn't merged yet",
+      "createdAt": "2026-03-31T13:53:15.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah 16585 was merged days ago",
+      "createdAt": "2026-03-31T13:53:27.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so this must have made it in in",
+      "createdAt": "2026-03-31T13:53:31.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so 16585 alone isn't enough",
+      "createdAt": "2026-03-31T13:53:38.253000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "there were these other 2 bug fixes for transitioning from fulu to gloas https://github.com/OffchainLabs/prysm/pull/16588/changes/161c2c71796e702381efb13ab5af9230ca1ea024",
+      "createdAt": "2026-03-31T13:54:28.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah there were other fixes needed from my pr",
+      "createdAt": "2026-03-31T14:00:42.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "working on local merge and testing",
+      "createdAt": "2026-03-31T14:07:20.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "how is it going?",
+      "createdAt": "2026-03-31T15:25:01.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I wasn't able to repro the bug on local",
+      "createdAt": "2026-03-31T15:25:23.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you mean with my pr merged?\ni'm running into something with peer disconnection , but i'm a bit surprised maybe i missed something. i did test the above pr though on local withouth epbs-devnet-1 and it was doing ok",
+      "createdAt": "2026-03-31T15:30:19.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i wasn't able to repro `Failed to submit proposer preferences error=rpc error` on epbs-devnet-1 branch on kt",
+      "createdAt": "2026-03-31T15:32:19.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but yeah the devnet is cooked",
+      "createdAt": "2026-03-31T15:33:12.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so would be good to try to get any fixes in",
+      "createdAt": "2026-03-31T15:33:21.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so we can at least finalize again",
+      "createdAt": "2026-03-31T15:33:26.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm a bit worried we not gonna be able to repro this edge case otherwise",
+      "createdAt": "2026-03-31T15:33:40.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i haven't pushed anything, are you starting kt on gloas or in fulu? you should see failures starting kt from fulu",
+      "createdAt": "2026-03-31T15:34:42.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i'm still running into issues on local testing still debugging",
+      "createdAt": "2026-03-31T15:46:37.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "fulu genesis gloas at epoch 1",
+      "createdAt": "2026-03-31T15:56:52.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "fyi, develop introduced a bug on ptc duties if you are trying to hack up something, it's being worked on",
+      "createdAt": "2026-03-31T16:02:57.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "due to ptc look ahead",
+      "createdAt": "2026-03-31T16:03:01.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm running into that bug bharath identified still trying to see what an appropriate solution is",
+      "createdAt": "2026-03-31T18:36:50.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jameshe5018",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@412614104222531604> i pushed some changes to epbs-devnet-1",
+      "createdAt": "2026-03-31T21:56:51.452000+00:00",
+      "attachments": []
+    }
+  ]
+}

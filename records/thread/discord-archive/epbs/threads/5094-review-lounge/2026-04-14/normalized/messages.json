@@ -1,0 +1,730 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/#5094 review lounge",
+  "date": "2026-04-14",
+  "messageCount": 90,
+  "sourceHash": "2f5b9b8d981f11d36e928a23cdc50fe61acd8d53458088b992c1b74103665a1a",
+  "searchText": "I am bit confused on using `should_extend_payload` to decide what the `bid.parent_block_hash` should be here: https://github.com/ethereum/consensus-specs/pull/5094/changes#diff-221ca7d5a71aa06ecab51f0872030eb8ba2217afd79b1dd24f4987e0282b9004R107 Should the builder wait for the PTC votes before choosing the parent block hash to build their block on top of? or can we have something like this: ``` // Takes in the potential candidate block to extend and the head beacon state def should_extend_payload(store: Store, state: BeaconState, block: root) -> bool: # Payload for root has seen assert root in state.payloads # Blob data is available for block with `root` assert is_data_available(root) # root is the latest block header assert root == hash_tree_root(state.latest_block_header) ``` the above checks just asserts for local data availability, payload availability and whether the block has been successfully processed. But we dont check for PTC votes here, so the builder can create the block when it receives a valid execution payload envelope? should `should_extend_payload` block if it is called before the PTC BPS deadline and wait for the PTC votes? <@755590043632140352> this seems underspecified in the current gloas spec, there is no guidance at all when to build the payload or whether to extend or not? I am but confused because on `master` branch the `prepare_execution_payload` just takes in a state, but there is no notion or guidance or when or how to use post block state or post envelope state? maybe I am missing some how that works in current gloas spec In the current Gloas spec this is not changed from phase 0, proposers call get_head and advance it to their current slot Get head tells them to build on top of full or empty ok so in current gloas spec, `prepare_execution_payload` just assumes it's called with whatever head state the node sees from FC view? Our current forkchoice is such that if block A is head and the Payload for that block arrives, then the Payload becomes head. But I think it's fragile to assume this will be the case forever and there's reasons to keep the door open for it not to be the case (like honest reorgs features today) so I think the right thing to do it to call get_head to find out on top of what you're building Yes, correct, we always propose on top of head thanks <@755590043632140352> I am working on updating `prepare_execution_payload` to address Michael's concern, I think I know what to do I am not worried about the spec itself but rather how to implement it, also probably the beacon API will need to provide some new endpoint for builders to make this partial state transition cause otherwise we will rely on them maintaining this bug prone path we can probably have something like https://github.com/ethereum/beacon-APIs/pull/584, but I think this should be much simpler now, but Bharath can probably chime in here, I am getting the spec into a place now first so we see what's actually required in the prepare step yeah for proposing we might require such an API now but I would like to be clear on how `prepare_execution_payload` will look like. Do proposers need to maintain an intermediate state given by `process_parent_execution_payload` ? and that intermediate state is used in `prepare_execution_payload` I dont think we need an API here. We should do the partial state transition to compute the resulting payload attributes to send to the FCU. Then we just shoot these attributes via the SSE event to the builder just because a proposer sees a payload, i dont think it is true that the entire n/w will necessarily see the payload right? i think ideally waiting for the PTC votes would indicate that most of the n/w has seen the payload and extending on the payload is safe otherwise a proposer would risk extending on a payload that most of the n/w hasnt seen right? No, local availability makes the Payload automatically head if the block is head. We do not rely on PTC for this. `should_extend_payload` is automatically true fair i was wondering if a proposer builds on a payload but that payload has not been seen by majority of the n/w, then that payload would get orphaned i think it would be difficult to assert a global availability on the payload eitherways. The PTC votes seem like a good indicator This is the \"honest reorg\" feature that we may want to implement in the future but we decided that it's dangerous to do this for now. It opens a whole new discussion. Anyway it can't be avoided, if clients get forked, proposers can start reorging payloads as soon as they get a majority PTC vote for \"unavailable\". But this is not specified `prepare_execution_payload` is now updated cc <@1386598056320831509> <@755590043632140352> I don't think we need an extra beacon api <@755590043632140352> the current gloas spec does this ``` # [New in Gloas:EIP7732] payload_states={anchor_root: copy(anchor_state)} ``` how is that legal? you can't seed the payload state from the `anchor_root`, that can't be derived from the anchor state/block alone, so adding that to the fc store means you assume a wrong state that might not even exist, the payload of `anchor_block` is unknown until you sync it and process the child block of the anchor also we set the payload_state to the anchor_state which is the block state 🤔 yeah I think this is a current bug indeed I am asking becasue I wanna fix genesis without seeding incorrectly `payloads` needs to be empty with your PR you can just keep the phase0 behavior for this isn't it? yeah all good, only gensis if messing up the tests but checkoint sync is same as phase0 yeah definitely the current spec has that as a bug, we didn't really care much about initialization but that's also why I said, the checkpoint sync issue is not solvable in the current spec I mean all of that is fixed now, I am just fighting with the tests but I see this was discussed here https://github.com/ethereum/consensus-specs/pull/5067 already need to read up on that It is, this is because of some artificial requirement of having the state epoch aligned. The current spec is correct if by definition of anchor state you take my definition: the finalized checkpoint **is not** advanced to the next epoch then the anchor state being the post CL state is absolutely fine but the payload states is wrong payload states should start empty hmm but than you mess up other stuff, like the state itself isn't even the same as the finalized epoch since you use a `block_state` which only works if there is no skipped slot also not doing epoch_processing seems drastic to me, this means the state you get is still not updated yet, I mean I don't see how you can have a anchor state without doing `process_epoch` so there would be a massiv differgence in that approach of 2 states and whether there was a skipped slot or not yes, that's all my grudge here, the finalized state being at the same epoch as the checkpoint is not really a spec requirement, it was added on the checkpoint sync issue this is definitely not a consensus must-have, but yes this does get better with this PR so it's no longer an issue yes it no longer an isuse and but also disagree that this is a checkpoint sync issue only, there is `store_target_checkpoint_state` and the spec has a clear definition of what a checkpoint is and what you are saying is, just use a block state, but a block state is not a checkpoint state in the spec yes we dont need an extra beacon api, we should send the computed payload attributes via the SSE event https://github.com/ethereum/consensus-specs/pull/5094/changes#r3080330756 <@586161934425128960> I wonder if we should use the beacon state associated with the root of the head fork choice node here? We're going in circles. The checkpoint state in the spec is not part of consensus, it's just a Python optimization that is leaking into clients you mean using `block_states` state from there and not pass `state` as arg? we can agree to disagree I guess, this is no longer something worth thinking about after 5094 yes thats what i think? ``` `state` is the state object after applying `process_slots(state, slot)` transition to the resulting state of the parent block processing ``` this is what the bellatrix spec says about the state param in `prepare_execution_payload` the parent block should anyways be the output of `get_head` links to github for some reason show me random places in my browser, what does \"here\" mean? <@586161934425128960> `prepare_execution_payload` looks good to me in regards to my previous comment on it i mean in `prepare_execution_payload` yes, you could avoid the state as a parameter in the call, and just use the store since anyway we rely on it ```python def prepare_execution_payload( # [New in Gloas:EIP7732] store: Store, state: BeaconState, safe_block_hash: Hash32, finalized_block_hash: Hash32, suggested_fee_recipient: ExecutionAddress, execution_engine: ExecutionEngine, ) -> Optional[PayloadId]: # [New in Gloas:EIP7732] parent_bid = state.latest_execution_payload_bid head = get_head(store) ..... ``` i was just thinking if the state shuoldn't be passed as a parm and should be picked up from `store.block_states[head.root]` you don't need either safe_block_hash that also is in the store finalized, etc. but I don't mind any of this as long as the spec is correct, optimizing the spec is kinda irrelevant to me, we will implement this anyway in a completely different manner but this looks good to me, clients determine the FCU attrs based on the logic in `prepare_execution_payload` and send the SSE event to builders. We don't need an extra API for builders for anything are you suggesting something like this? ```python def prepare_execution_payload(store, ...): head = get_head(store) state = copy(store.block_states[head.root]) process_slots(state, get_current_slot(store)) ... ``` I don't think it's a good idea to break the function signature wrt to the state being passed in, as you pointed out here https://github.com/ethereum/consensus-specs/pull/5094#discussion_r3080371414 correctly, the state passed in is advanced via `process_slots(state, slot)` (including epoch transition) if thats the case, I guess a note indicating that the state should be identical to the state of the block root of get_head should be nice? I guess these are more of nits at this point i ll leave it up to spec maintainers to decide what is the right way to go about <@592004585506340885> because i m not sure how this will impact spec tests etc I am really wondering if calling get_head is correct because before we had `should_extend_payload(store, hash_tree_root(state.latest_block_header)):` so you can never have a divergence between head / state like really what we are doing is - 1. advance the state to the right slot via `process_slots` - 2. consult fork choice whether we wanna build on full or empty - 3. if on full, then run `apply_parent_execution_payload` to get correct `withdrawals` maybe if `should_extend_payload` is not what we wanna use there should be another spec function <@755590043632140352> any thoughts here? if you pass the state as a parameter, ` should_extend_payload` is more than fine. My comment in the PR was that the branching was being done on the existence of the payload on the store, regardless of ` should_extend_payload`. Having said so, since we are anyway directly accesing the store, it makes sense not to send the state at all, and just get it from the store with `get_head` plus ` block_states` avoiding any divegence. The reason we didn't do this before is that the caller is responsible to pass the head state. But with 5094, the head state no longer has enough information to construct a valid canonical block, so now anyway we rely on the store. So it makes sense to me to call `get_head` and get the right state from the store. If you do still pass the state however, ` should_extend_payload` is absolutely fine to decide as it is the tie breaker But `get_head` is fool proof cause it will always be corr",
+  "excerpts": [
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am bit confused on using `should_extend_payload` to decide what the `bid.parent_block_hash` should be here: https://github.com/ethereum/consensus-specs/pull/5094/changes#diff-221ca7d5a71aa06ecab51f0872030eb8ba2217afd79b1dd24f4987e0282b9004R107\nShould the builder wait for the PTC votes before choosing the parent block hash to build their block on top of?",
+      "createdAt": "2026-04-14T05:27:17.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "or can we have something like this:\n```\n// Takes in the potential candidate block to extend and the head beacon state\ndef should_extend_payload(store: Store, state: BeaconState, block: root) -> bool:\n   # Payload for root has seen\n   assert root in state.payloads\n   # Blob data is available for block with `root`\n   assert is_data_available(root)\n   # root is the latest block header\n   assert root == hash_tree_root(state.latest_block_header)\n```\nthe above checks just asserts for local data availability, payload availability and whether the block has been successfully processed. But we dont check for PTC votes here, so the builder can create the block when it receives a valid execution payload envelope?",
+      "createdAt": "2026-04-14T05:29:17.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "should `should_extend_payload` block if it is called before the PTC BPS deadline and wait for the PTC votes?",
+      "createdAt": "2026-04-14T05:29:58.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@755590043632140352> this seems underspecified in the current gloas spec, there is no guidance at all when to build the payload or whether to extend or not? I am but confused because on `master` branch the `prepare_execution_payload` just takes in a state, but there is no notion or guidance or when or how to use post block state or post envelope state? maybe I am missing some how that works in current gloas spec",
+      "createdAt": "2026-04-14T09:22:36.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In the current Gloas spec this is not changed from phase 0, proposers call get_head and advance it to their current slot",
+      "createdAt": "2026-04-14T09:24:18.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Get head tells them to build on top of full or empty",
+      "createdAt": "2026-04-14T09:24:37.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok so in current gloas spec, `prepare_execution_payload` just assumes it's called with whatever head state the node sees from FC view?",
+      "createdAt": "2026-04-14T09:25:59.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Our current forkchoice is such that if block A is head and the Payload for that block arrives, then the Payload becomes head. But I think it's fragile to assume this will be the case forever and there's reasons to keep the door open for it not to be the case (like honest reorgs features today) so I think the right thing to do it to call get_head to find out on top of what you're building",
+      "createdAt": "2026-04-14T09:27:11.738000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes, correct, we always propose on top of head",
+      "createdAt": "2026-04-14T09:27:44.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "thanks <@755590043632140352> I am working on updating `prepare_execution_payload` to address Michael's concern, I think I know what to do",
+      "createdAt": "2026-04-14T09:29:01.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am not worried about the spec itself but rather how to implement it, also probably the beacon API will need to provide some new endpoint for builders to make this partial state transition cause otherwise we will rely on them maintaining this bug prone path",
+      "createdAt": "2026-04-14T09:31:14.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we can probably have something like https://github.com/ethereum/beacon-APIs/pull/584, but I think this should be much simpler now, but Bharath can probably chime in here, I am getting the spec into a place now first so we see what's actually required in the prepare step",
+      "createdAt": "2026-04-14T09:33:22.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah for proposing we might require such an API now but I would like to be clear on how `prepare_execution_payload` will look like. Do proposers need to maintain an intermediate state given by `process_parent_execution_payload` ?",
+      "createdAt": "2026-04-14T09:44:14.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and that intermediate state is used in `prepare_execution_payload`",
+      "createdAt": "2026-04-14T09:44:30.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I dont think we need an API here. We should do the partial state transition to compute the resulting payload attributes to send to the FCU. \nThen we just shoot these attributes via the SSE event to the builder",
+      "createdAt": "2026-04-14T09:49:49.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "just because a proposer sees a payload, i dont think it is true that the entire n/w will necessarily see the payload right? i think ideally waiting for the PTC votes would indicate that most of the n/w has seen the payload and extending on the payload is safe",
+      "createdAt": "2026-04-14T09:53:36.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "otherwise a proposer would risk extending on a payload that most of the n/w hasnt seen right?",
+      "createdAt": "2026-04-14T09:53:50.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No, local availability makes the Payload automatically head if the block is head. We do not rely on PTC for this. `should_extend_payload` is automatically true",
+      "createdAt": "2026-04-14T10:14:32.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "fair i was wondering if a proposer builds on a payload but that payload has not been seen by majority of the n/w, then that payload would get orphaned",
+      "createdAt": "2026-04-14T10:18:10.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i think it would be difficult to assert a global availability on the payload eitherways. The PTC votes seem like a good indicator",
+      "createdAt": "2026-04-14T10:20:07.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This is the \"honest reorg\" feature that we may want to implement in the future but we decided that it's dangerous to do this for now. It opens a whole new discussion. Anyway it can't be avoided, if clients get forked, proposers can start reorging payloads as soon as they get a majority PTC vote for \"unavailable\". But this is not specified",
+      "createdAt": "2026-04-14T10:39:52.071000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`prepare_execution_payload` is now updated cc <@1386598056320831509> <@755590043632140352>",
+      "createdAt": "2026-04-14T12:35:33.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think we need an extra beacon api",
+      "createdAt": "2026-04-14T12:35:39.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@755590043632140352> the current gloas spec does this\n```\n# [New in Gloas:EIP7732]\npayload_states={anchor_root: copy(anchor_state)}\n```\nhow is that legal? you can't seed the payload state from the `anchor_root`, that can't be derived from the anchor state/block alone, so adding that to the fc store means you assume a wrong state that might not even exist, the payload of `anchor_block` is unknown until you sync it and process the child block of the anchor",
+      "createdAt": "2026-04-14T13:48:59.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also we set the payload_state to the anchor_state which is the block state 🤔",
+      "createdAt": "2026-04-14T13:50:34.894000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah I think this is a current bug indeed",
+      "createdAt": "2026-04-14T14:06:30.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am asking becasue I wanna fix genesis without seeding incorrectly",
+      "createdAt": "2026-04-14T14:07:01.437000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`payloads` needs to be empty",
+      "createdAt": "2026-04-14T14:07:10.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "with your PR you can just keep the phase0 behavior for this isn't it?",
+      "createdAt": "2026-04-14T14:07:22.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah all good, only gensis if messing up the tests",
+      "createdAt": "2026-04-14T14:07:36.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but checkoint sync is same as phase0",
+      "createdAt": "2026-04-14T14:07:49.177000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah definitely the current spec has that as a bug, we didn't really care much about initialization",
+      "createdAt": "2026-04-14T14:08:02.157000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but that's also why I said, the checkpoint sync issue is not solvable in the current spec",
+      "createdAt": "2026-04-14T14:08:34.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I mean all of that is fixed now, I am just fighting with the tests",
+      "createdAt": "2026-04-14T14:10:29.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but I see this was discussed here https://github.com/ethereum/consensus-specs/pull/5067 already need to read up on that",
+      "createdAt": "2026-04-14T14:10:51.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It is, this is because of some artificial requirement of having the state epoch aligned. The current spec is correct if by definition of anchor state you take my definition: the finalized checkpoint **is not** advanced to the next epoch",
+      "createdAt": "2026-04-14T14:23:06.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "then the anchor state being the post CL state is absolutely fine",
+      "createdAt": "2026-04-14T14:23:20.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but the payload states is wrong",
+      "createdAt": "2026-04-14T14:23:27.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "payload states should start empty",
+      "createdAt": "2026-04-14T14:23:41.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm but than you mess up other stuff, like the state itself isn't even the same as the finalized epoch since you use a `block_state` which only works if there is no skipped slot\n\nalso not doing epoch_processing seems drastic to me, this means the state you get is still not updated yet, I mean I don't see how you can have a anchor state without doing `process_epoch`",
+      "createdAt": "2026-04-14T14:27:15.734000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so there would be a massiv differgence in that approach of 2 states and whether there was a skipped slot or not",
+      "createdAt": "2026-04-14T14:28:21.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, that's all my grudge here, the finalized state being at the same epoch as the checkpoint is not really a spec requirement, it was added on the checkpoint sync issue",
+      "createdAt": "2026-04-14T14:30:36.506000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is definitely not a consensus must-have, but yes this does get better with this PR so it's no longer an issue",
+      "createdAt": "2026-04-14T14:31:24.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes it no longer an isuse and but also disagree that this is a checkpoint sync issue only, there is `store_target_checkpoint_state` and the spec has a clear definition of what a checkpoint is",
+      "createdAt": "2026-04-14T14:32:14.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and what you are saying is, just use a block state, but a block state is not a checkpoint state in the spec",
+      "createdAt": "2026-04-14T14:32:31.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes we dont need an extra beacon api, we should send the computed payload attributes via the SSE event",
+      "createdAt": "2026-04-14T14:48:25.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://github.com/ethereum/consensus-specs/pull/5094/changes#r3080330756 <@586161934425128960> I wonder if we should use the beacon state associated with the root of the head fork choice node here?",
+      "createdAt": "2026-04-14T14:48:54.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We're going in circles. The checkpoint state in the spec is not part of consensus, it's just a Python optimization that is leaking into clients",
+      "createdAt": "2026-04-14T14:51:15.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you mean using `block_states` state from there and not pass `state` as arg?",
+      "createdAt": "2026-04-14T14:52:08.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we can agree to disagree I guess, this is no longer something worth thinking about after 5094",
+      "createdAt": "2026-04-14T14:52:53.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes thats what i think?",
+      "createdAt": "2026-04-14T14:52:54.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```\n`state` is the state object after applying `process_slots(state, slot)` transition to the resulting state of the parent block processing\n```\nthis is what the bellatrix spec says about the state param in `prepare_execution_payload`",
+      "createdAt": "2026-04-14T14:53:19.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the parent block should anyways be the output of `get_head`",
+      "createdAt": "2026-04-14T14:53:37.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "links to github for some reason show me random places in my browser, what does \"here\" mean?",
+      "createdAt": "2026-04-14T15:01:08.414000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> `prepare_execution_payload` looks good to me in regards to my previous comment on it",
+      "createdAt": "2026-04-14T15:03:31.880000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i mean in `prepare_execution_payload`",
+      "createdAt": "2026-04-14T15:03:48.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, you could avoid the state as a parameter in the call, and just use the store since anyway we rely on it",
+      "createdAt": "2026-04-14T15:04:37.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```python\ndef prepare_execution_payload(\n    # [New in Gloas:EIP7732]\n    store: Store,\n    state: BeaconState,\n    safe_block_hash: Hash32,\n    finalized_block_hash: Hash32,\n    suggested_fee_recipient: ExecutionAddress,\n    execution_engine: ExecutionEngine,\n) -> Optional[PayloadId]:\n    # [New in Gloas:EIP7732]\n    parent_bid = state.latest_execution_payload_bid\n    head = get_head(store)\n    .....\n```\ni was just thinking if the state shuoldn't be passed as a parm and should be picked up from `store.block_states[head.root]`",
+      "createdAt": "2026-04-14T15:04:43.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you don't need either safe_block_hash that also is in the store",
+      "createdAt": "2026-04-14T15:05:11+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "finalized, etc.",
+      "createdAt": "2026-04-14T15:05:19.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but I don't mind any of this as long as the spec is correct, optimizing the spec is kinda irrelevant to me, we will implement this anyway in a completely different manner",
+      "createdAt": "2026-04-14T15:06:09.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but this looks good to me, clients determine the FCU attrs based on the logic in `prepare_execution_payload` and send the SSE event to builders. We don't need an extra API for builders for anything",
+      "createdAt": "2026-04-14T15:10:20.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "are you suggesting something like this?\n```python\ndef prepare_execution_payload(store, ...):\n    head = get_head(store)\n    state = copy(store.block_states[head.root])\n    process_slots(state, get_current_slot(store))\n    ...\n\n```",
+      "createdAt": "2026-04-14T17:01:12.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think it's a good idea to break the function signature wrt to the state being passed in, as you pointed out here https://github.com/ethereum/consensus-specs/pull/5094#discussion_r3080371414 correctly, the state passed in is advanced via `process_slots(state, slot)` (including epoch transition)",
+      "createdAt": "2026-04-14T17:02:25.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if thats the case, I guess a note indicating that the state should be identical to the state of the block root of get_head should be nice? I guess these are more of nits at this point",
+      "createdAt": "2026-04-14T17:06:43.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i ll leave it up to spec maintainers to decide what is the right way to go about <@592004585506340885>  because i m not sure how this will impact spec tests etc",
+      "createdAt": "2026-04-14T17:07:32.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am really wondering if calling get_head is correct",
+      "createdAt": "2026-04-14T17:08:09.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "because before we had `should_extend_payload(store, hash_tree_root(state.latest_block_header)):` so you can never have a divergence between head / state",
+      "createdAt": "2026-04-14T17:08:31.039000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "like really what we are doing is\n- 1. advance the state to the right slot via `process_slots`\n- 2. consult fork choice whether we wanna build on full or empty\n- 3. if on full, then run `apply_parent_execution_payload` to get correct `withdrawals`",
+      "createdAt": "2026-04-14T17:09:58.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "maybe if `should_extend_payload` is not what we wanna use there should be another spec function",
+      "createdAt": "2026-04-14T17:10:38.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@755590043632140352> any thoughts here?",
+      "createdAt": "2026-04-14T22:28:05.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if you pass the state as a parameter, ` should_extend_payload`  is more than fine. My comment in the PR was that the branching was being done on the existence of the payload on the store, regardless of ` should_extend_payload`. \n\nHaving said so, since we are anyway directly accesing the store, it makes sense not to send the state at all, and just get it from the store with `get_head`  plus ` block_states`  avoiding any divegence. \n\nThe reason we didn't do this before is that the caller is responsible to pass the head state. But with 5094, the head state no longer has enough information to construct a valid canonical block, so now anyway we rely on the store. So it makes sense to me to call `get_head`  and get the right state from the store. \n\nIf you do still pass the state however, ` should_extend_payload` is absolutely fine to decide as it is the tie breaker",
+      "createdAt": "2026-04-14T22:53:36.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But `get_head`  is fool proof cause it will always be correct",
+      "createdAt": "2026-04-14T22:53:56.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I dont really like this part `get_head  plus  block_states  avoiding any divegence`\n- 1. the `state` is part of the fucntion signurate since bellatrix which defines the following `state is the state object after applying process_slots(state, slot) transition to the resulting state of the parent block processing`\n- 2. if we get state from `block_states` we need to call `process_slots` on it\n\nI do agree if we call `process_slots` and advance the state we can use `get_head` but I feel like easier way to reason about `prepare_execution_payload` in bellatrix vs. gloas, is that now you need to in addition consult FC to know if you `should_extend_payload`, semantically that seems better\n\nthat's why I tend to think we should just use `should_extend_payload` but seems like you are fine with both cases anyways",
+      "createdAt": "2026-04-14T23:00:51.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yep I'm absolutely fine with ` should_extend_payload`  and assume that the caller has already advanced the head state.",
+      "createdAt": "2026-04-14T23:02:55.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if we ever change the tie breaker, we may need to call the tie breaker directly",
+      "createdAt": "2026-04-14T23:03:21.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was actually looking at that, the semantics are just not as nice but good to keep in mind",
+      "createdAt": "2026-04-14T23:04:45.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also notice that if you call `should_extend_payload`  you need to make sure also that the paylaod exist in the store.",
+      "createdAt": "2026-04-14T23:05:29.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes I realized that today",
+      "createdAt": "2026-04-14T23:05:53.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "otherwise the callto it will fail an assert",
+      "createdAt": "2026-04-14T23:05:54.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess the note makes it clear `whether to extend an available payload` but I was surprised this can be true without us having the payload in FC",
+      "createdAt": "2026-04-14T23:06:32.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah the function itself is a bit weird:\n```\ndef is_payload_timely(store: Store, root: Root) -> bool:\n    \"\"\"\n    Return whether the execution payload for the beacon block with root ``root``\n    was voted as present by the PTC, and was locally determined to be available.\n    \"\"\"\n    # The beacon block root must be known\n    assert root in store.payload_timeliness_vote\n\n    # If the payload is not locally available, the payload\n    # is not considered available regardless of the PTC vote\n    if root not in store.payload_states:\n        return False\n```\nI don' t have time to check now the spec but I find it weird that the first assert can pass and the second if being false 🙂",
+      "createdAt": "2026-04-14T23:07:45.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ahh no nvm, adding the vote adds to the dict",
+      "createdAt": "2026-04-14T23:09:07.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the assert is not the problem, but the problem is that the function will return true anyway even if there' s no payload",
+      "createdAt": "2026-04-14T23:09:49.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I will just check `store.payloads` for now, maybe a separate refactor if needed, for now I think this is fine",
+      "createdAt": "2026-04-14T23:12:12.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No wait that's definitely not good . I think you want to check it exists and also should extend",
+      "createdAt": "2026-04-14T23:13:31.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's just a single extra \"and\"",
+      "createdAt": "2026-04-14T23:13:56.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's what I meant both conditions",
+      "createdAt": "2026-04-14T23:14:26.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah then we're in agreement. I don't see this being wrong at all in any future",
+      "createdAt": "2026-04-14T23:15:07.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hard to change the tie breaker itself",
+      "createdAt": "2026-04-14T23:15:20.019000+00:00",
+      "attachments": []
+    }
+  ]
+}

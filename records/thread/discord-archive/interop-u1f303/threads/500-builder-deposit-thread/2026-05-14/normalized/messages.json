@@ -1,0 +1,696 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/500+ builder deposit thread",
+  "date": "2026-05-14",
+  "messageCount": 75,
+  "sourceHash": "b781835cd8bbc88e5fe337e4e29148b66e268b4ea8eb29072c13ed8b985c9d30",
+  "searchText": "<@363800010518822915> I restarted the devnet and it experienced some issues, but it did eventually recover after the deposits stopped which was cool to see. I would say it's performing quite well. The logs aren't terribly useful; too large to share (86 MiB) but there are a lot of messages like this. I'm going to test with a higher gas limit but with fewer deposits in total. It's handling semi-regular slots with 5k deposits like a champ. Nice work! which assertoor test is this? i'm only getting ~2k deposits in a block max Just [committed & pushed it](https://github.com/jtraglia/kurtosis-devnets/blob/master/many-onboarded-builders-at-fork.yml) to my repo. I set the gas limit to 2 gigagas to get that 😅 <@412614104222531604> i dm you my home address so you can send the panda prize to. kbye nice, are you able to do more than 5k? im trying to batch contract now... Haven't been able to yet. Will try later though. Next I'm going to try 5k deposits with 100% invalid signatures. I'm just curious how it will react. I tried with 1% invalid and didn't notice any difference. oh that's cool, what do i have to modify config to get that? the followings are good: - 1 invalid sig - 4 invalid sigs - 16 invalid sigs - 64 invalid sigs - N-1 invalid sigs - N invalid sigs You just have to use my fork of assertoor & my deposit playbook: ``` assertoor_params: image: jtraglia/assertoor:invalid-sig-percent run_stability_check: false run_block_proposal_check: false tests: - file: \"https://raw.githubusercontent.com/jtraglia/kurtosis-devnets/refs/heads/master/assertoor-playbooks/builder-deposits.yml\" config: totalDeposits: 40960 perSlot: 8192 startSlot: 33 invalidSigPercent: 100 ``` i tried this and got stuck at `check_consensus_slot_range` step Hmm did it show an error? It seems to be working for me. What did you set `startSlot` to? No noticeable different with 100% invalid deposits. And I'm pretty sure they were actually invalid because the \"builders overview\" page on dora is still empty after the deposit epochs are finalized. this works great, i was able to test 8192 signatures. Anything above that will break engine api of course also pk's config will break prysm today because they arrive before gloas and i didnt optimize pre gloas path.. but nice to see it eventually recovers : ) Nice that's impressive! If you continue to send lots of deposits, does the `Recv` time gradually increase for you? It seems to for me, regardless of client. For me, 1024 new builder deposits for 100 slots will push the time to ~2.5 seconds. For your system (more powerful) it probably needs to be a bigger number, like 4096. And eventually, things will start to break. Eg: recv time is miss leading I think. When is that captured? I think if it accounts for payload to arrive via streaming end point. That's going to be brutal given the increase in sizes I've seen recv time over 10s but looking into the log it's no where close to that The sync committee bug is real though. I suspect that's because we only have 1 node. Something awkward here i got pre gloas deposits to work, but its not pretty, this run had 30k deposits waiting at transition and it takes my m1 max 8s to verify, it barely hung on i can introduce a fancier cache to be 100% safe and just remove the cache after the fork in subsequent release I suspect there is a bug in `onboard_builders_from_pending_deposits()` the `validator_pubkeys` is only accumulated up to the current counter, and it has no idea about upcoming `PendingDeposits` we want to make sure the current builder deposit is not conflicted to any pending validator deposits in the entire queue in order to do that we need a separate loop for it, something like: ```python for deposit in state.pending_deposits: if is_builder_withdrawal_credential(deposit.withdrawal_credentials): continue if is_valid_deposit_signature( deposit.pubkey, deposit.withdrawal_credentials, deposit.amount, deposit.signature ): validator_pubkeys.append(deposit.pubkey) ``` could someone double check? cc <@755590043632140352> <@592004585506340885> a separate point, right now we eagerly validate signatures of all pending deposits which is very expensive instead of that we can do it lazily - have a for loop through `state.pending_deposits` to build a map like `Dict[Pubkey, PendingDeposit[]` - in the main for loop, for each builder deposit, get `PendingDeposit[]` of the same pubkey - if there are some, we loop through it and validate signatures it'll achieve the same purpose but save us a lot of signature verification operations. But need a spec change for it because the result is we don't skip invalid signature deposits (unlike the current spec), but it's not the main intention of `onboard_builders_from_pending_deposits()` anyway same trick could be applied for `process_deposit_request()` I think we are now automatically bumping the gas limit to 200m if you activate gloas in latest ethereum package ``` validator_pubkeys.append(deposit.pubkey) ``` this is already there in the function towards the end we need to eagerly validate the signature to prevent frontrunning <@575994543527297055> potuz is right. It's [here](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/specs/gloas/fork.md?plain=1#L103). The spec does handle this & there are reference tests to enforce it: * [`test_fork_builder_deposit_followed_by_non_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L374) * [`test_fork_validator_deposit_followed_by_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L429) * [`test_fork_invalid_validator_deposit_followed_by_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L489) Your suggestion is more of a design change. It would mean any validator deposit with the same creds would override the builder deposit (ie the validator would be created instead of the builder, even thought the builder was first). <@808969530608451584> to confirm.. your spammer also sends 0x02 deposits right? not just builder 0x03 only im finding another bottleneck here there is a different playbook for that do you see a slow down when there are random 0x02 in between 0x03 deposits? well.. if its 0x03.. i think i solve it you can see on dora what types they are click on the deposits button if its 0x02 + 0x03.. it creates another problem.. once `state.pending_deposits` grow to 50k+, prysm is not optimized for this yet https://github.com/ethpandaops/assertoor/blob/master/playbooks/gloas-dev/builder-deposit-spam.yaml this one does 0x03 creds nly, but should be easy to change inside the playbook. see prefix on line 81 ah, you want them mixed? no no i want just 0x03.. but i wonder if the playbook im using also has 0x02 because im getting killed after 10 slots, it takes 6s to propose a block, ill check dora.. thinks can confirm its all 0x03... and i found the bottle neck.. fixing that now. survived! can handle both pre gloas and post gloas too! ready for harder tests now 🫡 <@808969530608451584> what does it mean if something is half green and half blue? left side of the badge if the beacon block status, right side is the payload status (orphaned when blue) I should add a popover that explains it 😄 you can also click on the slot and it will be obvious as the slot will show that the execution payload got orphaned <@808969530608451584> with your batched deposits assertoor config, when can I expect to see deposits? I'm 54 slots in without any deposits. hmm, with skipActivationCheck it should be almost immediately at gloas activation can you check the UI or send logs? I do have that set to false btw. So I was expecting to see deposits at slot 32-ish. that's what i thought.. its not orphaned though.. i checked the logs and the page to confirm... Dora bug? hmm, yea, that looks like a dora issue. dora isn't happy with that many deposits (it unfolds to about 80k internal txs that it's trying to insert into a sqlite db). I wasn't aware that it affects the orphaned status too. The status on the details page is more accurate. gotcha.. another question.. the RSCV timing column.. when is that captured? is that after the streaming end point or something? (beacon-api) it's the time when the sse block event was received so even before loading the block from the client. but tbh. I wouldn't trust any dora timing parameter. It's terribly stressed by the el indexer. there was a flag to disable the tx indexer, that should help with this testing scenario.. let me find it i see.. that number may seem higher than actual.. in my node its 1-2s but on dora it says 10s.. I suspect that's because 8k over the event feed is slow or something add this to the kurtosis config: ```yaml dora_params: env: EXECUTIONINDEXER_ENABLED: \"false\" ``` that should reduce the load in dora for these mass deposit tests hmm, it looks indeed stuck.. I think it might be a race with the gloas activation check. the funding transactions were probably send out with pre-gloas fee estimates :/ which script is this? i have only optimised the post gloas case so far, but can only get max 5k deposits in a block using https://raw.githubusercontent.com/jtraglia/kurtosis-devnets/refs/heads/master/assertoor-playbooks/builder-deposits.yml I've pushed a fix, please try again 🙂 (no config change) Thanks. Will try it shortly. should we disable it for the next few weeks while ppl doing deposits tests? I feel like tons of dora bugs are now showing due to the local db being a bit too slow https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/25881545801 built, <@808969530608451584> <@412614104222531604> <@199561711278227457> ready for tests these are verification times in our log. pre gloas : `[cl-1-prysm-geth] [2026-05-14 19:33:14.20] INFO state: Warmed builder onboarding sig cache deposits=8192 duration=2.081217185s slot=6 valid=8192` See `duration` post gloas: `[cl-1-prysm-geth] [2026-05-14 19:33:38.03] INFO cache: Wrote deposit sig verdict to cache deposits=8192 root=0xcab5880da2fe verified=8192 verifyMs=1416` See `verifyMs` we should be able to handle pre gloas deposits and transition through gloas. Let me know if you guys are able to break my branch can you handle restarts? With multiple clients do you write anything to disk or will you need to re process everything on restart? I’ve been really struggling to repeer with any clients after prysm restarts… and it might throw off the deposit queues too a bit",
+  "excerpts": [
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@363800010518822915> I restarted the devnet and it experienced some issues, but it did eventually recover after the deposits stopped which was cool to see. I would say it's performing quite well. The logs aren't terribly useful; too large to share (86 MiB) but there are a lot of messages like this. I'm going to test with a higher gas limit but with fewer deposits in total.",
+      "createdAt": "2026-05-14T00:29:43.355000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "e8f52d250035d73bca19899bbcaf10fe76d584612f8b8768f05bd4dddf3b0f56"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "1c4bd902364995d5c41113e97b9a6d952a14d8d069d777159186b0abacf449e4"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "b86f1d8531fd19ac06ac3cd6bb222f38db225304eb00e9015dd92cd508339019"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "It's handling semi-regular slots with 5k deposits like a champ. Nice work!",
+      "createdAt": "2026-05-14T00:44:01.349000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "8afc05b1782c585133bcd9ff5d739382284d1dfb5f409d7c561a33c34911088c"
+        }
+      ]
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "which assertoor test is this? i'm only getting ~2k deposits in a block max",
+      "createdAt": "2026-05-14T00:56:55.242000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Just [committed & pushed it](https://github.com/jtraglia/kurtosis-devnets/blob/master/many-onboarded-builders-at-fork.yml) to my repo. I set the gas limit to 2 gigagas to get that 😅",
+      "createdAt": "2026-05-14T00:58:52.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> i dm you my home address so you can send the panda prize to. kbye",
+      "createdAt": "2026-05-14T01:09:39.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nice, are you able to do more than 5k? im trying to batch contract now...",
+      "createdAt": "2026-05-14T01:10:40.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Haven't been able to yet. Will try later though. Next I'm going to try 5k deposits with 100% invalid signatures. I'm just curious how it will react. I tried with 1% invalid and didn't notice any difference.",
+      "createdAt": "2026-05-14T01:11:36.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh that's cool, what do i have to modify config to get that?",
+      "createdAt": "2026-05-14T01:12:16.392000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the followings are good:\n- 1 invalid sig\n- 4 invalid sigs\n- 16 invalid sigs\n- 64 invalid sigs\n- N-1 invalid sigs\n- N invalid sigs",
+      "createdAt": "2026-05-14T01:13:46.400000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "You just have to use my fork of assertoor & my deposit playbook:\n```\nassertoor_params:\n  image: jtraglia/assertoor:invalid-sig-percent\n  run_stability_check: false\n  run_block_proposal_check: false\n  tests:\n    - file: \"https://raw.githubusercontent.com/jtraglia/kurtosis-devnets/refs/heads/master/assertoor-playbooks/builder-deposits.yml\"\n      config:\n        totalDeposits: 40960\n        perSlot: 8192\n        startSlot: 33\n        invalidSigPercent: 100\n```",
+      "createdAt": "2026-05-14T01:15:37.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i tried this and got stuck at `check_consensus_slot_range` step",
+      "createdAt": "2026-05-14T01:31:12.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Hmm did it show an error? It seems to be working for me.",
+      "createdAt": "2026-05-14T01:32:05.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "What did you set `startSlot` to?",
+      "createdAt": "2026-05-14T01:32:49.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "No noticeable different with 100% invalid deposits. And I'm pretty sure they were actually invalid because the \"builders overview\" page on dora is still empty after the deposit epochs are finalized.",
+      "createdAt": "2026-05-14T01:49:01.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "this works great, i was able to test 8192 signatures. Anything above that will break engine api of course",
+      "createdAt": "2026-05-14T02:05:12.482000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-13_at_19.04.26.png",
+          "content": "dfa90064326552bc3aa50feb26ea20598d3830945dade80ca36371eea64f3ebd"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also pk's config will break prysm today because they arrive before gloas and i didnt optimize pre gloas path.. but nice to see it eventually recovers : )",
+      "createdAt": "2026-05-14T02:09:01.455000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-13_at_19.08.43.png",
+          "content": "ac79e394257132747ca9b6cb375aee7c09232115760e67e8f3a1711d7bd077c1"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Nice that's impressive!",
+      "createdAt": "2026-05-14T02:14:00.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "If you continue to send lots of deposits, does the `Recv` time gradually increase for you? It seems to for me, regardless of client. For me, 1024 new builder deposits for 100 slots will push the time to ~2.5 seconds. For your system (more powerful) it probably needs to be a bigger number, like 4096.",
+      "createdAt": "2026-05-14T02:16:23.614000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "0f6ec4d4f1003cb2e5e459b3a3aca450c7f7c785bd387e85b6ce7a22a6cf3f28"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "And eventually, things will start to break. Eg:",
+      "createdAt": "2026-05-14T02:18:10.350000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "6fab8660b38436be87daed3038127f1938370ced24ae8b81c1260ca66ef54a3c"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "recv time is miss leading I think. When is that captured? I think if it accounts for payload to arrive via streaming end point. That's going to be brutal given the increase in sizes",
+      "createdAt": "2026-05-14T02:21:08.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I've seen recv time over 10s but looking into the log it's no where close to that",
+      "createdAt": "2026-05-14T02:21:34.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The sync committee bug is real though. I suspect that's because we only have 1 node. Something awkward here",
+      "createdAt": "2026-05-14T02:22:24.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i got pre gloas deposits to work, but its not pretty, this run had 30k deposits waiting at transition and it takes my m1 max 8s to verify, it barely hung on\ni can introduce a fancier cache to be 100% safe and just remove the cache after the fork in subsequent release",
+      "createdAt": "2026-05-14T04:21:05.858000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-13_at_21.20.43.png",
+          "content": "8a00b202885cf66548ea28e04c1f668fac63fa5204a1b9c7e8edd27c350769ec"
+        }
+      ]
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I suspect there is a bug in `onboard_builders_from_pending_deposits()`\nthe `validator_pubkeys` is only accumulated up to the current counter, and it has no idea about upcoming `PendingDeposits`\nwe want to make sure the current builder deposit is not conflicted to any pending validator deposits in the entire queue\nin order to do that we need a separate loop for it, something like:\n```python\nfor deposit in state.pending_deposits:\n        if is_builder_withdrawal_credential(deposit.withdrawal_credentials):\n            continue\n        if is_valid_deposit_signature(\n            deposit.pubkey, deposit.withdrawal_credentials, deposit.amount, deposit.signature\n        ):\n            validator_pubkeys.append(deposit.pubkey)\n```\n\ncould someone double check? cc <@755590043632140352> <@592004585506340885>",
+      "createdAt": "2026-05-14T10:14:14.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "a separate point, right now we eagerly validate signatures of all pending deposits which is very expensive\ninstead of that we can do it lazily\n- have a for loop through `state.pending_deposits` to build a map like `Dict[Pubkey, PendingDeposit[]`\n- in the main for loop, for each builder deposit, get `PendingDeposit[]` of the same pubkey\n- if there are some, we loop through it and validate signatures\n\nit'll achieve the same purpose but save us a lot of signature verification operations. But need a spec change for it because the result is we don't skip invalid signature deposits (unlike the current spec), but it's not the main intention of `onboard_builders_from_pending_deposits()` anyway\n\nsame trick could be applied for `process_deposit_request()` I think",
+      "createdAt": "2026-05-14T10:28:27.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we are now automatically bumping the gas limit to 200m if you activate gloas in latest ethereum package",
+      "createdAt": "2026-05-14T11:15:45.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\nvalidator_pubkeys.append(deposit.pubkey)\n```",
+      "createdAt": "2026-05-14T12:03:45.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "this is already there in the function",
+      "createdAt": "2026-05-14T12:03:51.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "towards the end",
+      "createdAt": "2026-05-14T12:04:00.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we need to eagerly validate the signature to prevent frontrunning",
+      "createdAt": "2026-05-14T12:04:27.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@575994543527297055> potuz is right. It's [here](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/specs/gloas/fork.md?plain=1#L103).",
+      "createdAt": "2026-05-14T13:53:49.813000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The spec does handle this & there are reference tests to enforce it:\n\n* [`test_fork_builder_deposit_followed_by_non_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L374)\n* [`test_fork_validator_deposit_followed_by_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L429)\n* [`test_fork_invalid_validator_deposit_followed_by_builder_credentials`](https://github.com/ethereum/consensus-specs/blob/fa8bb08022199cfd59f8402c9ec12d9b7f8f6e5e/tests/core/pyspec/eth_consensus_specs/test/gloas/fork/test_gloas_fork_onboard_builders.py#L489)\n\nYour suggestion is more of a design change. It would mean any validator deposit with the same creds would override the builder deposit (ie the validator would be created instead of the builder, even thought the builder was first).",
+      "createdAt": "2026-05-14T14:00:04.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@808969530608451584> to confirm.. your spammer also sends 0x02 deposits right? not just builder 0x03 only\nim finding another bottleneck here",
+      "createdAt": "2026-05-14T17:16:22.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "there is a different playbook for that",
+      "createdAt": "2026-05-14T17:17:09.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do you see a slow down when there are random 0x02 in between 0x03 deposits?",
+      "createdAt": "2026-05-14T17:17:48.633000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "well.. if its 0x03.. i think i solve it",
+      "createdAt": "2026-05-14T17:18:00.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you can see on dora what types they are",
+      "createdAt": "2026-05-14T17:18:17.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "click on the deposits button",
+      "createdAt": "2026-05-14T17:18:24.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if its 0x02 + 0x03.. it creates another problem.. once `state.pending_deposits` grow to 50k+, prysm is not optimized for this yet",
+      "createdAt": "2026-05-14T17:18:38.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/ethpandaops/assertoor/blob/master/playbooks/gloas-dev/builder-deposit-spam.yaml   this one does 0x03 creds nly,  but should be easy to change inside the playbook.  see prefix on line 81",
+      "createdAt": "2026-05-14T17:19:04.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah, you want them mixed?",
+      "createdAt": "2026-05-14T17:19:55.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no no i want just 0x03.. but i wonder if the playbook im using also has 0x02 because im getting killed after 10 slots, it takes 6s to propose a block,  ill check dora.. thinks",
+      "createdAt": "2026-05-14T17:23:13.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can confirm its all 0x03... and i found the bottle neck.. fixing that now.",
+      "createdAt": "2026-05-14T17:36:01.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "survived! can handle both pre gloas and post gloas too! ready for harder tests now 🫡",
+      "createdAt": "2026-05-14T19:20:01.526000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-14_at_12.18.53.png",
+          "content": "ce229e5a59462f590adad060e6151c9a635800961f58e7018a681c83c1fe2d88"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@808969530608451584> what does it mean if something is half green and half blue?",
+      "createdAt": "2026-05-14T19:20:13.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "left side of the badge if the beacon block status,   right side is the payload status (orphaned when blue)",
+      "createdAt": "2026-05-14T19:20:49.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I should add a popover that explains it 😄",
+      "createdAt": "2026-05-14T19:21:04.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you can also click on the slot and it will be obvious",
+      "createdAt": "2026-05-14T19:21:14.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "as the slot will show that the execution payload got orphaned",
+      "createdAt": "2026-05-14T19:21:34.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@808969530608451584> with your batched deposits assertoor config, when can I expect to see deposits?",
+      "createdAt": "2026-05-14T19:35:59.700000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-05-14T19:36:00.690000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "be78888cd667c84443423d787ea5cb13e07d73da510c62e84c29c23a01e5da46"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I'm 54 slots in without any deposits.",
+      "createdAt": "2026-05-14T19:36:14.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm, with skipActivationCheck it should be almost immediately at gloas activation\ncan you check the UI or send logs?",
+      "createdAt": "2026-05-14T19:37:03.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I do have that set to false btw. So I was expecting to see deposits at slot 32-ish.",
+      "createdAt": "2026-05-14T19:37:46.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "that's what i thought.. its not orphaned though.. i checked the logs and the page to confirm... Dora bug?",
+      "createdAt": "2026-05-14T19:37:54.882000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-14_at_12.37.25.png",
+          "content": "44da74b54d8d91cc58a5918ff05be9a0a2b3773bb11fc1e6786cb8c77aa08d74"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-14_at_12.37.04.png",
+          "content": "77e5a5065890ace937624443fd378c4ccb6e88d6068f25f0f27abfc0b8dc086c"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-05-14_at_12.36.40.png",
+          "content": "8722d76fc404f7d9f8e971f0cb25a7c809662f11d2acdc092749a4f4ca5cfbee"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-05-14T19:40:14.964000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "assertoor.log",
+          "content": "54f558bb4129a02b4713a86473c1617453df11d57afb1c9927bf3daca2ee62f6"
+        }
+      ]
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm,  yea, that looks like a dora issue.\ndora isn't happy with that many deposits (it unfolds to about 80k internal txs that it's trying to insert into a sqlite db).\nI wasn't aware that it affects the orphaned status too.\nThe status on the details page is more accurate.",
+      "createdAt": "2026-05-14T19:40:27.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "gotcha.. another question.. the RSCV timing column.. when is that captured? is that after the streaming end point or something? (beacon-api)",
+      "createdAt": "2026-05-14T19:41:23.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's the time when the sse block event was received",
+      "createdAt": "2026-05-14T19:44:00.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so even before loading the block from the client.  but tbh.  I wouldn't trust any dora timing parameter.  It's terribly stressed by the el indexer.\nthere was a flag to disable the tx indexer,  that should help with this testing scenario.. let me find it",
+      "createdAt": "2026-05-14T19:45:46.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i see.. that number may seem higher than actual.. in my node its 1-2s but on dora it says 10s..\nI suspect that's because 8k over the event feed is slow or something",
+      "createdAt": "2026-05-14T19:45:57.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "add this to the kurtosis config:\n```yaml\ndora_params:\n  env:\n    EXECUTIONINDEXER_ENABLED: \"false\"\n```\nthat should reduce the load in dora for these mass deposit tests",
+      "createdAt": "2026-05-14T19:54:28.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm,  it looks indeed stuck..  I think it might be a race with the gloas activation check. the funding transactions were probably send out with pre-gloas fee estimates :/",
+      "createdAt": "2026-05-14T19:56:00.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "which script is this? i have only optimised the post gloas case so far, but can only get max 5k deposits in a block using https://raw.githubusercontent.com/jtraglia/kurtosis-devnets/refs/heads/master/assertoor-playbooks/builder-deposits.yml",
+      "createdAt": "2026-05-14T19:57:32.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I've pushed a fix, please try again 🙂 (no config change)",
+      "createdAt": "2026-05-14T20:27:12.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Thanks. Will try it shortly.",
+      "createdAt": "2026-05-14T20:27:26.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "should we disable it for the next few weeks while ppl doing deposits tests?",
+      "createdAt": "2026-05-14T20:28:02.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I feel like tons of dora bugs are now showing due to the local db being a bit too slow",
+      "createdAt": "2026-05-14T20:28:22.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/25881545801\nbuilt, <@808969530608451584> <@412614104222531604> <@199561711278227457> ready for tests\nthese are verification times in our log.\npre gloas : `[cl-1-prysm-geth] [2026-05-14 19:33:14.20]  INFO state: Warmed builder onboarding sig cache deposits=8192 duration=2.081217185s slot=6 valid=8192` See `duration`\npost gloas: `[cl-1-prysm-geth] [2026-05-14 19:33:38.03]  INFO cache: Wrote deposit sig verdict to cache deposits=8192 root=0xcab5880da2fe verified=8192 verifyMs=1416` See `verifyMs`",
+      "createdAt": "2026-05-14T20:31:08.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we should be able to handle pre gloas deposits and transition through gloas. Let me know if you guys are able to break my branch",
+      "createdAt": "2026-05-14T20:31:49.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you handle restarts?",
+      "createdAt": "2026-05-14T20:33:34.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "With multiple clients",
+      "createdAt": "2026-05-14T20:33:43.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do you write anything to disk or will you need to re process everything on restart?",
+      "createdAt": "2026-05-14T20:34:02.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I’ve been really struggling to repeer with any clients after prysm restarts…",
+      "createdAt": "2026-05-14T20:34:36.969000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "and it might throw off the deposit queues too a bit",
+      "createdAt": "2026-05-14T20:34:50.472000+00:00",
+      "attachments": []
+    }
+  ]
+}

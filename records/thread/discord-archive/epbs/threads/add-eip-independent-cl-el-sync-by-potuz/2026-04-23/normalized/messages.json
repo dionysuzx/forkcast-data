@@ -1,0 +1,562 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/Add EIP_ Independent CL_EL Sync by potuz...",
+  "date": "2026-04-23",
+  "messageCount": 69,
+  "sourceHash": "23b3e1172af59f40b42f56b795443ab45380c72da0a760c13ef4f9bd0c7d44f7",
+  "searchText": "Doesn't the accumulator need to commit to `prev_randao`, `gas_limit`, `block_hash`, `execution_requests`, `slot_number`, `parent_hash`, `timestamp`, `withdrawals` and all potential future fields which values are validated by CL? Basically, any payload attribute that is secured by CL need to be there. Today, each payload field is secured and thus full `block_hash` validation is required for each block. With Gloas the situation changes and only a subset of payload fields is CL verifiable. It's not necessarily should be an accumulator, a commitment on those fields that can be validated by EL and CL would be enough. Today, CL that can validated `block_hash` on their own can securely range sync without sending payloads to EL. Maybe, this is the way to go? Make all CL's run `block_hash` validation instead of introducing a new commitment that is understood by both sides? Another question I want us to discuss before making such a change is how the range sync will look like with stateless/zk EL? Getting rid of payload range requests means that in the future nodes will keep relying on EL p2p even when optimistic sync can be deprecated which kind of the opposite to the thinking that we had at the merge time, where there was a strong desire to get rid of block requests in p2p. Though, getting rid of it might be unfeasible due to many reasons. The discussion points: - are there any CL relying on payload range requests today? - will the simplification we are making today become an obstacle in the future? The point is not downloading the block If the hash is guaranteed then all elements covered by the hash would be fine isn't it? And no, nodes won't ever need the Payload so they don't need to rely on the EL at all I agree with <@425572898787426305> , great catch there! Also the accumulator seems like a nice solution but have to review it in more depth yet. Two things I didn't get after initial review: The accumulator uses block_hash as input but the request hash is part of the hash, wouldn't this cause a circular dependency? I think we could defer the request hash by one block on the EL if needes, or use the parent_block_hash. Also, why start with Hash32() at fork boundary? Or will there be a different initial accumulater at the fork? Yes Misha is right that the accumulator should be over everything. I don't think there's a circular dependency if the accumulator is not part of the hash. Starting from zero is not a problem I believe? If we don't want to start from zero it might be some magic number, like the hash of the fork_version Right but on the EL side, I guess we would want to put the accumulator into the EL block header? So, (1) either we don't put it into the EL block header, or (2) we except it when calculating the block hash (we have not done that before), or (3) we use the parent_block_hash. I'd prefer option 3. So, the concept we will introduce is something as the following: ``` PartialBlockHeader: parent_hash: Bytes32 ... # commitments to all other fields meaningful to CL ``` `hash(partial_block_header)` will become a part of EL's block and will also be `block_hashed` like any other regular field. `parent_hash` will serve as accumulator as the previous block contains `hash(partial_block_header)` as well the `PartialBlockHeader` name is just for illustration Last commit has what we've been discussing with <@425572898787426305>, adds a full header check, I think I dealt with withdrawals correctly which is a subtle one cause it' s not known at the bid's time Ah no I didn' t lol the withdrawals are still flawed, but at least it's enough to discuss this on ACD, will try to fix this before that unfortunately, i can't attend the ACD 😬 but <@755590043632140352> has all the context now left it as a TODO instead, withdrawals may need some input from the EL the natural choice would be to use the parent withdrawals what's the difference with using parent withdrawals? that you need to pick the parent block for the CL this is not a problem cause they are in the state at verification time what would be the problem for CL to pick the current block withdrawals if it has a full payload? the accumulator is committed in the bid which is built before the payload withdrawals can be built I see, we would need some commitment to the current withdrawals to be incorporated into accumulator. And that commitment should be verifiable by EL. If we use previous withdrawals then they seem to be already incorporated by the `parent_hash`? well but they need to be verified by the CL to match the withdrawals, otherwise it' s the same for all other fields, we can just not include them if they are part of the hash but the problem is that the CL does not verify the hash ok, worth more thinking into this in fact we can add the current withdrawals to the accumulator, and not include the accumulator in the bid, but rather in the next block as the requests are included the payload can still be verified in gossip since the accumulator can be computed anyway offchain Where would the accumulated hash live on the EL side? The EIP says it comes through the engine api's ExecutionPayload and that it enters EL' stf, but I'm not sure where it'd live if not in the EL block header? Also, it uses block.gas_limit, should that be parent_block.gas_limit? I think it has to be the current one that is committed in the bid, this would be a new field in the block itself, just like `slot_number` with the simple validation listed in the EIP Ah, it's now the parent hash, yeah this works Could we add it to the EL header alongside requests_hash, and drop the separate field from the SSZ ExecutionPayload? I don't understand, what is the EL header? you mean the bid? ELs take the ExecutionPayload and build their own block from it. This EL block has a header and a body. That's all ELs store. They don't store the ExecutionPayload, but their own EL block. It just happens that the bid contains the same / mostly the same (would have to double-check) fields as the bid, but it's not the same. On the EL side it can be anywhere but 1) IT has to be part of the blockhash 2) It has to be sent in the EL p2p with the block. Then let's put it into the EL block header, seems simplest. and then how does it come in the envelope? outside of the payload, like with the requests? Yeah either similar to requests or put into the ExcutionPayload but it is now in the ExecutionPayload Hmm, so we could take it out and place it next to the ExecutionPayload, or keep as-is? Seems both options are fine, tbh. And on the EL side, we make sure it enters the stf and is written into the block header. It's just, not everything in the ExecutionPayload necessarily enters the EL stf or is stored. E.g. the BAL is in the ExecutionPayload but not thrown into the STF, just it's hash via the ELBlock.header.bal_hash. But this means the following line would need to change (remove the block_hash): SHA256(previous_partial_header_hash + **block_hash** + serialize(execution_requests)) Nah that line was from before, I moved the commitment out of the bid so that it can deal correctly with withdrawals and put it in the next block I left the serialization algo loosely ill-defined hoping that we can do SSZ here: just add a container `PartialHeader` with the corresponding fields, and jut take the damned HTR if we put it in the envelope the CL itself can deal with it and the EL devs can probably be happy about it, although they'll need to verify it anyway in their own STF, so to avoid arguments here, I kept SHA for the time being Yeah I'd keep it non-ssz if possible E.g. add this for the EL ``` class Header: ... # [New in Gloas:EIP8237] partial_header_hash: Hash32 ``` And this as the helper: ``` def compute_partial_header_hash( previous_partial_header_hash: Hash32, parent_block_hash: Hash32, parent_requests_hash: Hash32, ) -> Hash32: return Hash32(sha256( previous_partial_header_hash + parent_block_hash + parent_requests_hash ).digest()) ``` i don't get why that new commitment and a bid cannot include withdrawals_hash of the curr slot withdrawals while at the same time a payload built atop of the same beacon block can 🤔 withdrawals are not part of the blockhash if they are then ePBS is broken 😄 lol we have withdrawals sent in the engine api newPayload, and them should have an RLP-list hash commitment in the EL block header which then is a part of block_hash The block hash needs to be known at the time of the bid creation. Then there is a state transition function on the CL that can modify the expected withdrawals, and then those withdrawals are deducted in the CL. Then, and only then, the EL knows the withdrawals that needs to include in its payload so the withdrawals in the payload cannot be committed in the bid cause they are probably not known Ahhh nvm, we can solve all this anyway but anyway the current EIP I think it's correct and takes care of withdrawals without grabbing the parent ones the above is wrong anyway, the withdrawals can be known in advance because we send them in the attributes, it's fine to add them to the bid or the next block's body, either will work if this doesn't get into Glamsterdam we have time to decide <@755590043632140352> https://github.com/potuz/EIPs/pull/3/changes Those are (mostly) the EL changes.",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "",
+      "createdAt": "2026-04-23T06:53:20.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Doesn't the accumulator need to commit to `prev_randao`, `gas_limit`, `block_hash`, `execution_requests`, `slot_number`, `parent_hash`, `timestamp`, `withdrawals` and all potential future fields which values are validated by CL?\n\nBasically, any payload attribute that is secured by CL need to be there. Today, each payload field is secured and thus full `block_hash` validation is required for each block.\n\nWith Gloas the situation changes and only a subset of payload fields is CL verifiable. It's not necessarily should be an accumulator, a commitment on those fields that can be validated by EL and CL would be enough. Today, CL that can validated `block_hash` on their own can securely range sync without sending payloads to EL. Maybe, this is the way to go? Make all CL's run `block_hash` validation instead of introducing a new commitment that is understood by both sides?",
+      "createdAt": "2026-04-23T06:53:21.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Another question I want us to discuss before making such a change is how the range sync will look like with stateless/zk EL?\n\nGetting rid of payload range requests means that in the future nodes will keep relying on EL p2p even when optimistic sync can be deprecated which kind of the opposite to the thinking that we had at the merge time, where there was a strong desire to get rid of block requests in p2p. Though, getting rid of it might be unfeasible due to many reasons.\n\nThe discussion points:\n- are there any CL relying on payload range requests today?\n- will the simplification we are making today become an obstacle in the future?",
+      "createdAt": "2026-04-23T08:04:53.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The point is not downloading the block",
+      "createdAt": "2026-04-23T09:15:16.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If the hash is guaranteed then all elements covered by the hash would be fine isn't it?",
+      "createdAt": "2026-04-23T09:15:38.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And no, nodes won't ever need the Payload so they don't need to rely on the EL at all",
+      "createdAt": "2026-04-23T09:16:24.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I agree with <@425572898787426305> , great catch there!\nAlso the accumulator seems like a nice solution but have to review it in more depth yet.\nTwo things I didn't get after initial review:\nThe accumulator uses block_hash as input but the request hash is part of the hash, wouldn't this cause a circular dependency? I think we could defer the request hash by one block on the EL if needes, or use the parent_block_hash.\nAlso, why start with Hash32() at fork boundary? Or will there be a different initial accumulater at the fork?",
+      "createdAt": "2026-04-23T09:40:06.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes Misha is right that the accumulator should be over everything. I don't think there's a circular dependency if the accumulator is not part of the hash.",
+      "createdAt": "2026-04-23T09:44:31.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Starting from zero is not a problem I believe?",
+      "createdAt": "2026-04-23T09:44:51.525000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If we don't want to start from zero it might be some magic number, like the hash of the fork_version",
+      "createdAt": "2026-04-23T10:16:29.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Right but on the EL side, I guess we would want to put the accumulator into the EL block header?",
+      "createdAt": "2026-04-23T11:07:24.112000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So, (1) either we don't put it into the EL block header, or (2) we except it when calculating the block hash (we have not done that before), or (3) we use the parent_block_hash.\nI'd prefer option 3.",
+      "createdAt": "2026-04-23T11:08:57.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So, the concept we will introduce is something as the following:\n```\nPartialBlockHeader:\n    parent_hash: Bytes32\n    ... # commitments to all other fields meaningful to CL\n```\n\n`hash(partial_block_header)` will become a part of EL's block and will also be `block_hashed` like any other regular field. `parent_hash` will serve as accumulator as the previous block contains `hash(partial_block_header)` as well",
+      "createdAt": "2026-04-23T11:11:52.892000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the `PartialBlockHeader` name is just for illustration",
+      "createdAt": "2026-04-23T11:13:31.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Last commit has what we've been discussing with <@425572898787426305>, adds a full header check, I think I dealt with withdrawals correctly which is a subtle one cause it' s not known at the bid's time",
+      "createdAt": "2026-04-23T11:17:30.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah no I didn' t  lol",
+      "createdAt": "2026-04-23T11:18:01.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the withdrawals are still flawed, but at least it's enough to discuss this on ACD, will try to fix this before that",
+      "createdAt": "2026-04-23T11:18:23.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "unfortunately, i can't attend the ACD 😬 but <@755590043632140352> has all the context now",
+      "createdAt": "2026-04-23T11:19:01.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "left it as a TODO instead, withdrawals may need some input from the EL",
+      "createdAt": "2026-04-23T11:20:51.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the natural choice would be to use the parent withdrawals",
+      "createdAt": "2026-04-23T11:21:16.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what's the difference with using parent withdrawals?",
+      "createdAt": "2026-04-23T11:22:16.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that you need to pick the parent block",
+      "createdAt": "2026-04-23T11:22:44.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for the CL this is not a problem cause they are in the state",
+      "createdAt": "2026-04-23T11:22:57.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "at verification time",
+      "createdAt": "2026-04-23T11:23:02.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what would be the problem for CL to pick the current block withdrawals if it has a full payload?",
+      "createdAt": "2026-04-23T11:29:00.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the accumulator is committed in the bid which is built before the payload withdrawals can be built",
+      "createdAt": "2026-04-23T11:36:10.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I see, we would need some commitment to the current withdrawals to be incorporated into accumulator. And that commitment should be verifiable by EL. If we use previous withdrawals then they seem to be already incorporated by the `parent_hash`?",
+      "createdAt": "2026-04-23T11:43:27.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well but they need to be verified by the CL",
+      "createdAt": "2026-04-23T11:44:21.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "to match the withdrawals, otherwise it' s the same for all other fields, we can just not include them if they are part of the hash",
+      "createdAt": "2026-04-23T11:44:41.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but the problem is that the CL does not verify the hash",
+      "createdAt": "2026-04-23T11:44:50.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok, worth more thinking into this",
+      "createdAt": "2026-04-23T11:45:28.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "in fact we can add the current withdrawals to the accumulator, and not include the accumulator in the bid, but rather in the next block as the requests are included",
+      "createdAt": "2026-04-23T11:46:52.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the payload can still be verified in gossip since the accumulator can be computed anyway offchain",
+      "createdAt": "2026-04-23T11:47:17.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Where would the accumulated hash live on the EL side? The EIP says it comes through the engine api's ExecutionPayload and that it enters EL' stf, but I'm not sure where it'd live if not in the EL block header?",
+      "createdAt": "2026-04-23T12:22:54.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Also, it uses block.gas_limit, should that be parent_block.gas_limit?",
+      "createdAt": "2026-04-23T12:23:38.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think it has to be the current one that is committed in the bid, this would be a new field in the block itself, just like `slot_number`",
+      "createdAt": "2026-04-23T12:27:04.390000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "with the simple validation listed in the EIP",
+      "createdAt": "2026-04-23T12:27:14.461000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah, it's now the parent hash, yeah this works",
+      "createdAt": "2026-04-23T12:29:35.501000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Could we add it to the EL header alongside requests_hash, and drop the separate field from the SSZ ExecutionPayload?",
+      "createdAt": "2026-04-23T12:33:57.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't understand, what is the EL header? you mean the bid?",
+      "createdAt": "2026-04-23T12:37:49.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ELs take the ExecutionPayload and build their own block from it. This EL block has a header and a body. That's all ELs store. They don't store the ExecutionPayload, but their own EL block.",
+      "createdAt": "2026-04-23T12:38:55.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It just happens that the bid contains the same / mostly the same (would have to double-check) fields as the bid, but it's not the same.",
+      "createdAt": "2026-04-23T12:39:49.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "On the EL side it can be anywhere but \n1) IT has to be part of the blockhash\n2) It has to be sent in the EL p2p with the block.",
+      "createdAt": "2026-04-23T12:40:46.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Then let's put it into the EL block header, seems simplest.",
+      "createdAt": "2026-04-23T12:41:19.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and then how does it come in the envelope? outside of the payload, like with the requests?",
+      "createdAt": "2026-04-23T12:41:54.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah either similar to requests or put into the ExcutionPayload",
+      "createdAt": "2026-04-23T12:43:33.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but it is now in the ExecutionPayload",
+      "createdAt": "2026-04-23T12:45:00.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hmm, so we could take it out and place it next to the ExecutionPayload, or keep as-is? Seems both options are fine, tbh.\nAnd on the EL side, we make sure it enters the stf and is written into the block header.",
+      "createdAt": "2026-04-23T12:50:33.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's just, not everything in the ExecutionPayload necessarily enters the EL stf or is stored. E.g. the BAL is in the ExecutionPayload but not thrown into the STF, just it's hash via the ELBlock.header.bal_hash.",
+      "createdAt": "2026-04-23T12:55:11.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But this means the following line would need to change (remove the block_hash):\n\nSHA256(previous_partial_header_hash + **block_hash** + serialize(execution_requests))",
+      "createdAt": "2026-04-23T13:02:20.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Nah that line was from before, I moved the commitment out of the bid so that it can deal correctly with withdrawals and put it in the next block",
+      "createdAt": "2026-04-23T13:13:10.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I left the serialization algo loosely ill-defined hoping that we can do SSZ here: just add a container `PartialHeader` with the corresponding fields, and jut take the damned HTR",
+      "createdAt": "2026-04-23T13:13:45.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if we put it in the envelope the CL itself can deal with it",
+      "createdAt": "2026-04-23T13:14:01.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and the EL devs can probably be happy about it, although they'll need to verify it anyway in their own STF, so to avoid arguments here, I kept SHA for the time being",
+      "createdAt": "2026-04-23T13:14:34.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah I'd keep it non-ssz if possible",
+      "createdAt": "2026-04-23T13:19:37.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "E.g. add this for the EL\n```\nclass Header:\n    ...\n\n    # [New in Gloas:EIP8237]\n    partial_header_hash: Hash32\n```",
+      "createdAt": "2026-04-23T14:01:57.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And this as the helper:\n\n```\ndef compute_partial_header_hash(\n    previous_partial_header_hash: Hash32,\n    parent_block_hash: Hash32,\n    parent_requests_hash: Hash32,\n) -> Hash32:\n    return Hash32(sha256(\n        previous_partial_header_hash + parent_block_hash + parent_requests_hash\n    ).digest())\n```",
+      "createdAt": "2026-04-23T14:02:59.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i don't get why that new commitment and a bid cannot include withdrawals_hash of the curr slot withdrawals while at the same time a payload built atop of the same beacon block can 🤔",
+      "createdAt": "2026-04-23T14:27:49.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "withdrawals are not part of the blockhash",
+      "createdAt": "2026-04-23T14:42:56.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if they are then ePBS is broken 😄",
+      "createdAt": "2026-04-23T14:44:03.497000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "lol",
+      "createdAt": "2026-04-23T14:44:17.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we have withdrawals sent in the engine api newPayload, and them should have an RLP-list hash commitment in the EL block header which then is a part of block_hash",
+      "createdAt": "2026-04-23T14:47:34.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The block hash needs to be known at the time of the bid creation. \nThen there is a state transition function on the CL that can modify the expected withdrawals, and then those withdrawals are deducted in the CL.\nThen, and only then, the EL knows the withdrawals that needs to include in its payload",
+      "createdAt": "2026-04-23T14:49:00.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the withdrawals in the payload cannot be committed in the bid cause they are probably not known",
+      "createdAt": "2026-04-23T14:49:48.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ahhh nvm, we can solve all this anyway",
+      "createdAt": "2026-04-23T14:50:34.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but anyway the current EIP I think it's correct and takes care of withdrawals without grabbing the parent ones",
+      "createdAt": "2026-04-23T14:50:55.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the above is wrong anyway, the withdrawals can be known in advance because we send them in the attributes, it's fine to add them to the bid or the next block's body, either will work",
+      "createdAt": "2026-04-23T15:14:07.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if this doesn't get into Glamsterdam we have time to decide",
+      "createdAt": "2026-04-23T15:14:29.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@755590043632140352> \nhttps://github.com/potuz/EIPs/pull/3/changes\nThose are (mostly) the EL changes.",
+      "createdAt": "2026-04-23T16:18:57.453000+00:00",
+      "attachments": []
+    }
+  ]
+}

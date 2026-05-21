@@ -1,0 +1,598 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-04-17",
+  "messageCount": 72,
+  "sourceHash": "52aa30986fa4306217fe977ed19435f5b7a48afb9b6582f09c00c9587a6a5ebb",
+  "searchText": "I guess just minimal would be fine yeah we are having trouble with `builder_payment_after_missed_epochs`, getting a block root mismatch. Claude claims it's because the test expects the payload hash to be written to `state.latest_block_hash` before `process_slots` is called Reference tests for master will be available here in ~1 hour. https://github.com/ethereum/consensus-specs/actions/runs/24540424255 Would be great if you can also do mainnet. Cuz there was an issue with mainnet's proposer boost test using pre-gloas cutoff time that didn't happen in minimal but mainnet. Was fixed in https://github.com/ethereum/consensus-specs/pull/5095 Reference tests for everything (general/minimal/mainnet) will be available here in ~5 hours. https://github.com/ethereum/consensus-specs/actions/runs/24540447082 Let me look into this. Thanks for letting me know! Missed epochs test Reviewed your PR, <@755590043632140352> and lgtm, thanks! I had one small follow-up PR, updating engine_getPayloadV6 in the builder specs. cc <@592004585506340885> I mentioned it because you say that clients will have to compare against an expected hash but I guess this now should be compare the hashes of both the BAL included in the Payload and the virtual computed one Yeah the EL has it's own block header with the bal_hash inside. That's the one used for comparing and checking the BAL is correct. So, this only concerns EL clients. Thanks Toni! The PR: https://github.com/ethereum/consensus-specs/pull/5123 `engine_newPayloadV5` `engine_getPayloadV6` `engine_getPayloadBodiesByHashV2` `engine_getPayloadBodiesByRangeV2` `engine_forkchoiceUpdatedV4` `PayloadAttributesV4` https://github.com/ethereum/consensus-specs/pull/4892 & https://github.com/ethereum/consensus-specs/pull/4898 <@755590043632140352> we want these in? https://github.com/ethereum/execution-apis/pull/770 also this should probably make it in too? cc <@360491619402776577> <@755590043632140352> <@&1417820113981145228> would appreciate reviews on this PR: https://github.com/ethereum/consensus-specs/pull/4840 got a branch ? I'm gonna yeet epbs-devnet-1 Try to take a look at: https://notes.ethereum.org/@ethpandaops/glamsterdam-devnet-0 and see if you missing anything Both my PRs are airdrop-farming nits, they are fine if merged and fine if they aren't. If no one finds them useful to the readability of the spec they can be closed, I wouldn't mind. 770 should indeed be merged ASAP <@&1417820113981145228> need more reviews on this PR: https://github.com/ethereum/consensus-specs/pull/5067 Sorry to keep pinging everyone. Do we really want this? Yes. I now think it's important to clarify. If clients are expected to handle gloas genesis, we need to specify this. There will not be a release until this situation is resolved; to spec this or not. Why would clients need to ever handle genesis in Gloas? Devnets Kurtosis We can do that, no need to specify for devnets But even if we do, why not just leave things as is and accept that the first block is empty https://github.com/ethereum/consensus-specs/issues/5043#issuecomment-4152212725 None of this should be specified IMO it makes the actual Ethereum spec less readable for no reason > I actually don't think having 0x00 in the genesis state completely solves it. If the block at slot 1 has a bid with parent_hash = 0x00 as well, then we're back to the same situation where the genesis slot seems \"full\". I think this is fundamentally required because of this assert in bid processing. Anyway, I've already wasted more time than the issue warrants so I'm fine if people want to merge this or not cant we just generate the state so that that parentIsFull returns false? My preference is for not This is sort of what <@808969530608451584> suggested here: https://github.com/ethereum/consensus-specs/pull/5067#issuecomment-4193354606 But this is also confusing because the genesis block's parent is not full. I understand/agree with both sides of this argument. I think we need to give <@602753420033785856> time to respond. He might be able to convince you of its value or be convinced that it's not truly necessary. But it's clear to me that Sproul thinks it's important to spec this. hi, do we have a spec test that covers a scenario that there's a missed epoch gap of >= 2 epochs btw a full parent block and latest slot, the builder is paid having its payload included on chain? I think i found this bug in prysm (i haven't folloed the latest commit) but yet i was passing spec tests as of few days ago what you mean by \"builder is paid\", you mean charged? sorry i meant proposer is paid and builder is charged `test_builder_payment_after_missed_epochs` should cover that, it was added later but also it seems broken https://github.com/ethereum/consensus-specs/pull/5120 Hm great, i guess it wasn't there a few days ago. I didnt implement yet passing spec tests ``` elif parent_bid.value > 0: state.builder_pending_withdrawals.append( BuilderPendingWithdrawal( fee_recipient=parent_bid.fee_recipient, amount=parent_bid.value, builder_index=parent_bid.builder_index, ) ) ``` the spec was not correct few days ago You can't pass spectest with a good implementation That is, if you pass the tests the implementation must be buggy but there wasn't any spec test to cover this scenario (few days ago), at least the spec test was borken it seems i just want to make sure such test is added now and will be there later it was added in this [commit](https://github.com/ethereum/consensus-specs/pull/5094/changes/0923d8abaaafca007ecea16884fcc58f15666552) <@363800010518822915> I will generate the fixed test. I'll post it here in just a minute. And then this run will contain the full suite of tests on top of the latest master: https://github.com/jtraglia/consensus-specs/actions/runs/24578808301 Note, this does include the field swap change in the state. If you can confirm this works, I'll merge the PR with the fix. My preference is for not Merged the test fix & a few other things. Just started the testgen action. This includes everything that's expected to go into the release except [5067](https://github.com/ethereum/consensus-specs/pull/5067) which is still being debated by clients (see https://discord.com/channels/595666850260713488/1494740617769652225). Reference tests will be available here in <t:1776476400:R>: https://github.com/ethereum/consensus-specs/actions/runs/24585621680 I'm discussing some edge cases in private with <@592004585506340885> but also it occurs to me that there's a more general issue so I'd like to bring it up here. Tagging <@602753420033785856> and <@425572898787426305> We were just jointly reviewing live a PR on Prysm and found a subtle bug on the proposing code. The situation is like this. Our head is at slot `N` Full, and the chain advances on top of that block being full, but attesters did not like the payload, so we suffer a reorg to (`N`, empty). We handled this well in forkchoice and woud log such a reorg. However, we would send the wrong payload attributes and start preparing a payload on top of full. I am sure many here have already found many similar bugs. The essence is that forkchoice head says something, but the proposing code aims to build a different block. These kinds of bugs are not tested by forkchoice tests: those tests just check that our head is the right one. Here the problem is about a mismatch between head and the preparing block. How should we test and catch these bugs early on? these are a liveness risk on the chain. We could do some form of kurtosis scenario testing as discussed previously (I think <@199561711278227457> was also there). But the very specific combination pattern to trigger the above bug requires a majority of attesters voting for something incorrect in a way and then a missing block right at the exact moment. I feel that creating scenarios and actually implementing them in client images to run in Kurtosis quickly blows up in complexity. Is there any protocol that we could try to implement to test the proposing path? have there been discussions about this before recorded somewhere? my memory fails but I do remember discussing similar issues years ago, I think Gloas makes this situation much more delicate. yeah we have not implemented this yet, but I anticipate it being a pain. I think integration tests in clients would be one way to do it (you can create the precise timings and attestation patterns you speak of), but I don’t have a good cross-client solution I think we can aim to test scenarios that don't depend on timings at least But I honestly don't know how it's best to proceed I'm doing these with an \"evil\" branch of Prysm but haven't even started with Gloas and I'm overwhelmed just thinking on cases something fuzz-y could be good to generate cases beyond what we can think to codify I'm skeptical of fizzers for these kinds of things I have in mind which are forkchoice driven reorgs. Fuzzers are very good to test validity conditions. Thinking on scenarios is not really a problem. The main question I have is how to set them up. I want the actual client image to be in a situation like above, there's a reorg to (N-1, empty), it holds the Payload and it needs to propose, make sure it doesn't use the Payload of N-1 for prysm's gloas end to end test, i added an interceptor in between beacon node and validator client to mutate / delay/ drop messages that pass back and forth btw beacon node and validator client. The reason i added such is i dont want to enshrine evil node behavior into upstream code or add flag to do this. Interceptor allows me to check this into the main branch for test only purpose and still simulat the behavior i want. The interceptor can be used for caes like n payload is late, n+1 proposer built on ful anyway, n+1 attesters voted n, empty... etc we have rpc snooper that can sit between bn vc, and we can add any kinda manipulation to this snooper as well. https://github.com/ethpandaops/rpc-snooper would be happy to get some prs with use cases that you could find valuable I’m sure that way other clients could also use it, and we could create reproducible errors I can open issues with situations I'd like to test, but definitely not PRs 😂",
+  "excerpts": [
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess just minimal would be fine yeah",
+      "createdAt": "2026-04-17T00:00:13.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we are having trouble with `builder_payment_after_missed_epochs`, getting a block root mismatch. Claude claims it's because the test expects the payload hash to be written to `state.latest_block_hash` before `process_slots` is called",
+      "createdAt": "2026-04-17T00:01:07.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Reference tests for master will be available here in ~1 hour.\nhttps://github.com/ethereum/consensus-specs/actions/runs/24540424255",
+      "createdAt": "2026-04-17T00:02:26.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nc1234",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Would be great if you can also do mainnet. Cuz there was an issue with mainnet's proposer boost test using pre-gloas cutoff time that didn't happen in minimal but mainnet. Was fixed in https://github.com/ethereum/consensus-specs/pull/5095",
+      "createdAt": "2026-04-17T00:02:28.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Reference tests for everything (general/minimal/mainnet) will be available here in ~5 hours.\nhttps://github.com/ethereum/consensus-specs/actions/runs/24540447082",
+      "createdAt": "2026-04-17T00:03:23.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Let me look into this. Thanks for letting me know!",
+      "createdAt": "2026-04-17T00:05:12.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Missed epochs test",
+      "createdAt": "2026-04-17T00:17:24.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Reviewed your PR, <@755590043632140352> and lgtm, thanks!\nI had one small follow-up PR, updating engine_getPayloadV6 in the builder specs.\ncc <@592004585506340885>",
+      "createdAt": "2026-04-17T13:02:51.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I mentioned it because you say that clients will have to compare against an expected hash but I guess this now should be compare the hashes of both the BAL included in the Payload and the virtual computed one",
+      "createdAt": "2026-04-17T13:04:28.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah the EL has it's own block header with the bal_hash inside. That's the one used for comparing and checking the BAL is correct.\nSo, this only concerns EL clients.",
+      "createdAt": "2026-04-17T13:10:47.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks Toni! The PR: https://github.com/ethereum/consensus-specs/pull/5123",
+      "createdAt": "2026-04-17T13:26:50.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`engine_newPayloadV5`\n`engine_getPayloadV6`\n`engine_getPayloadBodiesByHashV2`\n`engine_getPayloadBodiesByRangeV2`\n`engine_forkchoiceUpdatedV4`\n`PayloadAttributesV4`",
+      "createdAt": "2026-04-17T13:30:31.915000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/pull/4892  & https://github.com/ethereum/consensus-specs/pull/4898 <@755590043632140352> we want these in?",
+      "createdAt": "2026-04-17T13:59:52.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/execution-apis/pull/770 also this should probably make it in too? cc <@360491619402776577> <@755590043632140352>",
+      "createdAt": "2026-04-17T14:03:04.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@&1417820113981145228> would appreciate reviews on this PR:\nhttps://github.com/ethereum/consensus-specs/pull/4840",
+      "createdAt": "2026-04-17T14:09:12.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "got a branch ?",
+      "createdAt": "2026-04-17T14:49:18.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm gonna yeet epbs-devnet-1",
+      "createdAt": "2026-04-17T14:58:13.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Try to take a look at: https://notes.ethereum.org/@ethpandaops/glamsterdam-devnet-0 and see if you missing anything",
+      "createdAt": "2026-04-17T15:14:35.524000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Both my PRs are airdrop-farming nits, they are fine if merged and fine if they aren't. If no one finds them useful to the readability of the spec they can be closed, I wouldn't mind. 770 should indeed be merged ASAP",
+      "createdAt": "2026-04-17T15:27:01.858000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@&1417820113981145228> need more reviews on this PR:\nhttps://github.com/ethereum/consensus-specs/pull/5067\nSorry to keep pinging everyone.",
+      "createdAt": "2026-04-17T16:14:54.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do we really want this?",
+      "createdAt": "2026-04-17T16:29:28.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yes. I now think it's important to clarify.",
+      "createdAt": "2026-04-17T16:35:17.423000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-04-17T16:35:19.591000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "b3056832726eabc328c5f3d8d39ec7124abc42d0da98f0ecb98d47592db130f6"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If clients are expected to handle gloas genesis, we need to specify this.",
+      "createdAt": "2026-04-17T16:35:55.117000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There will not be a release until this situation is resolved; to spec this or not.",
+      "createdAt": "2026-04-17T16:38:30.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why would clients need to ever handle genesis in Gloas?",
+      "createdAt": "2026-04-17T16:42:41.922000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Devnets",
+      "createdAt": "2026-04-17T16:42:50.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Kurtosis",
+      "createdAt": "2026-04-17T16:43:01.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We can do that, no need to specify for devnets",
+      "createdAt": "2026-04-17T16:43:06.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But even if we do, why not just leave things as is and accept that the first block is empty",
+      "createdAt": "2026-04-17T16:43:41.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/issues/5043#issuecomment-4152212725",
+      "createdAt": "2026-04-17T16:44:22.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "None of this should be specified IMO it makes the actual Ethereum spec less readable for no reason",
+      "createdAt": "2026-04-17T16:44:28.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> I actually don't think having 0x00 in the genesis state completely solves it. If the block at slot 1 has a bid with parent_hash = 0x00 as well, then we're back to the same situation where the genesis slot seems \"full\". I think this is fundamentally required because of this assert in bid processing.",
+      "createdAt": "2026-04-17T16:44:48.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Anyway, I've already wasted more time than the issue warrants so I'm fine if people want to merge this or not",
+      "createdAt": "2026-04-17T16:45:13.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cant we just generate the state so that that parentIsFull returns false?",
+      "createdAt": "2026-04-17T16:45:24.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My preference is for not",
+      "createdAt": "2026-04-17T16:45:34.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is sort of what <@808969530608451584> suggested here:\nhttps://github.com/ethereum/consensus-specs/pull/5067#issuecomment-4193354606",
+      "createdAt": "2026-04-17T16:46:23.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But this is also confusing because the genesis block's parent is not full.",
+      "createdAt": "2026-04-17T16:47:35.031000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I understand/agree with both sides of this argument. I think we need to give <@602753420033785856> time to respond. He might be able to convince you of its value or be convinced that it's not truly necessary.",
+      "createdAt": "2026-04-17T16:49:25.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But it's clear to me that Sproul thinks it's important to spec this.",
+      "createdAt": "2026-04-17T16:50:11.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hi, do we have a spec test that covers a scenario that there's a missed epoch gap of >= 2 epochs btw a full parent block and latest slot, the builder is paid having its payload included on chain? I think i found this bug in prysm (i haven't folloed the latest commit) but yet i was passing spec tests as of few days ago",
+      "createdAt": "2026-04-17T17:19:27.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what you mean by \"builder is paid\", you mean charged?",
+      "createdAt": "2026-04-17T17:22:16.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "sorry i meant proposer is paid and builder is charged",
+      "createdAt": "2026-04-17T17:22:41.896000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "`test_builder_payment_after_missed_epochs` should cover that, it was added later",
+      "createdAt": "2026-04-17T17:22:59.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but also it seems broken https://github.com/ethereum/consensus-specs/pull/5120",
+      "createdAt": "2026-04-17T17:23:20.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hm great, i guess it wasn't there a few days ago. I didnt implement yet passing spec tests\n```\n  elif parent_bid.value > 0:\n      state.builder_pending_withdrawals.append(\n          BuilderPendingWithdrawal(\n              fee_recipient=parent_bid.fee_recipient,\n              amount=parent_bid.value,\n              builder_index=parent_bid.builder_index,\n          )\n      )\n```",
+      "createdAt": "2026-04-17T17:23:47.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the spec was not correct few days ago",
+      "createdAt": "2026-04-17T17:24:15.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "You can't pass spectest with a good implementation",
+      "createdAt": "2026-04-17T17:24:39.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That is, if you pass the tests the implementation must be buggy",
+      "createdAt": "2026-04-17T17:24:53.720000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but there wasn't any spec test to cover this scenario (few days ago), at least the spec test was borken it seems",
+      "createdAt": "2026-04-17T17:25:32.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i just want to make sure such test is added now and will be there later",
+      "createdAt": "2026-04-17T17:25:42.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it was added in this [commit](https://github.com/ethereum/consensus-specs/pull/5094/changes/0923d8abaaafca007ecea16884fcc58f15666552)",
+      "createdAt": "2026-04-17T17:25:52.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@363800010518822915> I will generate the fixed test. I'll post it here in just a minute.",
+      "createdAt": "2026-04-17T17:38:17.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-04-17T17:43:23.796000+00:00",
+      "attachments": [
+        {
+          "type": "application/zip",
+          "origin_name": "reftests.zip",
+          "content": "431c9356e143cdd5db92cea8dcca367b13bb4ebdccf338b0b67f49a21b5b18d0"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And then this run will contain the full suite of tests on top of the latest master:\nhttps://github.com/jtraglia/consensus-specs/actions/runs/24578808301",
+      "createdAt": "2026-04-17T17:45:21.348000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Note, this does include the field swap change in the state.",
+      "createdAt": "2026-04-17T17:46:11.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If you can confirm this works, I'll merge the PR with the fix.",
+      "createdAt": "2026-04-17T17:46:47.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "brechy",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "My preference is for not",
+      "createdAt": "2026-04-17T18:19:23.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Merged the test fix & a few other things. Just started the testgen action. This includes everything that's expected to go into the release except [5067](https://github.com/ethereum/consensus-specs/pull/5067) which is still being debated by clients (see https://discord.com/channels/595666850260713488/1494740617769652225). Reference tests will be available here in <t:1776476400:R>:\nhttps://github.com/ethereum/consensus-specs/actions/runs/24585621680",
+      "createdAt": "2026-04-17T20:40:50.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm discussing some edge cases in private with <@592004585506340885> but also it occurs to me that there's a more general issue so I'd like to bring it up here. Tagging <@602753420033785856> and <@425572898787426305>",
+      "createdAt": "2026-04-17T20:46:29.103000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We were just jointly reviewing live a PR on Prysm and found a subtle bug on the proposing code. The situation is like this. Our head is at slot `N` Full, and the chain advances on top of that block being full, but attesters did not like the payload, so we suffer a reorg to  (`N`,  empty). We handled this well in forkchoice and woud log such a reorg. However, we would send the wrong payload attributes and start preparing a payload on top of full. \n\nI am sure many here have already found many similar bugs. The essence is that forkchoice head says something, but the proposing code aims to build a different block. These kinds of bugs are not tested by forkchoice tests: those tests just check that our head is the right one. Here the problem is about a mismatch between head and the preparing block. How should we test and catch these bugs early on? these are a liveness risk on the chain. \n\nWe could do some form of kurtosis scenario testing as discussed previously (I think <@199561711278227457> was also there). But the very specific combination pattern to trigger the above bug requires a majority of attesters voting for something incorrect in a way and then a missing block right at the exact moment. I feel that creating scenarios and actually implementing them in client images to run in Kurtosis quickly blows up in complexity. \n\nIs there any protocol that we could try to implement to test the proposing path? have there been discussions about this before recorded somewhere? my memory fails but I do remember discussing similar issues years ago, I think Gloas makes this situation much more delicate.",
+      "createdAt": "2026-04-17T20:54:17.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah we have not implemented this yet, but I anticipate it being a pain. I think integration tests in clients would be one way to do it (you can create the precise timings and attestation patterns you speak of), but I don’t have a good cross-client solution",
+      "createdAt": "2026-04-17T21:49:44.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think we can aim to test scenarios that don't depend on timings at least",
+      "createdAt": "2026-04-17T21:50:38.856000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I honestly don't know how it's best to proceed",
+      "createdAt": "2026-04-17T21:50:59.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm doing these with an \"evil\" branch of Prysm but haven't even started with Gloas and I'm overwhelmed just thinking on cases",
+      "createdAt": "2026-04-17T21:51:44.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "sproul",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "something fuzz-y could be good to generate cases beyond what we can think to codify",
+      "createdAt": "2026-04-17T21:53:29.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm skeptical of fizzers for these kinds of things I have in mind which are forkchoice driven reorgs. Fuzzers are very good to test validity conditions. Thinking on scenarios is not really a problem. The main question I have is how to set them up. I want the actual client image to be in a situation like above, there's a reorg to (N-1, empty), it holds the Payload and it needs to propose, make sure it doesn't use the Payload of N-1",
+      "createdAt": "2026-04-17T21:56:37.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "for prysm's gloas end to end test, i added an interceptor in between beacon node and validator client to mutate / delay/ drop messages that pass back and forth btw beacon node and validator client. The reason i added such is i dont want to enshrine evil node behavior into upstream code or add flag to do this. Interceptor allows me to check this into the main branch for test only purpose and still simulat the behavior i want. The interceptor can be used for caes like n payload is late, n+1 proposer built on ful anyway, n+1 attesters voted n, empty... etc",
+      "createdAt": "2026-04-17T22:02:54.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have rpc snooper that can sit between bn vc, and we can add any kinda manipulation to this snooper as well.",
+      "createdAt": "2026-04-17T22:29:26.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethpandaops/rpc-snooper",
+      "createdAt": "2026-04-17T22:30:26.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would be happy to get some prs with use cases that you could find valuable I’m sure that way other clients could also use it, and we could create reproducible errors",
+      "createdAt": "2026-04-17T22:31:23.279000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I can open issues with situations I'd like to test, but definitely not PRs 😂",
+      "createdAt": "2026-04-17T23:31:03.738000+00:00",
+      "attachments": []
+    }
+  ]
+}

@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "channel": "cell-level-deltas",
+  "date": "2026-04-28",
+  "messageCount": 26,
+  "sourceHash": "8827331d04977fce1f99da1969ff93d837f2dcb7f9976657ff0ede355fa1702f",
+  "searchText": "I've been digging into the blob-devnet-0 metrics and the most confounding thing to me is that for Prysm supernodes, bandwidth usage is way higher when partial messages are enabled than when it is not: This is for bytes sent out. Even though we've already made the fix to only send the header once per peer per topic. But that's not the case for lighthouse. This seems correct: I'll dig into what's going in. Something's wrong on Prysm in this case. <@1000001410538151996> I assume you only send the header once per peer per groupId/block ? Hmm, this dosen't look right too. Prysm super nodes when partial=false consume way way less bandwidth than LH super nodes with partial=false. <@106441459183423488> Is there a way to query Gossipsub to see whether a given peer supports the partial message extension or get a list of partial message peers for a given topic ? note that `partial` does not denothe whether the node is in partial node, but just whether the actual traffic is partial or full currently, all nodes we host support partial messages yes \"win the race\" as per this metric (https://github.com/ethereum/beacon-metrics/pull/21/changes#diff-440458e6e1041f20e92ba447736eb7ec38102c8cffbd5b01583973e730c804b0R67): \"How often the partial message first completed the column.\" \"we also do not survive only because of those nodes\": If there was a serious issue with partials, this metric would show that full columns would finish the columns much more often - implying that data availability checking would not complete anymore without the remaining full message nodes Ah, right. It's the actual partial cells traffic a node is pushing out vs full columns a node is pushing out (even though it support partial messages , it has to send full messages to nodes that don't support it) <@1000001410538151996> \"Ok, the remaining traffic seems to only related to the non-partial-messages nodes running outside of the network. \" Out of curiosity, How did you determine this ? Does rust-libp2p have a way for you to lookup if a given peer support partial messages or not ? I looked at rust-libp2p's log, and got the peer ids we are sending full messages to then, I used Dora to check if these nodes are known to us and lighthouses /debug/peers endpoint to get metadata such as the versions used. the nodes use some old lighthouse version <@1000001410538151996> Where can you lookup peerIDs on Dora ? https://dora.blob-devnet-0.ethpandaops.io/clients/consensus right now it might be broken because it is showing only one node 🤔 cc <@412614104222531604> <@106441459183423488> Is there a way we can lookup if a given peer supports partial messages for a given topic in go-libp2p-pubsub ? I wanna build some instrumentation around what peers in our mesh for a given topic request/support partial messages vs full messages. Otherwise, I can try and PR this. Looks like this (does this mesh peer support partial messages for a given topic ?) should be in go-libp2p-pubsub rather than the app layer. its working now <@106441459183423488> <@833706406699073536> Yeah, the other problem worth discussing is that given how scoring for partial peers works in (go-libp2p-pubsub + prysm), a peer that sends only one cell gets the same scoring bump for the \"MeshMessageDeliveries\" and the \"FirstMessageDeliveries\" components that a full message peer gets when it delievers a full message. This means that a partial message capable peer that sends only one cell at a time can eventually score much higher in gossipsub than a full message peer and it's easy for the mesh to be overtaken by partial message peers only. What makes this worse is that a partial message capable peer that sends any cell at all always gets credit for \"FirstMessageDeliveries\" even if we have seen that cell already because cells are validated and peer feedback is given asynchronously in a go-routine in Prysm (see partial.go). There is a random element in mesh membership where we graft random peers into the mesh irrespective of their score and this can help full message peers but (oppurtunistic grafting + pruning based on scores) means we will eventually start filling up the mesh with only partial message capable peers. Does that make sense ? I'd love to discuss solutions to this in our WG call. In the meantime, I'm gonna get instrumentatio (logging/metrics) in place to prove this and think about what changes we need in scoring to prevent this. <@1000001410538151996> Can you point me to the lighthouse equivalent of the \"DA Waited Time\" metric I have in my dashboard? `beacon_block_delay_available_slot_start` ``` // The time the block became available after the start of the slot. Available here means // that all the blobs have arrived and the block has been verified by the execution layer. ``` <@1425510242749251606> have you seen the \"Average mesh size per consensus_client\" chart? That gives you what you want I think. <@1425510242749251606> , I don't think this fix works: https://github.com/OffchainLabs/prysm/commit/e28374e26f38439c69c32a27fdf22681045f6efe. The `DataColumnSubnetTopicFormat` has formatting strings inside (\"%d\", \"%x\"). That won't match your strings.Contains. You probably meant: `strings.Contains(topic, GossipDataColumnSidecarMessage)`",
+  "excerpts": [
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I've been digging into the blob-devnet-0 metrics and the most confounding thing to me is that for Prysm supernodes, bandwidth usage is way higher when partial messages are enabled than when it is not:",
+      "createdAt": "2026-04-28T05:54:19.378000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "e3ba15a11fcd51a1d5827438a1a1c18d07e3fb5955b7faab87e741db8987bc86"
+        }
+      ]
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "This is for bytes sent out. Even though we've already made the fix to only send the header once per peer per topic.",
+      "createdAt": "2026-04-28T05:55:43.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "But that's not the case for lighthouse. This seems correct:",
+      "createdAt": "2026-04-28T06:01:23.735000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "c3431e6f0201fa7f0d26f71a5704c7bdd723a9b094edc97ffa66292c9d397391"
+        }
+      ]
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I'll dig into what's going in. Something's wrong on Prysm in this case.",
+      "createdAt": "2026-04-28T06:01:57.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1000001410538151996> I assume you only send the header once per peer per groupId/block ?",
+      "createdAt": "2026-04-28T06:02:51.079000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Hmm, this dosen't look right too. Prysm super nodes when partial=false consume way way less bandwidth than LH super nodes with partial=false.",
+      "createdAt": "2026-04-28T06:26:09.083000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "6094b7e123bd38fe7247017b951733645b8103e2d504c714fd416c1989a1b033"
+        }
+      ]
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@106441459183423488> Is there a way to query Gossipsub to see whether a given peer supports the partial message extension or get a list of partial message peers for a given topic ?",
+      "createdAt": "2026-04-28T07:00:38.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "note that `partial` does not denothe whether the node is in partial node, but just whether the actual traffic is partial or full",
+      "createdAt": "2026-04-28T07:13:56.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "currently, all nodes we host support partial messages",
+      "createdAt": "2026-04-28T07:14:13.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2026-04-28T07:14:28.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "\"win the race\" as per this metric (https://github.com/ethereum/beacon-metrics/pull/21/changes#diff-440458e6e1041f20e92ba447736eb7ec38102c8cffbd5b01583973e730c804b0R67): \"How often the partial message first completed the column.\"",
+      "createdAt": "2026-04-28T07:18:05.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "\"we also do not survive only because of those nodes\": If there was a serious issue with partials, this metric would show that full columns would finish the columns much more often - implying that data availability checking would not complete anymore without the remaining full message nodes",
+      "createdAt": "2026-04-28T07:28:33.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Ah, right. It's the actual partial cells traffic a node is pushing out vs full columns a node is pushing out (even though it support partial messages , it has to send full messages to nodes that don't support it)",
+      "createdAt": "2026-04-28T08:10:08.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1000001410538151996> \n\n\"Ok, the remaining traffic seems to only related to the non-partial-messages nodes running outside of the network. \"\n\nOut of curiosity, How did you determine this ? Does rust-libp2p have a way for you to lookup if a given peer support partial messages or not ?",
+      "createdAt": "2026-04-28T08:11:37.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "I looked at rust-libp2p's log, and got the peer ids we are sending full messages to\n\nthen, I used Dora to check if these nodes are known to us and lighthouses /debug/peers endpoint to get metadata such as the versions used. the nodes use some old lighthouse version",
+      "createdAt": "2026-04-28T08:42:39.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1000001410538151996> Where can you lookup peerIDs on Dora ?",
+      "createdAt": "2026-04-28T08:52:56.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "https://dora.blob-devnet-0.ethpandaops.io/clients/consensus\n\nright now it might be broken because it is showing only one node 🤔 cc  <@412614104222531604>",
+      "createdAt": "2026-04-28T08:55:29.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@106441459183423488> Is there a way we can lookup if a given peer supports partial messages for a given topic in go-libp2p-pubsub ? I wanna build some instrumentation around  what peers in our mesh for a given topic request/support partial messages vs full messages.",
+      "createdAt": "2026-04-28T11:27:14.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Otherwise, I can try and PR this. Looks like this (does this mesh peer support partial messages for a given topic ?) should be in go-libp2p-pubsub rather than the app layer.",
+      "createdAt": "2026-04-28T11:28:15.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "its working now",
+      "createdAt": "2026-04-28T12:19:29.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@106441459183423488> <@833706406699073536> Yeah, the other problem worth discussing is that given how scoring for partial peers works in (go-libp2p-pubsub + prysm), a peer that sends only one cell gets the same scoring bump for the \"MeshMessageDeliveries\" and the \"FirstMessageDeliveries\" components that a full message peer gets when it delievers a full message.  This means that a partial message capable peer that sends only one cell at a time can eventually score much higher in gossipsub than a full message peer and it's easy for the mesh to be overtaken by partial message peers only. What makes this worse is that a partial message capable peer that sends any cell at all always gets credit for \"FirstMessageDeliveries\" even if we have seen that cell already because cells are validated and peer feedback is given asynchronously in a go-routine in Prysm (see partial.go).\n\nThere is a random element in mesh membership where we graft random peers into the mesh irrespective of their score and this can help full message peers but (oppurtunistic grafting + pruning based on scores) means we will eventually start filling up the mesh with only partial message capable peers.",
+      "createdAt": "2026-04-28T14:56:37.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "aarshshahoffchain",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "Does that make sense ? I'd love to discuss solutions to this in our WG call. In the meantime, I'm gonna get instrumentatio (logging/metrics)  in place to prove this and think about what changes we need in scoring to prevent this.",
+      "createdAt": "2026-04-28T14:58:33.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marcopolo__",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1000001410538151996> Can you point me to the lighthouse equivalent of the \"DA Waited Time\" metric I have in my dashboard?",
+      "createdAt": "2026-04-28T17:47:14.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "danielknopik",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "`beacon_block_delay_available_slot_start`\n```\n        // The time the block became available after the start of the slot. Available here means\n        // that all the blobs have arrived and the block has been verified by the execution layer.\n```",
+      "createdAt": "2026-04-28T18:59:14.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marcopolo__",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1425510242749251606> have you seen the \"Average mesh size per consensus_client\" chart? That gives you what you want I think.",
+      "createdAt": "2026-04-28T21:01:18.766000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marcopolo__",
+      "category": "Consensus Layer",
+      "parent": "",
+      "content": "<@1425510242749251606> , I don't think this fix works: https://github.com/OffchainLabs/prysm/commit/e28374e26f38439c69c32a27fdf22681045f6efe. The `DataColumnSubnetTopicFormat` has formatting strings inside (\"%d\", \"%x\"). That won't match your strings.Contains.\n\nYou probably meant: `strings.Contains(topic, GossipDataColumnSidecarMessage)`",
+      "createdAt": "2026-04-28T21:05:09.278000+00:00",
+      "attachments": []
+    }
+  ]
+}

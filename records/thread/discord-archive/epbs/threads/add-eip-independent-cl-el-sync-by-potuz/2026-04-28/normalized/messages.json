@@ -1,0 +1,898 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/Add EIP_ Independent CL_EL Sync by potuz...",
+  "date": "2026-04-28",
+  "messageCount": 111,
+  "sourceHash": "4cadb05e8d8c484f4854fff01d05ad82afa03fa5714fcf3fa0d7b8120f4b3b91",
+  "searchText": "CFIing an EIP on Svalbard is that fast because there is always a daylight? Can we have all the inputs to `engine_newPayload` as public inputs? I believe that if we add anything to that call in the future the guest program would need to be changed as well as if we were having `NewPayloadRequest` root. The only difference is that each time we extend a list of inputs to the `newPayload` we'd have to extend the guest program API call to incorporate a new input We can but I think we still need to add beacon block root and blob versioned hashes to the accumulator / partial header as I suspect without them we would have a binding gap for the beacon block roots used to populate the system contract and the blob kzg commitments? One could argue that if we have them as part of the accumulator and the CL checks accumulator consistency then what’s the purpose of the fields in engine API? I described the partial header commitment as enshrining the engine API into the core protocol. Current EngineAPI consistency checks are local against a single block. Accumulator consistency check is global consistency across all ancestors. If we want to introduce a new field to the engineAPI the I believe we would also need to add it to the accumulator for the ancestry consistency checks. Otherwise we have the same problem we’re trying to fix now? Thinking out loud here In this model you can consider the engineAPI consistency check as being moved from the EL to the CL and also using an accumulator for ancestry consistency If it's a new field to ExecutionPayload or envelope or bid then it shouldn't be added retrospectively? I'm not sure if I fully understand the question but I think any new field added to engineAPI would be added to the partial header hash AT the fork boundary the field is added. yes, this is my understanding What are your thoughts regarding: - adding parent beacon root and blob kzg commitments to the partial header - redundancy of engine API fields > adding parent beacon root and blob kzg commitments to the partial header I think we should add them, like all other fields that must be checked by both layers > redundancy of engine API fields What redundancy? Like, if EL can parse blob kzg commitments it doesn't need to get them from the Engine API anymore? yes I suspect we can pass the execution payload and nothing else in the engineAPI I need to think into it sure thing. Let me know your thoughts when you've had a moment to consider right now i would say that if blob kzg commitments and parent beacon root on CL doesn't match the same values on EL side then the new accumulator value would be different between the layers. Thus, seems like we don't need to pass these values Although, `parent_beacon_block_root` is a part of EL block and not included into `ExecutionPayload` so we have to pass it alongside I was thinking that we would include parent_beacon_block_root in the partial header hash and then I believe there is an EL system transaction that sets the beacon block root included in every block so we would assert consistency of this parent beacon block root value with the partial header. note: I need to look into code to verify this but I believe this is how it would work. If we include `expectedBlobVersionedHashes` and `executionRequests` into a new commitment/accumulator then they may not be passed to the EL, while `parentBeaconBlockRoot` will have to be anyway. There is no system contract where that root is coming from, there is a system call which takes that root and inserts it into a system contract storage to make it usable by dapps. Could you elaborate on why `parentBeaconBlockRoot` has to be treated differently? because it's effectively a part of EL block while it's not a part of `ExecutionPayload`, EL will take this value from the call params and incorporate it into a block it unmarshalls from the `newPayload` param set but by adding it the partial header commitment you essentially commit to it making it indirectly part of the `ExecutionPayload`? but it's gonna be a commitment and not the value itself, EL needs the value for the block execution The actual value itself is part of the system call / system transaction in the EL block right? It must be coming from somewhere because the EL as it stands can already sync the finalized prefix without any info from the CL. EL gets it from p2p during the range sync as it's a part of EL block, with newPayload this value is coming from the param set I don't follow. I think even with newPayload it is still part of the EL block (its just encoded in a system transaction that the CL cant read). Before I say too much on this front I will interrogate the specs and an EL client to confirm. I put up a first draft for EELS here: https://github.com/ethereum/execution-specs/pull/2770 As stated above we are missing parent beacon block root and the blob commitments in the partial header. Not sure I follow, there are no blob commitments in today's EL block header except the blob gas things. It is part of the EL block but the EL cannot assemble that block with `ExecutionPayload` only, it needs `parent_beacon_block_root` as well Ahhh I see, now I understand. thanks for clarifying in absence of the blob commitments in the accumulator how do you confirm type3 blob transactions that are consistent with the CL are included in the blocks? blob commitments are passed to EL aside to each payload for verification, if we want decouple that verification we would need to include them in the new commitment hmm I see, so same applies to parent_beacon_block_root, which we would also want in the partial header then? I believe so, yes. I suspect we can replace the parent_hash which is the EL parent hash, with the parent_beacon_block_root. I don't think they cover the same thing though Possibly. Could you elaborate? In my mental model, one chains the EL blockchain, the other chains the CL blockchain Let me think this through for a sec I think the CL blockchain already wraps the EL blockchain so you get indirect chaining Do you think it makes sense to keep `ExecutionPayload` and `parent_beacon_block_root` decoupled or should we add `parent_beacon_block_root` to the `ExecutionPayload`? under \"100% dishonest\" bid.block_hash can diverge from the actual EL block_hash. With only parent_beacon_block_root in the accumulator, you've committed to the CL claim but not to the EL actual, so a builder lie about bid.block_hash (claim points at H', EL imported P' with hash H') can be there with the accumulator still matching on the CL side. parent_hash in the accumulator forces bid.parent_block_hash == EL's actual block_hash. `parent_beacon_block_root` isn't in `ExecutionPayload` on CL side, this is the reason behind this field coming aside Isn't that already captured in the pre-existing block_hash validity + chaining semantics? parent_hash is already part of the EL blocks and I'd assume that chain is asserted. do you know the reason it's not currently inlcuded on the CL side? I suppose it would be simple to add. it's in the `BeaconBlock` structure already, including into `ExecutionPayload` on CL side will be unnecessary duplication makes sense so IIUC, if `parent_beacon_root` won't be part of `ExecutionPayload`, looks to me we can't use `ExecutionPayload` as the sole struct for the guest program input, right? i.e. we should keep using NewPayloadRequest Why is this! As I said above this beacon block root is committed already in the hash chain correct `ExecutionPayload` is missing the parent beacon block root. If the CL only sees the EL parent block hash in the accumulator how does it know which parent beacon root was used in the EL block? which check in the current CL block processing are you referring to? The parent beacon block root is passed via engineAPI to the EL. The EL uses this to populate the system contract that stores beacon block roots. yes, but where are we making the verification you want to add now? we do the verification in the EL on the engine processing step before transaction execution. ok, so the statement is that the verification on the call to `verify_and_notify_new_payload` should be contained in the accumulator because the EL requires this check is that the statement? I think the argument is exactly the same as all other fields we are using. We need to assert consistency between fields which are used across both the EL and CL. yeah, but the fields I added are the ones that are checked against the CL STF and this one is in the EL STF if I understood you correctly I think your interpretation is reasonable. The way I frame it is we need a means of asserting consistency of values used across both EL and CL. asking EL devs here how do they verify this when syncing over devp2p Hence why i proposed we also need the blob commitments in the binding accumulator I believe currently the EL only asserts consistency on the parent beacon block root for blocks which are passed via engineAPI. For any block before that (i.e. finalized blocks) there is no assertion. I think currently the CL does the checks for finalized prefix chain. I don't think they do. For any finalized block they currently assume the parent beacon block root is correct. I.e. the finalzied hash is a trust anchor they can sync to and based on a matching hash they infer that all inputs to all finalized blocks are correct. I do not think this can be correct, the EL does not have any trust assumption on finalization for validity I am being told that parent beacon block root is part of the blockhash correct But how does that prove its consistent with the beacon roots? and the beacon block root also commits to the hash as well so I think they have to be consistent why? The CL never \"opens\" the block hash to see what beacon root it contains. the parent hash is contained in the blockroot and the block root is contained in the next blockhash so this cross dependency I believe makes it already self verified I don't think that to be the case why would we pass it via engineAPI if that were true? Let me consider your logic as maybe there is something there I hand't considered hmmm I still dont see it. If the CL never opens the block hash it has no idea what beacon root was used in the EL block. My interpretation is that the EL uses the finalized block hash as a trust anchor - I may be mistaken but I believe this is mentioned in the specs somewhere. I think historically this was fine because the CL would download payloads and do the assertions itself (at least thats what lighthouse does) but once you remove payload sync and don't do the checks on the CL side you need the binding commitment to capture this. but you don't do the block_hash validation, do you? If you do then it would work, otherwise, you have to include `parent_beacon_block_root` into a new commitment `parent_hash` includes the value of the new commitment to the content of the parent EL block. this is important because it forms a chain of new commitments -- accumulating it. but it doesn't give us anything except that chaining property. we have to check each EL block content separately and cannot rely on the `parent_hash` being a part of a new commitment Block 100, slot 100: parent hash, timestamp, parent block root, etc... is valid and both nodes are in sync. slot 101, the CL block is obtained and we do not get the EL block for slot 101. The CL state transition verifies what it already knows, the parent hash, etc... block 101 is imported on the EL, the EL executes it and computes the accumulator for the parent hash, etc... the parent beacon block is not passed to the EL since this block is synced over devp2p, but the value used is committed in the block hash. slot 102 the CL sync the block without having received the payload and verifies the accumulator, using the hash of 101 that is committed in the bid as \"parent hash\". Block 102 comes over gossip for the EL, it sends it this time to the EL and it verifies that the accumulator matches. At this point the EL ",
+  "excerpts": [
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "CFIing an EIP on Svalbard is that fast because there is always a daylight?",
+      "createdAt": "2026-04-28T03:20:09.496000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Can we have all the inputs to `engine_newPayload` as public inputs? I believe that if we add anything to that call in the future the guest program would need to be changed as well as if we were having `NewPayloadRequest` root. The only difference is that each time we extend a list of inputs to the `newPayload` we'd have to extend the guest program API call to incorporate a new input",
+      "createdAt": "2026-04-28T03:29:02.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We can but I think we still need to add beacon block root and blob versioned hashes to the accumulator / partial header as I suspect without them we would have a binding gap for the beacon block roots used to populate the system contract and the blob kzg commitments?",
+      "createdAt": "2026-04-28T08:16:57.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "One could argue that if we have them as part of the accumulator and the CL checks accumulator consistency then what’s the purpose of the fields in engine API?",
+      "createdAt": "2026-04-28T08:21:58.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I described the partial header commitment as enshrining the engine API into the core protocol. Current EngineAPI consistency checks are local against a single block. Accumulator consistency check is global consistency across all ancestors.",
+      "createdAt": "2026-04-28T08:24:42.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If we want to introduce a new field to the engineAPI the I believe we would also need to add it to the accumulator for the ancestry consistency checks. Otherwise we have the same problem we’re trying to fix now?",
+      "createdAt": "2026-04-28T08:25:51.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Thinking out loud here",
+      "createdAt": "2026-04-28T08:26:00.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In this model you can consider the engineAPI consistency check as being moved from the EL to the CL and also using an accumulator for ancestry consistency",
+      "createdAt": "2026-04-28T09:01:50.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If it's a new field to ExecutionPayload or envelope or bid then it shouldn't be added retrospectively?",
+      "createdAt": "2026-04-28T10:31:51.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm not sure if I fully understand the question but I think any new field added to engineAPI would be added to the partial header hash AT the fork boundary the field is added.",
+      "createdAt": "2026-04-28T10:34:08.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, this is my understanding",
+      "createdAt": "2026-04-28T10:34:27.369000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "What are your thoughts regarding:\n- adding parent beacon root and blob kzg commitments to the partial header\n- redundancy of engine API fields",
+      "createdAt": "2026-04-28T10:35:41.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> adding parent beacon root and blob kzg commitments to the partial header\n\nI think we should add them, like all other fields that must be checked by both layers",
+      "createdAt": "2026-04-28T10:37:47.637000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> redundancy of engine API fields\nWhat redundancy?",
+      "createdAt": "2026-04-28T10:38:09.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Like, if EL can parse blob kzg commitments it doesn't need to get them from the Engine API anymore?",
+      "createdAt": "2026-04-28T10:38:39.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes",
+      "createdAt": "2026-04-28T10:38:45.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I suspect we can pass the execution payload and nothing else in the engineAPI",
+      "createdAt": "2026-04-28T10:39:00.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I need to think into it",
+      "createdAt": "2026-04-28T10:39:51.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "sure thing. Let me know your thoughts when you've had a moment to consider",
+      "createdAt": "2026-04-28T10:40:13.809000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "right now i would say that if blob kzg commitments and parent beacon root on CL doesn't match the same values on EL side then the new accumulator value would be different between the layers. Thus, seems like we don't need to pass these values",
+      "createdAt": "2026-04-28T10:41:35.562000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Although, `parent_beacon_block_root` is a part of EL block and not included into `ExecutionPayload` so we have to pass it alongside",
+      "createdAt": "2026-04-28T10:42:38.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was thinking that we would include parent_beacon_block_root in the partial header hash and then I believe there is an EL system transaction that sets the beacon block root included in every block so we would assert consistency of this parent beacon block root value with the partial header.",
+      "createdAt": "2026-04-28T10:44:02.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "note: I need to look into code to verify this but I believe this is how it would work.",
+      "createdAt": "2026-04-28T10:45:07.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If we include `expectedBlobVersionedHashes` and `executionRequests` into a new commitment/accumulator then they may not be passed to the EL, while `parentBeaconBlockRoot` will have to be anyway. There is no system contract where that root is coming from, there is a system call which takes that root and inserts it into a system contract storage to make it usable by dapps.",
+      "createdAt": "2026-04-28T11:00:13.656000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Could you elaborate on why `parentBeaconBlockRoot` has to be treated differently?",
+      "createdAt": "2026-04-28T11:10:41.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "because it's effectively a part of EL block while it's not a part of `ExecutionPayload`, EL will take this value from the call params and incorporate it into a block it unmarshalls from the `newPayload` param set",
+      "createdAt": "2026-04-28T11:12:10.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but by adding it the partial header commitment you essentially commit to it making it indirectly part of the `ExecutionPayload`?",
+      "createdAt": "2026-04-28T11:13:00.722000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but it's gonna be a commitment and not the value itself, EL needs the value for the block execution",
+      "createdAt": "2026-04-28T11:13:28.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The actual value itself is part of the system call / system transaction in the EL block right? It must be coming from somewhere because the EL as it stands can already sync the finalized prefix without any info from the CL.",
+      "createdAt": "2026-04-28T11:14:20.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "EL gets it from p2p during the range sync as it's a part of EL block, with newPayload this value is coming from the param set",
+      "createdAt": "2026-04-28T11:27:22.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't follow. I think even with newPayload it is still part of the EL block (its just encoded in a system transaction that the CL cant read).",
+      "createdAt": "2026-04-28T11:44:39.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Before I say too much on this front I will interrogate the specs and an EL client to confirm.",
+      "createdAt": "2026-04-28T11:45:21.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I put up a first draft for EELS here:\nhttps://github.com/ethereum/execution-specs/pull/2770",
+      "createdAt": "2026-04-28T11:45:28.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "As stated above we are missing parent beacon block root and the blob commitments in the partial header.",
+      "createdAt": "2026-04-28T11:46:23.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Not sure I follow, there are no blob commitments in today's EL block header except the blob gas things.",
+      "createdAt": "2026-04-28T12:08:51.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It is part of the EL block but the EL cannot assemble that block with `ExecutionPayload` only, it needs `parent_beacon_block_root` as well",
+      "createdAt": "2026-04-28T12:09:25.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ahhh I see, now I understand. thanks for clarifying",
+      "createdAt": "2026-04-28T12:10:15.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "in absence of the blob commitments in the accumulator how do you confirm type3 blob transactions that are consistent with the CL are included in the blocks?",
+      "createdAt": "2026-04-28T12:11:02.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "blob commitments are passed to EL aside to each payload for verification, if we want decouple that verification we would need to include them in the new commitment",
+      "createdAt": "2026-04-28T12:11:27.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm I see, so same applies to parent_beacon_block_root, which we would also want in the partial header then?",
+      "createdAt": "2026-04-28T12:12:22.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I believe so, yes. I suspect we can replace the parent_hash which is the EL parent hash, with the parent_beacon_block_root.",
+      "createdAt": "2026-04-28T12:13:23.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think they cover the same thing though",
+      "createdAt": "2026-04-28T12:16:29.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Possibly. Could you elaborate?",
+      "createdAt": "2026-04-28T12:17:03.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In my mental model, one chains the EL blockchain, the other chains the CL blockchain",
+      "createdAt": "2026-04-28T12:17:09.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Let me think this through for a sec",
+      "createdAt": "2026-04-28T12:17:22.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think the CL blockchain already wraps the EL blockchain so you get indirect chaining",
+      "createdAt": "2026-04-28T12:17:35.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Do you think it makes sense to keep `ExecutionPayload` and `parent_beacon_block_root` decoupled or should we add `parent_beacon_block_root` to the `ExecutionPayload`?",
+      "createdAt": "2026-04-28T12:18:46.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "under \"100% dishonest\" bid.block_hash can diverge from the actual EL block_hash. With only parent_beacon_block_root in the accumulator, you've committed to the CL claim but not to the EL actual, so a builder lie about bid.block_hash (claim points at H', EL imported P' with hash H') can be there with the accumulator still matching on the CL side. parent_hash in the accumulator forces bid.parent_block_hash == EL's actual block_hash.",
+      "createdAt": "2026-04-28T12:19:25.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`parent_beacon_block_root` isn't in `ExecutionPayload` on CL side, this is the reason behind this field coming aside",
+      "createdAt": "2026-04-28T12:19:29.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Isn't that already captured in the pre-existing block_hash validity + chaining semantics? parent_hash is already part of the EL blocks and I'd assume that chain is asserted.",
+      "createdAt": "2026-04-28T12:21:28.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "do you know the reason it's not currently inlcuded on the CL side? I suppose it would be simple to add.",
+      "createdAt": "2026-04-28T12:22:03.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's in the `BeaconBlock` structure already, including into `ExecutionPayload` on CL side will be unnecessary duplication",
+      "createdAt": "2026-04-28T12:23:57.671000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "makes sense",
+      "createdAt": "2026-04-28T12:24:22.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so IIUC, if `parent_beacon_root` won't be part of `ExecutionPayload`, looks to me we can't use `ExecutionPayload` as the sole struct for the guest program input, right? i.e. we should keep using NewPayloadRequest",
+      "createdAt": "2026-04-28T12:29:54.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Why is this! As I said above this beacon block root is committed already in the hash chain",
+      "createdAt": "2026-04-28T12:30:54.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "correct `ExecutionPayload` is missing the parent beacon block root.",
+      "createdAt": "2026-04-28T12:32:11.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If the CL only sees the EL parent block hash in the accumulator how does it know which parent beacon root was used in the EL block?",
+      "createdAt": "2026-04-28T12:33:41.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which check in the current CL block processing are you referring to?",
+      "createdAt": "2026-04-28T12:57:42.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The parent beacon block root is passed via engineAPI to the EL. The EL uses this to populate the system contract that stores beacon block roots.",
+      "createdAt": "2026-04-28T12:58:57.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, but where are we making the verification you want to add now?",
+      "createdAt": "2026-04-28T13:02:54.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we do the verification in the EL on the engine processing step before transaction execution.",
+      "createdAt": "2026-04-28T13:04:01.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok, so the statement is that the verification on the call to `verify_and_notify_new_payload` should be contained in the accumulator because the EL requires this check",
+      "createdAt": "2026-04-28T13:05:34.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "is that the statement?",
+      "createdAt": "2026-04-28T13:05:37.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think the argument is exactly the same as all other fields we are using. We need to assert consistency between fields which are used across both the EL and CL.",
+      "createdAt": "2026-04-28T13:07:25.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah, but the fields I added are the ones that are checked against the CL STF and this one is in the EL STF if I understood you correctly",
+      "createdAt": "2026-04-28T13:08:00.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think your interpretation is reasonable. The way I frame it is we need a means of asserting consistency of values used across both EL and CL.",
+      "createdAt": "2026-04-28T13:09:25.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "asking EL devs here how do they verify this when syncing over devp2p",
+      "createdAt": "2026-04-28T13:09:28.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hence why i proposed we also need the blob commitments in the binding accumulator",
+      "createdAt": "2026-04-28T13:09:42.043000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I believe currently the EL only asserts consistency on the parent beacon block root for blocks which are passed via engineAPI. For any block before that (i.e. finalized blocks) there is no assertion.",
+      "createdAt": "2026-04-28T13:12:03.284000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think currently the CL does the checks for finalized prefix chain.",
+      "createdAt": "2026-04-28T13:13:07.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think they do. For any finalized block they currently assume the parent beacon block root is correct. I.e. the finalzied hash is a trust anchor they can sync to and based on a matching hash they infer that all inputs to all finalized blocks are correct.",
+      "createdAt": "2026-04-28T13:15:08.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I do not think this can be correct, the EL does not have any trust assumption on finalization for validity",
+      "createdAt": "2026-04-28T13:17:45.228000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am being told that parent beacon block root is part of the blockhash",
+      "createdAt": "2026-04-28T13:17:57.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "correct",
+      "createdAt": "2026-04-28T13:18:07.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But how does that prove its consistent with the beacon roots?",
+      "createdAt": "2026-04-28T13:18:22+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and the beacon block root also commits to the hash as well",
+      "createdAt": "2026-04-28T13:18:26.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so I think they have to be consistent",
+      "createdAt": "2026-04-28T13:18:30.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "why? The CL never \"opens\" the block hash to see what beacon root it contains.",
+      "createdAt": "2026-04-28T13:18:54.887000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the parent hash is contained in the blockroot",
+      "createdAt": "2026-04-28T13:19:06.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and the block root is contained in the next blockhash",
+      "createdAt": "2026-04-28T13:19:16.982000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so this cross dependency I believe makes it already self verified",
+      "createdAt": "2026-04-28T13:19:30.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think that to be the case",
+      "createdAt": "2026-04-28T13:19:40.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "why would we pass it via engineAPI if that were true?",
+      "createdAt": "2026-04-28T13:19:50.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Let me consider your logic as maybe there is something there I hand't considered",
+      "createdAt": "2026-04-28T13:20:17.386000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmmm I still dont see it. If the CL never opens the block hash it has no idea what beacon root was used in the EL block.",
+      "createdAt": "2026-04-28T13:21:28.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "My interpretation is that the EL uses the finalized block hash as a trust anchor - I may be mistaken but I believe this is mentioned in the specs somewhere.",
+      "createdAt": "2026-04-28T13:22:31.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think historically this was fine because the CL would download payloads and do the assertions itself (at least thats what lighthouse does) but once you remove payload sync and don't do the checks on the CL side you need the binding commitment to capture this.",
+      "createdAt": "2026-04-28T13:24:14.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but you don't do the block_hash validation, do you? If you do then it would work, otherwise, you have to include `parent_beacon_block_root` into a new commitment",
+      "createdAt": "2026-04-28T13:30:35.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`parent_hash` includes the value of the new commitment to the content of the parent EL block. this is important because it forms a chain of new commitments -- accumulating it. but it doesn't give us anything except that chaining property. we have to check each EL block content separately and cannot rely on the `parent_hash` being a part of a new commitment",
+      "createdAt": "2026-04-28T13:33:05.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Block 100, slot 100: parent hash, timestamp, parent block root, etc... is valid and both nodes are in sync. \n\nslot 101, the CL block is obtained and we do not get the EL block for slot 101. The CL state transition verifies what it already knows, the parent hash, etc... \nblock 101 is imported on the EL, the EL executes it and computes the accumulator for the parent hash, etc... the parent beacon block is not passed to the  EL since this block is synced over devp2p, but the value used is committed in the block hash. \n\nslot 102 the CL sync the block without having received the payload and verifies the accumulator, using the hash of 101 that is committed in the bid as \"parent hash\". \n\nBlock 102 comes over gossip for the EL, it sends it this time to the EL and it verifies that the accumulator matches. At this point the EL and CL both know tha the hashes are correct and they match on both sides, the beacon block root chain committeed to the hashes and the hash chains committed to the beacon block roots and they matched at the beginning. \n\nI believe that if <@402080271563751435>'s statement about parent beacon block root being finalized is taken as trusted from the anchor then either 1) this is false or 2) the EL can be tricked into thinking a block is valid when it has in fact used an invalid finalized block root in the state transition...\n\nSo if that statement about the anchor is true: how does the EL deal with an invalid finalized beacon block?",
+      "createdAt": "2026-04-28T13:53:06.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think currently the CL will always download the payloads and does the checks on the CL side for finalized payloads?",
+      "createdAt": "2026-04-28T13:58:40.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No this is false, the CL checkpoint syncs and the EL executes everything from it's own state that can be way behind",
+      "createdAt": "2026-04-28T14:10:59.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And even in this scenario we want to be safe on a finalized invalid block",
+      "createdAt": "2026-04-28T14:11:28.286000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "From prior to the checkpoint sync block I think there's no way to catch an inconsistent block",
+      "createdAt": "2026-04-28T14:23:29.537000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "From the perspective of the EL there are no constraints placed on the parent beacon root (i.e. it doesn't compute the root itself or anything of that nature afaik) so its only invalid from the perspective of the CL.",
+      "createdAt": "2026-04-28T14:25:14.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm here with <@449019668296892420> and he tells me two things:\n1) the EL does not check anything which is mesmerizing to me because the EL chain can actually have valid execution but using an invalid finalized beacon block root!\n2) He agrees that the parent block root is better to add it",
+      "createdAt": "2026-04-28T14:31:49.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "to the accumulator",
+      "createdAt": "2026-04-28T14:31:56.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Agree that this seems like a gap in the protocol!\n\nSounds good to me. Also wanted to raise blob commitments for consideration as well as I believe they are also needed.",
+      "createdAt": "2026-04-28T14:34:40.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "arnetheduck",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't necessarily look at this as being a problem - junk in, junk out, ie we trust the CL for everything  else so we should also trust it to supply a valid parent bbr - if the CL has been fooled and consensus is broken, there's not necessarily anything meaningful that the EL can do - any checks would perhaps act as a safety net but it's a pretty weird situation",
+      "createdAt": "2026-04-28T14:43:48.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The problem is for historical sync it doesn't fetch a bbr from the CL it syncs it from the EL p2p network and there is no consistency check with the CL to ensure they use the same values.",
+      "createdAt": "2026-04-28T15:14:20.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we do not trust the CL!!",
+      "createdAt": "2026-04-28T15:51:14.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is a very important aspect of Ethereum security, even if the validators are malicious we should not declare as valid an invalid chain, even in this case in which \"execution is valid\". The point here is that the CL can actually checkpoint sync and maintain this invariant as long as the execution layer does execute the blocks, but it seems the BLOCLROOT EIP broke this",
+      "createdAt": "2026-04-28T15:52:54.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I mentioned this previously but I believe CL does do the checks making it sound currently.\n\nhttps://github.com/sigp/lighthouse/blob/stable/consensus/state_processing/src/per_block_processing.rs (line 365 partially_verify…)\n\nhttps://github.com/sigp/lighthouse/blob/stable/beacon_node/execution_layer/src/engine_api/new_payload_request.rs (line 119 perform optimistic…)",
+      "createdAt": "2026-04-28T16:19:29.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "When we remove the CL checks on the payload it would break",
+      "createdAt": "2026-04-28T16:21:52.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The point is that on checkpoint sync this is not sent",
+      "createdAt": "2026-04-28T17:44:30.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "What do you mean? I was of the understanding that when syncing from checkpoint the CL does the asserts on the payload locally as seen in the code references above (not sending to the EL) but this would not catch an invalid block from before the checkpoint sync anchor.",
+      "createdAt": "2026-04-28T17:59:51.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "There's a whole section from the EL head to the checkpoint that the EL gets from devp2p and doesn't verify the blockroots",
+      "createdAt": "2026-04-28T18:01:21.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The CL fetches the payloads and does the checks for that range.",
+      "createdAt": "2026-04-28T18:05:07.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Once both EL and CL are in sync it then delegates the checks to the EL. Kind of strange pattern but I believe this is how it works.",
+      "createdAt": "2026-04-28T18:05:48.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The CL does not fetch payloads for that range at all",
+      "createdAt": "2026-04-28T18:14:02.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "taulepton_",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ahhh ok thats my misunderstanding then",
+      "createdAt": "2026-04-28T18:14:26.579000+00:00",
+      "attachments": []
+    }
+  ]
+}

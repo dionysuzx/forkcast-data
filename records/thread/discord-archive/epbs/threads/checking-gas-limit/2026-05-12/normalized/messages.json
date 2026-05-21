@@ -1,0 +1,848 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/checking gas limit",
+  "date": "2026-05-12",
+  "messageCount": 104,
+  "sourceHash": "447e2ad466d76fee47e1ca13119e48b8e275461e5dccc03df9282ddac14401bf",
+  "searchText": "maybe for more clarity, do we wanna rename the field in `ProposerPreferences` to `target_gas_limit`? I guess if you read it like `preferences.gas_limit` it already makes sense that this is the target/desired gas limit Yeah I don't mind this rename, just push it if you guys think it's useful despite being longer https://github.com/potuz/consensus-specs/pull/21 opened a PR with a review, can do the renaming later if we want that Oh I looked briefly in the phone and there's a lot of things there that in missed or didn't even think about! I'll merge this in a few hours when I get to my office but in the future feel free to just push to my PRs Fixed the off by one that Kev found but didn't yet apply the other changes cause I think they'll be covered with Nico's push I fixed the off by one there too, but slightly different, can remove that change ah you computed the max difference right? I didn't want to use that cause in principle it could be an overflow unless we enforce the minimum gas limit gas_limit // 1024 could be zero at genesis for example seems like the \"spec\" has the same issue ```python def expected_gas_limit(parent_gas_limit, target_gas_limit): max_gas_limit_difference = (parent_gas_limit // 1024) - 1 if target_gas_limit > parent_gas_limit: gas_diff = target_gas_limit - parent_gas_limit return parent_gas_limit + min(gas_diff, max_gas_limit_difference) else: gas_diff = parent_gas_limit - target_gas_limit return parent_gas_limit - min(gas_diff, max_gas_limit_difference) ``` but I don't remember from where I got this python snippet The spec enforces a parent gas limit of at least 5000 isn't it? I am not even sure what is \"the spec\", I am just collecting breadcrumps across EIPs Lol, yeah in EIP 1559, the limit of 5000 is enforced ```python # check if the block changed the gas limit too much assert block.gas_limit < parent_gas_limit + parent_gas_limit // 1024, assert block.gas_limit > parent_gas_limit - parent_gas_limit // 1024, # check if the gas limit is at least the minimum gas limit assert block.gas_limit >= 5000 ``` https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1559.md#specification By the way my solution also has this overflow in the Max So anyway it's cooked 🙂 it would take ~3.8 million years for that to happen if we started to bump the gas limit now to `2^64 - 1` 🙂 No no the max overflows if the parent gas limit is zero Which on the CL can happen at genesis ah you mean that ok, we can just do `max(..., 0)`? Hmm that also overflows. It should be an if else or just subtract one if not zero like [this](https://github.com/potuz/consensus-specs/pull/21/changes/2dcc10ca1d5d07002be7b8725898d296ee6ac37c) would be simplest I think Nah, simplest would be (parent + 1)//1024 Ah crap, tired of doing this on the cell Will fix that overflow in a bit when I get to the office and then push your changes <@586161934425128960> your PR is better than mine, wanna push it to my branch? otherwise just fix the conflicts and I'll merge it in my repo so we go with my off by one change? resolved conflicts, but there is no merge button Might need another approval. Let me check. no I mean this is on Potuz's fork of the spec repo Ah okay. Missed that 😅 while we at it, there is another PR on your fork https://github.com/potuz/consensus-specs/pull/20 <@755590043632140352> 😅 <@586161934425128960> are we good with merging [5235](https://github.com/ethereum/consensus-specs/pull/5235) or would you like to wait a bit longer? I would like the engine api pr to be merged first ok I am ping these guys what's the right tag? `@glamsterdam-el` It might be restricted to a few people. left a comment, we can discuss here if you want do we just use `is_payload_verified` instead? the problem is what I mentioned: the call to `should_extend_payload` is equivalent to `is_payload_verified` but it's not equivalent to your head being empty or full imagine that the proposer was told to go to another branch in a previous slot and that the attesters voted for \"empty\" instead of full then your approach would go to full but mine would go to empty so I think it's effectively a bug to use that approach I see what you mean, need to think about this more merged https://github.com/potuz/consensus-specs/pull/21 into your branch now Ah this is the gas limit one Got worried for a second 😂 Thanks! https://github.com/ethereum/consensus-specs/pull/5236#discussion_r3225093329 these tests likely will only make sense once we have gloas gossip validation tests <@592004585506340885> Yes agreed. We can handle that then. Is it important to validate gossip of these ones? I mean letting a bid go through without the right gas limit should be an ignore anyway right I guess it's fine if we can test it, don't know how you'll pull that off though Are you suggesting we don't test this because it doesn't really matter? No no, I'm happy if we test it Don't know how to though Oh okay. Yeah I'm sure I'll figure out a way. I can add unit tests for the spec now, but to test client gossip code we need gloas networkin tests If for whatever reason it's not possible, we can make unittests. Yeah I don't see how that's possible. Seems more like a Kurtosis+ asertoor kind of things than spec tests I think it is. I mean the test will need the proposer preferences & parent gas limit. But we can provide those. A good unit test could be to get two bids one that conforms to the preferences, another that doesn't and has lower value. And check that the proposer includes the right one Yup. I have a bunch of tests in mind. <@586161934425128960> here's the only one I can come up with in Python 🙂 (x := parent_gas_limit // 1024) - (x > 0) to avoid the max 🙂 I don't think the parent gas limit can ever be zero, it would mean it's stuck there forever since we cannot increase should we just add this check instead ```python # check if the gas limit is at least the minimum gas limit assert block.gas_limit >= 5000 ``` That feels a little arbitrary? Is that the actual minimum? that's how it's defined in EIP-1559 I would assume all ELs implement it that way Oh. Well in that case, yes. It will make testing easier. it cant be less than 1024, otherwise it stuck at whatever parent gas limit value we have ```python @with_gloas_and_later @spec_test @single_phase def test_parent_gas_limit_underflows(spec): # parent_gas_limit // 1024 = 0; max(0, 1) - 1 = 0 (guard prevents underflow) assert spec.is_gas_limit_target_compatible(1023, 1023, 60_000_000) ``` passes in the current code, but feels wrong to even have this scenario tested found the actual execution specs function https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/london/fork.py#L873-L910 has the same 5000 as min <@586161934425128960> How do you feel about defining constants for `GAS_COSTS_LIMIT_ADJUSTMENT_FACTOR` and `GAS_COSTS_LIMIT_MINIMUM` in the CL? Just so it matches. Otherwise I'd say 5000 is a magic number. I didn't want to add 5000 in my PR cause I wanted to explicitly deal with genesis differently I do not want to force the genesis bid to have a non-trivial minimum it seems arbitrary what value should the genesis bid have? I think anything, could be zero for all I know I don't want to keep a spec constant that has to be in pair with the EL if it's less than 1024 based on the transition rule it cannot increase the proposer can include any bid it's not a consensus issue they won't propagate so slot 1 fixes this so you just mean the CL side, and EL genesis block would have a different gas limit? yes I want to avoid sync issues because first EL block has to pass https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/london/fork.py#L907-L908 that are unnessary burden these checks we are adding here are on a p2p topic for public bids, they are not a matter of consensus so the current spec matches at least with how lodestar, prysm, and teku have it implemented today I pushed some basic tests, we can later convert to gossip validation tests I removed this test, so the underflow case is not tested I'm fine with whatever, the current code matches well with what we have in lodestar though 🙂 I was obviously joking, overloading the conversion of boolean to int in Python is crazy it's fine with the max, I rather have the max than another constant it looks fancy though",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "maybe for more clarity, do we wanna rename the field in `ProposerPreferences` to `target_gas_limit`?",
+      "createdAt": "2026-05-12T08:44:43.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess if you read it like `preferences.gas_limit` it already makes sense that this is the target/desired gas limit",
+      "createdAt": "2026-05-12T08:45:46.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah I don't mind this rename, just push it if you guys think it's useful despite being longer",
+      "createdAt": "2026-05-12T09:02:57.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://github.com/potuz/consensus-specs/pull/21 opened a PR with a review, can do the renaming later if we want that",
+      "createdAt": "2026-05-12T09:29:24.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh I looked briefly in the phone and there's a lot of things there that in missed or didn't even think about! I'll merge this in a few hours when I get to my office but in the future feel free to just push to my PRs",
+      "createdAt": "2026-05-12T09:32:58.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Fixed the off by one that Kev found but didn't yet apply the other changes cause I think they'll be covered with Nico's push",
+      "createdAt": "2026-05-12T11:12:43.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I fixed the off by one there too, but slightly different, can remove that change",
+      "createdAt": "2026-05-12T11:13:36.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah you computed the max difference right? I didn't want to use that cause in principle it could be an overflow unless we enforce the minimum gas limit",
+      "createdAt": "2026-05-12T11:22:08.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "gas_limit // 1024 could be zero at genesis for example",
+      "createdAt": "2026-05-12T11:22:32.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "seems like the \"spec\" has the same issue\n```python\ndef expected_gas_limit(parent_gas_limit, target_gas_limit):\n  max_gas_limit_difference = (parent_gas_limit // 1024) - 1\n  if target_gas_limit > parent_gas_limit:\n    gas_diff = target_gas_limit - parent_gas_limit\n    return parent_gas_limit + min(gas_diff, max_gas_limit_difference)\n  else:\n    gas_diff = parent_gas_limit - target_gas_limit\n    return parent_gas_limit - min(gas_diff, max_gas_limit_difference)\n```\nbut I don't remember from where I got this python snippet",
+      "createdAt": "2026-05-12T11:33:56.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The spec enforces a parent gas limit of at least 5000 isn't it?",
+      "createdAt": "2026-05-12T11:34:43.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I am not even sure what is \"the spec\", I am just collecting breadcrumps across EIPs",
+      "createdAt": "2026-05-12T11:35:18.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Lol, yeah in EIP 1559, the limit of 5000 is enforced",
+      "createdAt": "2026-05-12T11:35:46.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```python\n    # check if the block changed the gas limit too much\n    assert block.gas_limit < parent_gas_limit + parent_gas_limit // 1024,\n    assert block.gas_limit > parent_gas_limit - parent_gas_limit // 1024,\n\n    # check if the gas limit is at least the minimum gas limit\n    assert block.gas_limit >= 5000\n```",
+      "createdAt": "2026-05-12T11:36:15.523000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1559.md#specification",
+      "createdAt": "2026-05-12T11:37:27.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "By the way my solution also has this overflow in the Max",
+      "createdAt": "2026-05-12T11:39:05.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So anyway it's cooked 🙂",
+      "createdAt": "2026-05-12T11:39:16.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it would take ~3.8 million years for that to happen if we started to bump the gas limit now to `2^64 - 1` 🙂",
+      "createdAt": "2026-05-12T11:44:43.243000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No no the max overflows if the parent gas limit is zero",
+      "createdAt": "2026-05-12T11:45:28.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Which on the CL can happen at genesis",
+      "createdAt": "2026-05-12T11:45:38.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah you mean that ok, we can just do `max(..., 0)`?",
+      "createdAt": "2026-05-12T11:45:54.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hmm that also overflows. It should be an if else or just subtract one if not zero",
+      "createdAt": "2026-05-12T11:47:18.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "like [this](https://github.com/potuz/consensus-specs/pull/21/changes/2dcc10ca1d5d07002be7b8725898d296ee6ac37c) would be simplest I think",
+      "createdAt": "2026-05-12T12:02:27.484000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Nah, simplest would be (parent + 1)//1024",
+      "createdAt": "2026-05-12T12:04:59.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah crap, tired of doing this on the cell",
+      "createdAt": "2026-05-12T12:05:58.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Will fix that overflow in a bit when I get to the office and then push your changes",
+      "createdAt": "2026-05-12T12:06:15.542000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> your PR is better than mine, wanna push it to my branch? otherwise just fix the conflicts and I'll merge it in my repo",
+      "createdAt": "2026-05-12T12:57:10.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so we go with my off by one change?",
+      "createdAt": "2026-05-12T12:58:42.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "resolved conflicts, but there is no merge button",
+      "createdAt": "2026-05-12T13:03:00.261000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "b17ec72b4e8c148ba8de157505aba9a42d5b22d255f511adafefe175a7e8dc76"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Might need another approval. Let me check.",
+      "createdAt": "2026-05-12T13:03:26.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "no I mean this is on Potuz's fork of the spec repo",
+      "createdAt": "2026-05-12T13:03:45.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah okay. Missed that 😅",
+      "createdAt": "2026-05-12T13:04:42.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "while we at it, there is another PR on your fork https://github.com/potuz/consensus-specs/pull/20 <@755590043632140352> 😅",
+      "createdAt": "2026-05-12T13:05:11.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> are we good with merging [5235](https://github.com/ethereum/consensus-specs/pull/5235) or would you like to wait a bit longer?",
+      "createdAt": "2026-05-12T13:08:24.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I would like the engine api pr to be merged first",
+      "createdAt": "2026-05-12T13:08:45.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok I am ping these guys",
+      "createdAt": "2026-05-12T13:09:01.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what's the right tag?",
+      "createdAt": "2026-05-12T13:09:04.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "`@glamsterdam-el`",
+      "createdAt": "2026-05-12T13:09:11.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It might be restricted to a few people.",
+      "createdAt": "2026-05-12T13:09:50.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "left a comment, we can discuss here if you want",
+      "createdAt": "2026-05-12T13:13:50.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "do we just use `is_payload_verified` instead?",
+      "createdAt": "2026-05-12T13:16:59.591000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the problem is what I mentioned: the call to `should_extend_payload` is equivalent to `is_payload_verified` but it's not equivalent to your head being empty or full",
+      "createdAt": "2026-05-12T13:21:46.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "imagine that the proposer was told to go to another branch in a previous slot",
+      "createdAt": "2026-05-12T13:22:00.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and that the attesters voted for \"empty\" instead of full",
+      "createdAt": "2026-05-12T13:22:11.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "then your approach would go to full",
+      "createdAt": "2026-05-12T13:22:26.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but mine would go to empty",
+      "createdAt": "2026-05-12T13:22:31.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so I think it's effectively a bug to use that approach",
+      "createdAt": "2026-05-12T13:22:56.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I see what you mean, need to think about this more",
+      "createdAt": "2026-05-12T13:27:54.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "merged https://github.com/potuz/consensus-specs/pull/21 into your branch now",
+      "createdAt": "2026-05-12T20:16:27.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Ah this is the gas limit one",
+      "createdAt": "2026-05-12T20:22:30.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Got worried for a second 😂",
+      "createdAt": "2026-05-12T20:22:43.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Thanks!",
+      "createdAt": "2026-05-12T20:22:47.743000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "https://github.com/ethereum/consensus-specs/pull/5236#discussion_r3225093329 these tests likely will only make sense once we have gloas gossip validation tests <@592004585506340885>",
+      "createdAt": "2026-05-12T21:04:15.867000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes agreed. We can handle that then.",
+      "createdAt": "2026-05-12T21:05:15.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Is it important to validate gossip of these ones?",
+      "createdAt": "2026-05-12T21:09:07.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I mean letting a bid go through without the right gas limit should be an ignore anyway right",
+      "createdAt": "2026-05-12T21:09:42.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess it's fine if we can test it, don't know how you'll pull that off though",
+      "createdAt": "2026-05-12T21:10:17.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Are you suggesting we don't test this because it doesn't really matter?",
+      "createdAt": "2026-05-12T21:10:18.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No no, I'm happy if we test it",
+      "createdAt": "2026-05-12T21:10:28.188000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Don't know how to though",
+      "createdAt": "2026-05-12T21:10:32.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh okay. Yeah I'm sure I'll figure out a way.",
+      "createdAt": "2026-05-12T21:11:05.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I can add unit tests for the spec now, but to test client gossip code we need gloas networkin tests",
+      "createdAt": "2026-05-12T21:11:10.750000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If for whatever reason it's not possible, we can make unittests.",
+      "createdAt": "2026-05-12T21:11:33.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yeah I don't see how that's possible. Seems more like a Kurtosis+ asertoor kind of things than spec tests",
+      "createdAt": "2026-05-12T21:11:50.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think it is. I mean the test will need the proposer preferences & parent gas limit. But we can provide those.",
+      "createdAt": "2026-05-12T21:12:37.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "A good unit test could be to get two bids one that conforms to the preferences, another that doesn't and has lower value. And check that the proposer includes the right one",
+      "createdAt": "2026-05-12T21:13:16.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yup. I have a bunch of tests in mind.",
+      "createdAt": "2026-05-12T21:13:51.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> here's the only one I can come up with in Python 🙂\n(x := parent_gas_limit // 1024) - (x > 0)",
+      "createdAt": "2026-05-12T21:26:11.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "to avoid the max 🙂",
+      "createdAt": "2026-05-12T21:26:31.967000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't think the parent gas limit can ever be zero, it would mean it's stuck there forever since we cannot increase",
+      "createdAt": "2026-05-12T21:37:21.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "should we just add this check instead\n```python\n# check if the gas limit is at least the minimum gas limit\nassert block.gas_limit >= 5000\n```",
+      "createdAt": "2026-05-12T21:38:03.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "That feels a little arbitrary? Is that the actual minimum?",
+      "createdAt": "2026-05-12T21:38:45.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's how it's defined in EIP-1559",
+      "createdAt": "2026-05-12T21:39:08.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I would assume all ELs implement it that way",
+      "createdAt": "2026-05-12T21:39:17.241000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh. Well in that case, yes. It will make testing easier.",
+      "createdAt": "2026-05-12T21:39:23.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it cant be less than 1024, otherwise it stuck at whatever parent gas limit value we have",
+      "createdAt": "2026-05-12T21:40:10.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```python\n@with_gloas_and_later\n@spec_test\n@single_phase\ndef test_parent_gas_limit_underflows(spec):\n    # parent_gas_limit // 1024 = 0; max(0, 1) - 1 = 0 (guard prevents underflow)\n    assert spec.is_gas_limit_target_compatible(1023, 1023, 60_000_000)\n```\npasses in the current code, but feels wrong to even have this scenario tested",
+      "createdAt": "2026-05-12T21:41:16.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "found the actual execution specs function https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/london/fork.py#L873-L910 has the same 5000 as min",
+      "createdAt": "2026-05-12T21:54:14.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> How do you feel about defining constants for `GAS_COSTS_LIMIT_ADJUSTMENT_FACTOR` and `GAS_COSTS_LIMIT_MINIMUM` in the CL? Just so it matches.",
+      "createdAt": "2026-05-12T21:56:18.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Otherwise I'd say 5000 is a magic number.",
+      "createdAt": "2026-05-12T21:57:29.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I didn't want to add 5000 in my PR cause I wanted to explicitly deal with genesis differently",
+      "createdAt": "2026-05-12T22:04:28.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I do not want to force the genesis bid to have a non-trivial minimum",
+      "createdAt": "2026-05-12T22:04:38.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it seems arbitrary",
+      "createdAt": "2026-05-12T22:04:42.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what value should the genesis bid have?",
+      "createdAt": "2026-05-12T22:04:55.717000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think anything, could be zero for all I know",
+      "createdAt": "2026-05-12T22:05:08.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't want to keep a spec constant that has to be in pair with the EL",
+      "createdAt": "2026-05-12T22:05:25.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "if it's less than 1024 based on the transition rule it cannot increase",
+      "createdAt": "2026-05-12T22:05:26.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the proposer can include any bid",
+      "createdAt": "2026-05-12T22:05:38.587000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's not a consensus issue",
+      "createdAt": "2026-05-12T22:05:49.088000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "they won't propagate",
+      "createdAt": "2026-05-12T22:05:58.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so slot 1 fixes this",
+      "createdAt": "2026-05-12T22:06:12.254000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so you just mean the CL side, and EL genesis block would have a different gas limit?",
+      "createdAt": "2026-05-12T22:13:28.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes",
+      "createdAt": "2026-05-12T22:13:49.290000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I want to avoid sync issues",
+      "createdAt": "2026-05-12T22:14:04.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "because first EL block has to pass https://github.com/ethereum/execution-specs/blob/forks/amsterdam/src/ethereum/forks/london/fork.py#L907-L908",
+      "createdAt": "2026-05-12T22:14:05.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that are unnessary burden",
+      "createdAt": "2026-05-12T22:14:18.353000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "these checks we are adding here are on a p2p topic for public bids, they are not a matter of consensus",
+      "createdAt": "2026-05-12T22:14:32.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so the current spec matches at least with how lodestar, prysm, and teku have it implemented today",
+      "createdAt": "2026-05-12T22:21:56.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I pushed some basic tests, we can later convert to gossip validation tests",
+      "createdAt": "2026-05-12T22:22:11.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I removed this test, so the underflow case is not tested",
+      "createdAt": "2026-05-12T22:22:54.921000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm fine with whatever, the current code matches well with what we have in lodestar though 🙂",
+      "createdAt": "2026-05-12T22:25:15.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was obviously joking, overloading the conversion of boolean to int  in Python is crazy",
+      "createdAt": "2026-05-12T22:30:57.632000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's fine with the max, I rather have the max than another constant",
+      "createdAt": "2026-05-12T22:31:15.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it looks fancy though",
+      "createdAt": "2026-05-12T22:31:34.657000+00:00",
+      "attachments": []
+    }
+  ]
+}

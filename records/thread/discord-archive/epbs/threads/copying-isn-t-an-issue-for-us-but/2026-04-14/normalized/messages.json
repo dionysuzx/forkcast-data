@@ -1,0 +1,586 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/copying isn't an issue for us, but",
+  "date": "2026-04-14",
+  "messageCount": 72,
+  "sourceHash": "055e07bd48a4f1e8251a1c2fb7aed7587e037c23aadd03fdb0394b4878bb7aba",
+  "searchText": "can you elaborate a bit on that Enrico, where do you see this problem? is it regarding `prepare_execution_payload` in slot N-1 if you are the proposer of slot N? I think this is about deciding whether to do this at N or N-1 there's no way you do that at slot N? I mean we need to send FCU in hte previous slot, and also emit SSE event for builders with correct withdrawals Oh crap FCU is really the problem! This is really a problem cause you can't decide your head until the next slot and you've counted attestations I guess we're going to have to relax that? I guess it's fine, just as today we will be forced to compute attributes and do the state transition for that, then send FCU and it head changes in the start of the slot send a new FCU With no time yes, this is what im dealing with now, there's two places typically, in prysm case - we compute payload attribute and call FCU at n-1 - if there's a payload attribute cache miss (head changes last min), we compute payload attribute and call FCU at n right before proposing same in lodestar, I don't think this will change in gloas though > we compute payload attribute and call FCU at n-1 timing of this will change, since payload might be at late as 9 seconds or so, I am not even sure yet what signal we should use to send the correct FCU, it seems to me that counting PTC votes is the right approach PTC is a bad thing to do I believe As of now, if you synced the Payload of your head it becomes your head Regardless of PTC There's some argument to be made about DA and not being a supernode, but could never made Francesco agree with it yet depends on client implementation, whats interesting is you may not need to copy the state in `n-1` case because you wont need to save the post state anyway, the state is \"thrown away\" and in `n` case i dont mind the copy because it's just a rare case to hit Yes I was referring to the calculation of the withdrawals here: ``` apply_parent_execution_payload(state, parent_bid, envelope.execution_requests) withdrawals = get_expected_withdrawals(state).withdrawals ``` so already pre-gloas the state we pass is already processed as noted in `bellatrix/validator.md` ``` `state` is the state object after applying `process_slots(state, slot)` transition to the resulting state of the parent block processing ``` `apply_parent_execution_payload` should be pretty cheap as it doesn't change validators or balances my default idea on that is that we will send FCU with attribute at payload arrival (or at PTC deadline) assuming we build on top of full, then at slot transition we recompute the head and eventually change our mind on the fly. And this could be a payload reorg or even a beacon block reorg. This is also how it works today. (nowadays teku cheats a bit anticipating the process by 500ms) what do you mean the copy is a rare case, the copy will be in the most common case right, much better indeed but I think calling `get_head` in `prepare_execution_payload` is wrong that's what I am doing now but it doesn't seem what clients do Clients don't need to call get head now cause the state is already head And differentiates between full or empty but the current spec is ambigious But you PR makes both states the same the current gloas spec doesn't even define how you pick `state` Yes state is the same as before It's your head state advanced It's been always like this waht do you mean by \"head state\" like from `get_head` call in forkchoice as defined in the spec? Get head does not give you a state, just a root/node I really don't understand in current gloas spec where it is defined what state to pass into `prepare_execution_payload`, it could be a `block_state` or `payload_state` The head state is the current beacon state at the tip of your canonical chain, and we always used that state advanced to the current slot to prepare a proposal. Now this is not enough It is whatever your head view tells you, just as today, if your head is full it'll be the post EL state advanced. If it's empty it'll be the post CL state advanced But now the state is not enough Cause the state won't have enough info well, if you do a late block reorg you pick the state of the parent \"tip of your canonical chain,\" how do you determine that in current gloas spec? That's still compatible: your head is not the last block but an ancestor, now it's really becoming nitpicking semantics The output of get_head tells you the block and the Payload content but that's exactly what I mean, `get_head` in gloas doesn't just mean you got the payload and advancted to a payload state, it runs `get_payload_status_tiebreaker` which requires PTC votes Not, because the PB clause is always hit So PTC is irrelevant ok so you're saying as soon as you have the payload imported you will consider that the tip of your canonical chain? Yes if the Payload is the Payload of your head, not otherwise didn't you noted the opposite here https://github.com/ethereum/consensus-specs/pull/5094#discussion_r3073215931 🤔 It's the same as today with blocks. Any block that extends your head is your head following that reasoning doing `if hash_tree_root(state.latest_block_header) in store.payloads:` should be right Barring honest reorgs In that text I was pointing that you were enforcing that the Payload existed and nothing more, which works today if the state is your head state **only** because we haven't included clauses to reorg the Payload when PTC votes that DA is not available yet That's why I want to make this full proof by asserting that the state must be head Instead of just assuming it is if the Payload exists but `state` you pass into `prepare_execution_payload` is head so `if hash_tree_root(state.latest_block_header) in store.payloads:` means you have the payload for head state or not I'm talking about the extra copy you have to do before you apply the requests to get the withdrawals. Don't need this in n-1 case for prysm The problem is not the block root of head. It's the block hash You do, cause you'll modify the head state In the common case So either we cache the partial state transition or we copy We copy that today regardless. My point is we dont need the second copy. With deferred processing, the spec as written makes it seem like you might need a second copy, but I think that can be avoided in the client depending on how it is implemented, since you do not need to save the post-state at the end. 1. Get the pre-state as a copy 2. Verify the payload in consensus 3. Verify the payload in execution 4. Check if you are proposer for the next slot. If yes: 4a. apply execution requests, get withdrawals, call FCU In the spec, there is a copy between 4 and 4a. All I am saying is we may not need that copy Well the problem is that you haven't finished here: you still need to propose a block so either you keep that processed state in 4a around cached or you will need another copy in the next slot when you construct the block. That's all I'm saying: you need two copies and two processing of the execution requests or a damned complicated cache im missing something, why do i need this again next slot (in happy case) if im proposing? which part is required You need to construct the beacon block and produce a state root So when do you start executing the stf? Pre or post intermediate state? but how is that different than today? you get the pre state, that's the post CL state (happy case) and get the execution requests from DB im trying to undertand what i need to do that's extra here Today: at N+1 you get a state, you apply your block on top of it and then you compute state root. Tomorrow: you get a state, you apply execution requests from the parent payload (which you had to apply anyway before to compute attributes) and then you apply your block to compute state root. If you want to save yourself from twice computing the requests processing you need to cache the attributes computation oh i see, you actually thinking to avoid applying the second time and just use the result of n-1 but applying payload is very fast, im not even sure its worth the trouble. More bugs come from caching. I can def benchmark it though in my current implementation, I do apply the second time with the intuition that pure state transition is very fast. Coping the state is what i actively try to avoid",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "",
+      "createdAt": "2026-04-14T16:02:52.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "can you elaborate a bit on that Enrico, where do you see this problem?",
+      "createdAt": "2026-04-14T16:02:53.255000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "is it regarding `prepare_execution_payload` in slot N-1 if you are the proposer of slot N?",
+      "createdAt": "2026-04-14T16:04:04.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think this is about deciding whether to do this at N or N-1",
+      "createdAt": "2026-04-14T16:06:26.215000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "there's no way you do that at slot N? I mean we need to send FCU in hte previous slot, and also emit SSE event for builders with correct withdrawals",
+      "createdAt": "2026-04-14T16:07:13.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh crap FCU is really the problem! This is really a problem cause you can't decide your head until the next slot and you've counted attestations",
+      "createdAt": "2026-04-14T16:21:12.163000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess we're going to have to relax that?",
+      "createdAt": "2026-04-14T16:21:57.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess it's fine, just as today we will be forced to compute attributes and do the state transition for that, then send FCU and it head changes in the start of the slot send a new FCU",
+      "createdAt": "2026-04-14T16:24:09.147000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "With no time",
+      "createdAt": "2026-04-14T16:24:14.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, this is what im dealing with now, there's two places typically, in prysm case\n- we compute payload attribute and call FCU at n-1\n- if there's a payload attribute cache miss (head changes last min), we compute payload attribute and call FCU at n right before proposing",
+      "createdAt": "2026-04-14T16:24:48.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "same in lodestar, I don't think this will change in gloas though",
+      "createdAt": "2026-04-14T16:25:19.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "> we compute payload attribute and call FCU at n-1\ntiming of this will change, since payload might be at late as 9 seconds or so, I am not even sure yet what signal we should use to send the correct FCU, it seems to me that counting PTC votes is the right approach",
+      "createdAt": "2026-04-14T16:26:21.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "PTC is a bad thing to do I believe",
+      "createdAt": "2026-04-14T16:26:54.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "As of now, if you synced the Payload of your head it becomes your head",
+      "createdAt": "2026-04-14T16:27:43.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Regardless of PTC",
+      "createdAt": "2026-04-14T16:27:52.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "There's some argument to be made about DA and not being a supernode, but could never made Francesco agree with it yet",
+      "createdAt": "2026-04-14T16:28:40.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "depends on client implementation, whats interesting is you may not need to copy the state in `n-1` case because you wont need to save the post state anyway, the state is \"thrown away\"\n\nand in `n` case i dont mind the copy because it's just a rare case to hit",
+      "createdAt": "2026-04-14T16:36:12.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes I was referring to the calculation of the withdrawals here:\n```\napply_parent_execution_payload(state, parent_bid, envelope.execution_requests)\nwithdrawals = get_expected_withdrawals(state).withdrawals\n```",
+      "createdAt": "2026-04-14T18:07:48.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so already pre-gloas the state we pass is already processed as noted in `bellatrix/validator.md`\n```\n`state` is the state object after applying `process_slots(state, slot)`\n     transition to the resulting state of the parent block processing\n```\n\n`apply_parent_execution_payload` should be  pretty cheap as it doesn't change validators or balances",
+      "createdAt": "2026-04-14T18:10:16.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "my default idea on that is that we will send FCU with attribute at payload arrival (or at PTC deadline) assuming we build on top of full, then at slot transition we recompute the head and eventually change our mind on the fly. \nAnd this could be a payload reorg or even a beacon block reorg.\n\nThis is also how it works today.",
+      "createdAt": "2026-04-14T18:15:23.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "(nowadays teku cheats a bit anticipating the process by 500ms)",
+      "createdAt": "2026-04-14T18:19:47.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what do you mean the copy is a rare case, the copy will be in the most common case",
+      "createdAt": "2026-04-14T18:25:06.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "right, much better indeed",
+      "createdAt": "2026-04-14T18:44:58.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but I think calling `get_head` in `prepare_execution_payload` is wrong",
+      "createdAt": "2026-04-14T18:48:33.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's what I am doing now but it doesn't seem what clients do",
+      "createdAt": "2026-04-14T18:48:49.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Clients don't need to call get head now cause the state is already head",
+      "createdAt": "2026-04-14T18:49:20.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And differentiates between full or empty",
+      "createdAt": "2026-04-14T18:49:31.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but the current spec is ambigious",
+      "createdAt": "2026-04-14T18:49:35.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But you PR makes both states the same",
+      "createdAt": "2026-04-14T18:49:44.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the current gloas spec doesn't even define how you pick `state`",
+      "createdAt": "2026-04-14T18:49:58.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes state is the same as before",
+      "createdAt": "2026-04-14T18:50:10.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's your head state advanced",
+      "createdAt": "2026-04-14T18:50:17.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's been always like this",
+      "createdAt": "2026-04-14T18:50:23.540000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "waht do you mean by \"head state\" like from `get_head` call in forkchoice as defined in the spec?",
+      "createdAt": "2026-04-14T18:50:55.280000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Get head does not give you a state, just a root/node",
+      "createdAt": "2026-04-14T18:51:25.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I really don't understand in current gloas spec where it is defined what state to pass into `prepare_execution_payload`, it could be a `block_state` or `payload_state`",
+      "createdAt": "2026-04-14T18:52:18.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The head state is the current beacon state at the tip of your canonical chain, and we always used that state advanced to the current slot to prepare a proposal. Now this is not enough",
+      "createdAt": "2026-04-14T18:52:37.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It is whatever your head view tells you, just as today, if your head is full it'll be the post EL state advanced. If it's empty it'll be the post CL state advanced",
+      "createdAt": "2026-04-14T18:53:31.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But now the state is not enough",
+      "createdAt": "2026-04-14T18:53:49.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Cause the state won't have enough info",
+      "createdAt": "2026-04-14T18:54:01.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "well, if you do a late block reorg you pick the state of the parent",
+      "createdAt": "2026-04-14T18:54:09.689000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "\"tip of your canonical chain,\" how do you determine that in current gloas spec?",
+      "createdAt": "2026-04-14T18:55:01.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "That's still compatible: your head is not the last block but an ancestor, now it's really becoming nitpicking semantics",
+      "createdAt": "2026-04-14T18:55:11.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The output of get_head tells you the block and the Payload content",
+      "createdAt": "2026-04-14T18:55:36.530000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but that's exactly what I mean, `get_head` in gloas doesn't just mean you got the payload and advancted to a payload state, it runs `get_payload_status_tiebreaker` which requires PTC votes",
+      "createdAt": "2026-04-14T18:56:20.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Not, because the PB clause is always hit",
+      "createdAt": "2026-04-14T18:56:49.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So PTC is irrelevant",
+      "createdAt": "2026-04-14T18:58:24.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok so you're saying as soon as you have the payload imported you will consider that the tip of your canonical chain?",
+      "createdAt": "2026-04-14T18:58:52.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes if the Payload is the Payload of your head, not otherwise",
+      "createdAt": "2026-04-14T18:59:17.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "didn't you noted the opposite here https://github.com/ethereum/consensus-specs/pull/5094#discussion_r3073215931 🤔",
+      "createdAt": "2026-04-14T18:59:43.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It's the same as today with blocks. Any block that extends your head is your head",
+      "createdAt": "2026-04-14T18:59:58.288000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "following that reasoning doing `if hash_tree_root(state.latest_block_header) in store.payloads:` should be right",
+      "createdAt": "2026-04-14T19:00:03.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Barring honest reorgs",
+      "createdAt": "2026-04-14T19:00:12.325000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In that text I was pointing that you were enforcing that the Payload existed and nothing more, which works today if the state is your head state **only** because we haven't included clauses to reorg the Payload when PTC votes that DA is not available yet",
+      "createdAt": "2026-04-14T19:01:59.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "That's why I want to make this full proof by asserting that the state must be head",
+      "createdAt": "2026-04-14T19:02:31.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Instead of just assuming it is if the Payload exists",
+      "createdAt": "2026-04-14T19:02:45.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but `state` you pass into `prepare_execution_payload` is head",
+      "createdAt": "2026-04-14T19:03:25.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so `if hash_tree_root(state.latest_block_header) in store.payloads:` means you have the payload for head state or not",
+      "createdAt": "2026-04-14T19:03:41.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm talking about the extra copy you have to do before you apply the requests to get the withdrawals. Don't need this in n-1 case for prysm",
+      "createdAt": "2026-04-14T19:03:50.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The problem is not the block root of head. It's the block hash",
+      "createdAt": "2026-04-14T19:05:58.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "You do, cause you'll modify the head state",
+      "createdAt": "2026-04-14T19:09:13.281000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "In the common case",
+      "createdAt": "2026-04-14T19:09:17.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So either we cache the partial state transition or we copy",
+      "createdAt": "2026-04-14T19:09:39.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We copy that today regardless. My point is we dont need the second copy.\nWith deferred  processing, the spec as written makes it seem like you might need a second copy, but I think that can be avoided in the client depending on how it is implemented, since you do not need to save the post-state at the end.\n\n1. Get the pre-state as a copy\n2. Verify the payload in consensus\n3. Verify the payload in execution\n4. Check if you are proposer for the next slot. If yes:\n   4a. apply execution requests, get withdrawals, call FCU\n\nIn the spec, there is a copy between 4 and 4a. All I am saying is we may not need that copy",
+      "createdAt": "2026-04-14T20:01:07.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Well the problem is that you haven't finished here:  you still need to propose a block so either you keep that processed state in 4a around cached or you will need another copy in the next slot when you construct the block. That's all I'm saying: you need two copies and two processing of the execution requests or a damned complicated cache",
+      "createdAt": "2026-04-14T20:32:36.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "im missing something, why do i need this again next slot (in happy case) if im proposing? which part is required",
+      "createdAt": "2026-04-14T20:36:20.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "You need to construct the beacon block and produce a state root",
+      "createdAt": "2026-04-14T20:36:51.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "So when do you start executing the stf?",
+      "createdAt": "2026-04-14T20:37:12.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Pre or post intermediate state?",
+      "createdAt": "2026-04-14T20:37:21.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but how is that different than today? you get the pre state, that's the post CL state (happy case) and get the execution requests from DB\nim trying to undertand what i need to do that's extra here",
+      "createdAt": "2026-04-14T20:39:30.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Today: at N+1 you get a state, you apply your block on top of it and then you compute state root. \n\nTomorrow: you get a state, you apply execution requests from the parent payload (which you had to apply anyway before to compute attributes) and then you apply your block to compute state root. \n\nIf you want to save yourself from twice computing the requests processing you need to cache the attributes computation",
+      "createdAt": "2026-04-14T20:41:35.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "oh i see, you actually thinking to avoid applying the second time and just use the result of n-1\nbut applying payload is very fast, im not even sure its worth the trouble. More bugs come from caching. I can def benchmark it though\nin my current implementation, I do apply the second time with the intuition that pure state transition is very fast. Coping the state is what i actively try to avoid",
+      "createdAt": "2026-04-14T20:44:28.432000+00:00",
+      "attachments": []
+    }
+  ]
+}
