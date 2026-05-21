@@ -35,7 +35,11 @@ const resolvePath = async (urlPath: string): Promise<string | null> => {
     return resolvePath(`/snapshots/${latest}/${clean.slice("/latest/".length)}`);
   }
   if (clean.startsWith("/records/")) {
-    return resolvePath(`/snapshots/${latest}/records/${clean.slice("/records/".length)}`);
+    const snapshotRecord = await resolvePath(`/snapshots/${latest}/records/${clean.slice("/records/".length)}`);
+    if (snapshotRecord) return snapshotRecord;
+    const repoRecord = join(process.cwd(), clean);
+    const repoRecordFile = await stat(repoRecord).catch(() => null);
+    return repoRecordFile?.isFile() ? repoRecord : null;
   }
   return null;
 };

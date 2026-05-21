@@ -11,7 +11,7 @@ cd /Users/lucy/fun/forkcast-data
 ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ```
 
-The latest snapshot ID is printed by the command. After `compact-dist`, `/latest/*` is served through Netlify rewrites to the current snapshot.
+The latest snapshot ID is printed by the command. After `compact-dist`, `/latest/*` is served through Netlify rewrites to the current snapshot and raw `/records/*` artifacts redirect to the exact Git commit.
 
 ## Real Backfill
 

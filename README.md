@@ -56,7 +56,7 @@ The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
-Before deploy, `compact-dist` keeps the current immutable snapshot and writes Netlify rewrites for `/latest/*` and `/records/*`. This keeps public URLs stable without uploading duplicate copies of the full Discord/EIP corpus every 10 minutes.
+Before deploy, `compact-dist` keeps the current immutable read-model snapshot and writes Netlify rewrites for `/latest/*`. Raw `/records/*` artifact URLs redirect to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus every 10 minutes.
 
 ## Netlify
 
