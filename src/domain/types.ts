@@ -47,6 +47,7 @@ export interface SourceRef {
     | "forkcast"
     | "pm"
     | "pm-lean"
+    | "fixture-live"
     | "github-pm-issues"
     | "discourse"
     | "discord-archive"

@@ -6,9 +6,9 @@ on:
       source:
         description: "Source selection"
         required: true
-        default: "all"
+        default: "live"
         type: choice
-        options: ["all", "forkcast", "pm", "pm-lean", "github-pm-issues", "discord-archive", "discourse", "dummy"]
+        options: ["live", "all", "forkcast", "pm", "pm-lean", "github-pm-issues", "discord-archive", "discourse", "dummy"]
       dummy_mode:
         description: "Enable deterministic dummy mode"
         required: false
@@ -32,33 +32,97 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "11 * * * *"
+    - cron: "12,42 * * * *"
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SOURCE: ${{ inputs.source || vars.FORKCAST_DATA_PIPELINE_SOURCE || 'live' }}
+      PM_LEAN_FEED_REF: ${{ vars.PM_LEAN_FEED_REF || 'pm-lean-feed' }}
+      PM_LEAN_OUT: ${{ github.workspace }}/pm-lean-feed
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v6
+      - name: Checkout pm-lean feed
+        if: ${{ env.SOURCE == 'live' || env.SOURCE == 'pm-lean' }}
+        continue-on-error: true
+        uses: actions/checkout@v6
+        with:
+          repository: dionysuzx/pm-lean
+          ref: ${{ env.PM_LEAN_FEED_REF }}
+          path: pm-lean-feed
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
       - run: npm ci
+      - name: Record pipeline input
+        run: |
+          echo "source=${SOURCE}"
+          echo "pm_lean_bundle=${{ inputs.pm_lean_bundle }}"
+          if [ -f "$PM_LEAN_OUT/catalog.json" ]; then
+            node -e "const c=require(process.env.PM_LEAN_OUT + '/catalog.json'); console.log('pm_lean_records=' + c.entries.length)"
+          else
+            echo "pm_lean_records=0"
+          fi
       - name: Backfill
         run: |
-          if [ "${{ github.event.inputs.source }}" = "dummy" ]; then
+          if [ "$SOURCE" = "dummy" ]; then
             ENABLE_DUMMY_PIPELINE=true npm run ingest -- --source dummy --dummy true
           else
-            npm run backfill -- --source "${{ github.event.inputs.source || 'all' }}" --limit 20
+            npm run backfill -- --source "$SOURCE" --limit 20
           fi
       - run: npm run derive
       - run: npm run validate
       - run: npm run build-snapshot
       - run: npm run build-search
       - name: Evals
-        run: npm run run-evals
+        run: |
+          if npm run run-evals; then
+            exit 0
+          fi
+          if [ -n "${{ inputs.eval_bypass_reason }}" ]; then
+            echo "Eval bypass requested: ${{ inputs.eval_bypass_reason }}"
+            exit 0
+          fi
+          exit 1
       - run: npm run build-site
+      - name: Capture snapshot id
+        id: snapshot
+        run: |
+          snapshot_id="$(node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync('dist/latest/manifest.json', 'utf8')).snapshot_id)")"
+          echo "snapshot_id=$snapshot_id" >> "$GITHUB_OUTPUT"
+          echo "snapshot_id=$snapshot_id"
       - uses: actions/upload-artifact@v4
         with:
           name: forkcast-data-dist
           path: dist
+      - name: Deploy data site to Netlify
+        run: |
+          if [ -z "$NETLIFY_AUTH_TOKEN" ] || [ -z "$NETLIFY_SITE_ID" ]; then
+            echo "NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID are required for scheduled production deploys."
+            exit 1
+          fi
+          npx netlify deploy --prod --dir=dist --functions=netlify/functions --message "Forkcast data snapshot ${{ steps.snapshot.outputs.snapshot_id }}"
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      - name: Dispatch forkcast-astro rebuild
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.FORKCAST_ASTRO_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'dionysuzx',
+              repo: 'forkcast-astro',
+              event_type: 'forkcast-data-snapshot',
+              client_payload: {
+                snapshot: '${{ steps.snapshot.outputs.snapshot_id }}',
+                source: '${{ env.SOURCE }}',
+                data_site: 'https://forkcast-data-dionysuzx.netlify.app'
+              }
+            })

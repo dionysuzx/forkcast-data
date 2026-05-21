@@ -27,6 +27,9 @@ interface PmLeanCatalog {
   }>;
 }
 
+const sourceType = (type: string): "pm-lean" | "fixture-live" | "dummy" =>
+  type === "fixture-live" ? "fixture-live" : type === "dummy" ? "dummy" : "pm-lean";
+
 export const ingestPmLean = async (repoRoot: string, pmLeanOut: string, generatedAt = nowIso()): Promise<RecordManifest[]> => {
   const catalogPath = join(pmLeanOut, "catalog.json");
   if (!(await pathExists(catalogPath))) return [];
@@ -44,7 +47,7 @@ export const ingestPmLean = async (repoRoot: string, pmLeanOut: string, generate
       sources: [
         { type: "pm-lean", ref: pmManifestPath },
         ...pmRecord.sources.map((source) => ({
-          type: source.type === "dummy" ? "dummy" as const : "pm-lean" as const,
+          type: sourceType(source.type),
           ref: source.ref,
           url: source.url,
           metadata: source.metadata

@@ -50,7 +50,7 @@ const ingestOptions = (args: Args) => ({
 
 const help = (): void => {
   console.log(`forkcast-data commands:
-  ingest --source all|forkcast|pm|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
+  ingest --source live|all|forkcast|pm|pm-lean|github-pm-issues|discord-archive|fixture|dummy [--dummy true]
   derive
   backfill
   validate

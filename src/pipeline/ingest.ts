@@ -26,6 +26,10 @@ export const ingest = async (options: IngestOptions): Promise<RecordManifest[]> 
   if (options.dummy) return ingestDummy(options.repoRoot, generatedAt);
   const records: RecordManifest[] = [];
   const source = options.source;
+  if (source === "live") {
+    records.push(...await ingestPmLean(options.repoRoot, options.pmLeanOut, generatedAt));
+    records.push(...await ingestGithubPmIssues(options.repoRoot, options.limit, generatedAt));
+  }
   if (source === "all" || source === "forkcast") records.push(...await ingestForkcast(options.repoRoot, options.forkcastRoot, generatedAt));
   if (source === "all" || source === "pm") records.push(...await ingestPmArtifacts(options.repoRoot, options.pmRoot, options.limit, generatedAt));
   if (source === "all" || source === "pm-lean") records.push(...await ingestPmLean(options.repoRoot, options.pmLeanOut, generatedAt));
@@ -36,7 +40,7 @@ export const ingest = async (options: IngestOptions): Promise<RecordManifest[]> 
       const metadata = record.metadata ?? {};
       return Array.isArray(metadata.discourseLinks) ? metadata.discourseLinks.filter((link): link is string => typeof link === "string") : [];
     });
-  if (source === "all" || source === "discourse" || source === "github-pm-issues" || source === "fixture") {
+  if (source === "all" || source === "live" || source === "discourse" || source === "github-pm-issues" || source === "fixture") {
     records.push(...await ingestDiscourseLinks(options.repoRoot, discourseLinks, generatedAt));
   }
   return records;
