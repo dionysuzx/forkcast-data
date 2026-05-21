@@ -126,12 +126,14 @@ export default async (request: Request) => {
 
   const meta = await loadJson<FastMeta>(new URL("/latest/search/fast/meta.json", request.url));
   const scores = new Map<number, number>();
-  for (const term of terms) {
+  const postingsByTerm = await Promise.all(terms.map(async (term) => {
     const shard = await loadJson<Record<string, Array<[number, number]>>>(new URL(`/latest/search/fast/terms/${termShard(term)}`, request.url));
     const exact = shard[term] ?? [];
-    const postings = exact.length || term.length < 3
+    return exact.length || term.length < 3
       ? exact
       : Object.entries(shard).filter(([candidate]) => candidate.startsWith(term)).flatMap(([, values]) => values).slice(0, 1200);
+  }));
+  for (const postings of postingsByTerm) {
     for (const [docId, score] of postings) {
       scores.set(docId, (scores.get(docId) ?? 0) + score);
     }
@@ -140,11 +142,9 @@ export default async (request: Request) => {
   const rankedIds = [...scores.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, kind && kind !== "all" ? 500 : 40).map(([id]) => id);
   const wanted = new Set(rankedIds);
   const docShardNames = [...new Set(rankedIds.map((id) => shardName(Math.floor(id / meta.doc_shard_size))))];
-  const docs: FastDoc[] = [];
-  for (const shard of docShardNames) {
-    const shardDocs = await loadJson<FastDoc[]>(new URL(`/latest/search/fast/docs/${shard}`, request.url));
-    docs.push(...shardDocs.filter((doc) => wanted.has(doc.n)));
-  }
+  const docs = (await Promise.all(docShardNames.map((shard) =>
+    loadJson<FastDoc[]>(new URL(`/latest/search/fast/docs/${shard}`, request.url))
+  ))).flatMap((shardDocs) => shardDocs.filter((doc) => wanted.has(doc.n)));
 
   const results = docs
     .map((doc) => {

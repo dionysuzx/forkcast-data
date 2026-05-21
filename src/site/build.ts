@@ -179,8 +179,8 @@ if(searchInput&&results){
     const wanted=new Set(ids);
     const shards=[...new Set(ids.map((id)=>shardName(Math.floor(id/docShardSize))))];
     const docs=[];
-    for(const shard of shards){
-      for(const doc of await loadDocShard(shard)){
+    for(const shardDocs of await Promise.all(shards.map((shard)=>loadDocShard(shard)))){
+      for(const doc of shardDocs){
         if(wanted.has(doc.n))docs.push(expandDoc(doc));
       }
     }
@@ -206,8 +206,8 @@ if(searchInput&&results){
       }
       if(count)count.textContent='Searching '+scopedTotal+' '+activeKind+' docs...';
       const scores=new Map();
-      for(const term of queryTerms){
-        for(const [docId,score] of await postingsForTerm(term)){
+      for(const postings of await Promise.all(queryTerms.map((term)=>postingsForTerm(term)))){
+        for(const [docId,score] of postings){
           scores.set(docId,(scores.get(docId)||0)+score);
         }
       }
