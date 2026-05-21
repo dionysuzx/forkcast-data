@@ -139,7 +139,8 @@ document.querySelectorAll('[data-home-search-form]').forEach((form)=>form.addEve
 document.querySelectorAll('[data-query]').forEach((button)=>button.addEventListener('click',()=>{
   window.location.href=queryParam(button.getAttribute('data-query')||'');
 }));
-window.addEventListener('keydown',(event)=>{
+const handleSearchHotkey=(event)=>{
+  if(event.defaultPrevented)return;
   const active=document.activeElement;
   const typing=active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA'||active.isContentEditable);
   if((event.key==='/'&&!typing)||((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k')){
@@ -149,7 +150,9 @@ window.addEventListener('keydown',(event)=>{
   if(event.key==='Escape'&&active&&active.matches&&active.matches('[data-search-input], [data-home-search]')){
     active.blur();
   }
-});
+};
+document.addEventListener('keydown',handleSearchHotkey,true);
+window.addEventListener('keydown',handleSearchHotkey);
 const searchInput=document.querySelector('[data-search-input]');
 const results=document.querySelector('[data-search-results]');
 const count=document.querySelector('[data-search-count]');
