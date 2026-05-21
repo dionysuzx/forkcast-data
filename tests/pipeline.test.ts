@@ -41,6 +41,11 @@ describe("data pipeline", () => {
     const docs = await buildSearchIndex(join(repo, "dist", "latest"));
     const hit = searchDocuments(docs, "BAL decision", 3)[0];
     expect(`${hit?.title} ${hit?.body}`).toContain("BAL");
+    const fastMeta = await readJson<{ doc_count: number; doc_shard_size: number }>(join(repo, "dist", "latest", "search", "fast", "meta.json"));
+    expect(fastMeta.doc_count).toBe(docs.length);
+    expect(fastMeta.doc_shard_size).toBeGreaterThan(0);
+    const balTerms = await readJson<Record<string, Array<[number, number]>>>(join(repo, "dist", "latest", "search", "fast", "terms", "ba.json"));
+    expect(balTerms.bal?.length).toBeGreaterThan(0);
     const call = await readJson<{ summary: string }>(join(repo, "dist", "latest", "calls", "dummy-acde", "1.json"));
     expect(call.summary).toContain("Dummy EIPs moved to SFI");
     expect(call.summary).not.toContain("fakeData");

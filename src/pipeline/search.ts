@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
+import { rm } from "node:fs/promises";
 import type { SearchDocument } from "../domain/types.js";
-import { listFiles, readJson, writeJson } from "../lib/fs.js";
+import { listFiles, nowIso, readJson, writeJson, writeText } from "../lib/fs.js";
 
 export interface SearchResult {
   id: string;
@@ -51,6 +52,105 @@ const countMatches = (tokens: string[], term: string, cap: number): number =>
 
 const eipNumberFromQuery = (query: string): string | undefined =>
   query.match(/\beip[-\s]?(\d+)\b/i)?.[1];
+
+type FastSearchDoc = {
+  n: number;
+  id: string;
+  k: SearchDocument["kind"];
+  t: string;
+  b: string;
+  u: string;
+  c: SearchDocument["citations"];
+  g: string[];
+};
+
+const DOC_SHARD_SIZE = 128;
+const MAX_POSTINGS_PER_TERM = 2000;
+
+const compactBody = (value: string, max = 700): string =>
+  value.replace(/\s+/g, " ").trim().slice(0, max);
+
+const shardName = (index: number): string =>
+  `${String(index).padStart(4, "0")}.json`;
+
+const termShard = (term: string): string =>
+  `${(term.match(/^[a-z0-9]{1,2}/)?.[0] ?? "zz").padEnd(2, "_")}.json`;
+
+const addWeightedTerms = (
+  target: Map<string, number>,
+  value: string,
+  weight: number,
+  cap: number
+): void => {
+  const counts = new Map<string, number>();
+  for (const token of tokenize(value)) {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  for (const [term, count] of counts) {
+    target.set(term, (target.get(term) ?? 0) + Math.min(count, cap) * weight);
+  }
+};
+
+const buildFastSearchIndex = async (latestRoot: string, docs: SearchDocument[]): Promise<void> => {
+  const fastRoot = join(latestRoot, "search", "fast");
+  await rm(fastRoot, { recursive: true, force: true });
+
+  const docShards = new Map<number, FastSearchDoc[]>();
+  const termShards = new Map<string, Map<string, Map<number, number>>>();
+  const kinds: Record<string, number> = {};
+
+  docs.forEach((doc, index) => {
+    kinds[doc.kind] = (kinds[doc.kind] ?? 0) + 1;
+    const docShardIndex = Math.floor(index / DOC_SHARD_SIZE);
+    const slimDoc: FastSearchDoc = {
+      n: index,
+      id: doc.id,
+      k: doc.kind,
+      t: doc.title,
+      b: compactBody(doc.body),
+      u: doc.url,
+      c: doc.citations.slice(0, 3),
+      g: doc.tags.slice(0, 8)
+    };
+    docShards.set(docShardIndex, [...(docShards.get(docShardIndex) ?? []), slimDoc]);
+
+    const weightedTerms = new Map<string, number>();
+    addWeightedTerms(weightedTerms, doc.title, 12, 8);
+    addWeightedTerms(weightedTerms, doc.tags.join(" "), 8, 8);
+    addWeightedTerms(weightedTerms, doc.body, 1, 10);
+    for (const [term, score] of weightedTerms) {
+      const shard = termShard(term);
+      const shardTerms = termShards.get(shard) ?? new Map<string, Map<number, number>>();
+      const postings = shardTerms.get(term) ?? new Map<number, number>();
+      postings.set(index, score);
+      shardTerms.set(term, postings);
+      termShards.set(shard, shardTerms);
+    }
+  });
+
+  await writeText(join(fastRoot, "meta.json"), `${JSON.stringify({
+    version: 1,
+    generated_at: nowIso(),
+    doc_count: docs.length,
+    doc_shard_size: DOC_SHARD_SIZE,
+    max_postings_per_term: MAX_POSTINGS_PER_TERM,
+    kinds
+  })}\n`);
+
+  for (const [index, shardDocs] of docShards) {
+    await writeText(join(fastRoot, "docs", shardName(index)), `${JSON.stringify(shardDocs)}\n`);
+  }
+
+  for (const [shard, terms] of termShards) {
+    const payload: Record<string, Array<[number, number]>> = {};
+    for (const [term, postings] of terms) {
+      payload[term] = [...postings.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+        .slice(0, MAX_POSTINGS_PER_TERM);
+    }
+    await writeText(join(fastRoot, "terms", shard), `${JSON.stringify(payload)}\n`);
+  }
+};
 
 const scoreDocument = (doc: SearchDocument, query: string, terms: string[]): number => {
   const titleText = doc.title.toLowerCase();
@@ -147,6 +247,7 @@ export const buildSearchIndex = async (latestRoot: string): Promise<SearchDocume
     });
   }
   await writeJson(join(latestRoot, "search", "index.json"), docs);
+  await buildFastSearchIndex(latestRoot, docs);
   return docs;
 };
 

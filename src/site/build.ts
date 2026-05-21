@@ -158,20 +158,81 @@ const results=document.querySelector('[data-search-results]');
 const count=document.querySelector('[data-search-count]');
 const facets=[...document.querySelectorAll('[data-search-kind]')];
 if(searchInput&&results){
-  let docs=[],activeKind='all';
-  const run=()=>{
-    const query=searchInput.value;
-    const queryTerms=terms(query);
-    const scoped=activeKind==='all'?docs:docs.filter((doc)=>doc.kind===activeKind);
+  let activeKind='all',meta=null,requestSeq=0,fallbackDocs=null;
+  const termCache=new Map(),docShardCache=new Map();
+  const shardName=(index)=>String(index).padStart(4,'0')+'.json';
+  const termShard=(term)=>(String(term).match(/^[a-z0-9]{1,2}/)?.[0]||'zz').padEnd(2,'_')+'.json';
+  const expandDoc=(doc)=>({n:doc.n,id:doc.id,kind:doc.k,title:doc.t,body:doc.b,url:doc.u,citations:doc.c,tags:doc.g});
+  const loadJson=async(url)=>{const res=await fetch(url);if(!res.ok)throw new Error('Unable to load '+url);return res.json();};
+  const loadMeta=async()=>meta||(meta=await loadJson('/latest/search/fast/meta.json'));
+  const loadTermShard=async(shard)=>{if(!termCache.has(shard))termCache.set(shard,loadJson('/latest/search/fast/terms/'+shard));return termCache.get(shard);};
+  const loadDocShard=async(shard)=>{if(!docShardCache.has(shard))docShardCache.set(shard,loadJson('/latest/search/fast/docs/'+shard));return docShardCache.get(shard);};
+  const postingsForTerm=async(term)=>{
+    const shard=await loadTermShard(termShard(term));
+    const exact=shard[term]||[];
+    if(exact.length||term.length<3)return exact;
+    return Object.entries(shard).filter(([candidate])=>candidate.startsWith(term)).flatMap(([,postings])=>postings).slice(0,1200);
+  };
+  const loadDocs=async(ids,docShardSize)=>{
+    const wanted=new Set(ids);
+    const shards=[...new Set(ids.map((id)=>shardName(Math.floor(id/docShardSize))))];
+    const docs=[];
+    for(const shard of shards){
+      for(const doc of await loadDocShard(shard)){
+        if(wanted.has(doc.n))docs.push(expandDoc(doc));
+      }
+    }
+    return docs;
+  };
+  const runFallback=async(query,queryTerms)=>{
+    fallbackDocs=fallbackDocs||await loadJson('/latest/search/index.json');
+    const scoped=activeKind==='all'?fallbackDocs:fallbackDocs.filter((doc)=>doc.kind===activeKind);
     const hits=(queryTerms.length?scoped.map((d)=>({d,score:scoreDoc(d,query,queryTerms)})).filter((hit)=>hit.score>0):scoped.slice(0,40).map((d)=>({d,score:1}))).sort((a,b)=>b.score-a.score||a.d.title.localeCompare(b.d.title)).slice(0,40);
     if(count)count.textContent=hits.length+' results from '+scoped.length+' '+activeKind+' docs';
     results.innerHTML=hits.map((hit)=>resultMarkup(hit,queryTerms)).join('')||'<p>No matches. Try an EIP number, call series, TLDR phrase, Discord channel, or source name.</p>';
   };
-  fetch('/latest/search/index.json').then((r)=>r.json()).then((value)=>{docs=value;run();});
+  const run=async()=>{
+    const seq=++requestSeq;
+    const query=searchInput.value;
+    const queryTerms=terms(query);
+    try{
+      const fastMeta=await loadMeta();
+      const scopedTotal=activeKind==='all'?fastMeta.doc_count:(fastMeta.kinds?.[activeKind]||0);
+      if(!queryTerms.length){
+        if(count)count.textContent='Showing featured results from '+scopedTotal+' '+activeKind+' docs';
+        return;
+      }
+      if(count)count.textContent='Searching '+scopedTotal+' '+activeKind+' docs...';
+      const scores=new Map();
+      for(const term of queryTerms){
+        for(const [docId,score] of await postingsForTerm(term)){
+          scores.set(docId,(scores.get(docId)||0)+score);
+        }
+      }
+      if(seq!==requestSeq)return;
+      const rankedIds=[...scores.entries()].sort((a,b)=>b[1]-a[1]||a[0]-b[0]).slice(0,activeKind==='all'?40:500).map(([id])=>id);
+      const docs=await loadDocs(rankedIds,fastMeta.doc_shard_size);
+      const exact=eipNumber(query),phrase=String(query||'').trim().toLowerCase();
+      const hits=docs.map((d)=>({
+        d,
+        score:(scores.get(d.n)||0)
+          +(exact&&(d.id==='eip-'+exact||String(d.title).toLowerCase().includes('eip-'+exact)||String((d.tags||[]).join(' ')).toLowerCase().includes('eip-'+exact))?250:0)
+          +(phrase.length>3&&(String(d.title).toLowerCase().includes(phrase)||String((d.tags||[]).join(' ')).toLowerCase().includes(phrase))?40:0)
+          +(queryTerms.includes('eip')&&d.kind==='eip'?20:0)
+      })).filter((hit)=>hit.score>0&&(activeKind==='all'||hit.d.kind===activeKind)).sort((a,b)=>b.score-a.score||a.d.title.localeCompare(b.d.title)).slice(0,40);
+      if(seq!==requestSeq)return;
+      if(count)count.textContent=hits.length+' fast results from '+scopedTotal+' '+activeKind+' docs';
+      results.innerHTML=hits.map((hit)=>resultMarkup(hit,queryTerms)).join('')||'<p>No matches. Try an EIP number, call series, TLDR phrase, Discord channel, or source name.</p>';
+    }catch{
+      await runFallback(query,queryTerms);
+    }
+  };
   const initialQuery=new URLSearchParams(window.location.search).get('q');
   if(initialQuery)searchInput.value=initialQuery;
-  searchInput.addEventListener('input',run);
+  let debounce;
+  searchInput.addEventListener('input',()=>{window.clearTimeout(debounce);debounce=window.setTimeout(run,80);});
   facets.forEach((button)=>button.addEventListener('click',()=>{activeKind=button.getAttribute('data-search-kind')||'all';facets.forEach((item)=>item.setAttribute('aria-pressed',String(item===button)));run();}));
+  run();
 }
 document.querySelectorAll('[data-copy-target]').forEach((btn)=>btn.addEventListener('click',async()=>{
   const original=btn.textContent;
