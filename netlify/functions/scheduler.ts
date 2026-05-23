@@ -30,6 +30,11 @@ const dispatchWorkflow = async (token: string, target: WorkflowTarget): Promise<
 };
 
 export default async () => {
+  if (env("FORKCAST_SCHEDULER_DISABLED") === "true") {
+    console.log("forkcast scheduler disabled by FORKCAST_SCHEDULER_DISABLED");
+    return Response.json({ ok: true, disabled: true }, { status: 200 });
+  }
+
   const token = env("GITHUB_TOKEN");
   if (!token) {
     console.log("forkcast scheduler skipped: missing GITHUB_TOKEN");
