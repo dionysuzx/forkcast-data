@@ -46,9 +46,14 @@ concurrency:
 jobs:
   pipeline:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     permissions:
       contents: write
       actions: read
+      pages: write
+      id-token: write
     env:
       SOURCE: ${{ inputs.source || vars.FORKCAST_DATA_PIPELINE_SOURCE || 'canonical' }}
       SOURCE_LIMIT: ${{ inputs.source_limit || vars.FORKCAST_DATA_SOURCE_LIMIT || '0' }}
@@ -59,7 +64,7 @@ jobs:
       ETH_RND_ARCHIVE_ROOT: ${{ github.workspace }}/eth-rnd-archive
       GH_TOKEN: ${{ github.token }}
       FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
-      FORKCAST_DATA_SITE_URL: ${{ vars.FORKCAST_DATA_SITE_URL || 'https://forkcast-data-dionysuzx.netlify.app' }}
+      FORKCAST_DATA_SITE_URL: ${{ vars.FORKCAST_DATA_SITE_URL || 'https://dionysuzx.github.io/forkcast-data' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -132,7 +137,12 @@ jobs:
           fi
       - name: Skip unchanged scheduled deploy
         if: ${{ env.SOURCE != 'dummy' && steps.canonical.outputs.changed != 'true' && env.FORCE_REBUILD != 'true' }}
-        run: echo "No canonical changes and force_rebuild=false; skipping snapshot, Netlify deploy, and Astro dispatch."
+        run: echo "No canonical changes and force_rebuild=false; skipping snapshot, GitHub Pages deploy, and Astro dispatch."
+      - name: Capture deploy commit
+        id: deploy_commit
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - run: npm run build-snapshot
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
       - run: npm run build-search
@@ -150,6 +160,9 @@ jobs:
           exit 1
       - run: npm run build-site
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
+        env:
+          FORKCAST_PUBLIC_BASE_PATH: /forkcast-data
+          FORKCAST_RAW_RECORD_BASE: https://raw.githubusercontent.com/dionysuzx/forkcast-data/${{ steps.deploy_commit.outputs.sha }}/records
       - name: Capture snapshot id
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         id: snapshot
@@ -159,22 +172,23 @@ jobs:
           echo "snapshot_id=$snapshot_id"
       - run: npm run compact-dist
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
+        env:
+          FORKCAST_STATIC_HOST: github-pages
       - uses: actions/upload-artifact@v4
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         with:
           name: forkcast-data-dist
           path: dist
-      - name: Deploy data site to Netlify
+      - uses: actions/configure-pages@v4
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
-        run: |
-          if [ -z "$NETLIFY_AUTH_TOKEN" ] || [ -z "$NETLIFY_SITE_ID" ]; then
-            echo "NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID are required for scheduled production deploys."
-            exit 1
-          fi
-          npx netlify deploy --prod --no-build --dir=dist --functions=netlify/functions --message "Forkcast data snapshot ${{ steps.snapshot.outputs.snapshot_id }}"
-        env:
-          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
-          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
+        with:
+          path: dist
+      - name: Deploy data site to GitHub Pages
+        id: deployment
+        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
+        uses: actions/deploy-pages@v4
       - name: Dispatch forkcast-astro rebuild
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         uses: actions/github-script@v8

@@ -22,6 +22,7 @@ export type CompactDistResult = {
 };
 
 export const compactDist = async (distRoot: string): Promise<CompactDistResult> => {
+  const staticHost = (process.env.FORKCAST_STATIC_HOST ?? "github-pages").trim().toLowerCase();
   const repoRoot = join(distRoot, "..");
   const snapshotsRoot = join(distRoot, "snapshots");
   const index = await readJson<SnapshotIndex>(join(snapshotsRoot, "index.json"));
@@ -45,20 +46,33 @@ export const compactDist = async (distRoot: string): Promise<CompactDistResult> 
 
   await rm(join(distRoot, "records"), { recursive: true, force: true });
   await rm(join(snapshotRoot, "records"), { recursive: true, force: true });
-  await rm(latestRoot, { recursive: true, force: true });
 
   const commit = await currentCommit(repoRoot);
   const rawRecords = `https://raw.githubusercontent.com/dionysuzx/forkcast-data/${commit}/records/:splat`;
 
-  await writeText(join(distRoot, "_redirects"), [
-    `/latest/records/* ${rawRecords} 302`,
-    `/latest/* /snapshots/${snapshotId}/:splat 200`,
-    `/snapshots/${snapshotId}/records/* ${rawRecords} 302`,
-    `/records/* ${rawRecords} 302`,
-    `/catalog.json /snapshots/${snapshotId}/catalog.json 200`,
-    `/manifest.json /snapshots/${snapshotId}/manifest.json 200`,
-    ""
-  ].join("\n"));
+  if (staticHost === "github-pages") {
+    await writeText(join(distRoot, ".nojekyll"), "");
+    await rm(join(distRoot, "_redirects"), { force: true });
+    await writeText(join(distRoot, "404.html"), [
+      "<!doctype html>",
+      '<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
+      "<title>Forkcast Data Not Found</title></head>",
+      "<body><main><h1>Forkcast Data path not found</h1>",
+      `<p>Use the latest snapshot at <a href="./latest/manifest.json">latest/manifest.json</a> or immutable snapshot <a href="./snapshots/${snapshotId}/manifest.json">${snapshotId}</a>.</p>`,
+      "</main></body></html>"
+    ].join(""));
+  } else {
+    await rm(latestRoot, { recursive: true, force: true });
+    await writeText(join(distRoot, "_redirects"), [
+      `/latest/records/* ${rawRecords} 302`,
+      `/latest/* /snapshots/${snapshotId}/:splat 200`,
+      `/snapshots/${snapshotId}/records/* ${rawRecords} 302`,
+      `/records/* ${rawRecords} 302`,
+      `/catalog.json /snapshots/${snapshotId}/catalog.json 200`,
+      `/manifest.json /snapshots/${snapshotId}/manifest.json 200`,
+      ""
+    ].join("\n"));
+  }
 
   return { snapshotId };
 };

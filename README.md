@@ -13,11 +13,11 @@ records/
   topic/ethereum-magicians/<id>/manifest.json
   thread/discord-archive/<channel>/<date>/manifest.json
 dist/
-  _redirects                  # /latest/* and /records/* rewrite to current snapshot
+  latest/                     # revalidating pointer materialized for GitHub Pages
   snapshots/<snapshotId>/...
 ```
 
-MCP, search, admin, API functions, and the Netlify site are serving layers over canonical files. They are not the source of truth.
+MCP, search, admin, API functions, and the static site are serving layers over canonical files. They are not the source of truth.
 
 ## Local Commands
 
@@ -63,15 +63,17 @@ The pipeline no longer checks out or ingests live `ethereum/pm` repository conte
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
-Before deploy, `compact-dist` keeps the current immutable read-model snapshot and writes Netlify rewrites for `/latest/*`. Raw `/records/*` artifact URLs redirect to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus on every 12-hour run.
+Before deploy, `compact-dist` keeps the current immutable read-model snapshot and a physical `/latest/*` tree for GitHub Pages. Raw `/records/*` artifact links are written to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus on every 12-hour run.
 
-## Netlify
+## GitHub Pages
 
-The site publishes `dist/` and uses `netlify.toml` for caching:
+The active production target is GitHub Pages:
 
-- `/snapshots/*`: immutable
-- `/latest/*`: short revalidation
-- `/api/admin`: no-store, route-gated auth
-- `/api/search`: cacheable function fallback
+- Data site: `https://dionysuzx.github.io/forkcast-data/`
+- Project base path: `/forkcast-data`
+- Search is static and runs from prebuilt `/latest/search/fast/*` shards.
+- `/admin` is visible as static status UI; live rerun controls require a future Cloudflare Worker or another function host because GitHub Pages is static-only.
+
+Optional Netlify function code remains in the repo as a serving-layer artifact, but Netlify is no longer the active deploy path.
 
 See [docs/RUNBOOK.md](docs/RUNBOOK.md) and [docs/DNS.md](docs/DNS.md).

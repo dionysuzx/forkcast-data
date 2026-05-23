@@ -54,7 +54,7 @@ describe("data pipeline", () => {
     expect(eip.id).toBe(7702);
     await compactDist(join(repo, "dist"));
     await expect(readJson(join(repo, "dist", "snapshots", manifest.snapshot_id, "eips", "7702.json"))).resolves.toMatchObject({ id: 7702 });
-    await expect(readJson(join(repo, "dist", "latest", "eips", "7702.json"))).rejects.toThrow();
+    await expect(readJson(join(repo, "dist", "latest", "eips", "7702.json"))).resolves.toMatchObject({ id: 7702 });
   });
 
   it("keeps derived call intelligence stable across identical derives", async () => {

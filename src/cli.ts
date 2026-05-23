@@ -130,7 +130,7 @@ const main = async (): Promise<void> => {
       break;
     }
     case "publish": {
-      console.log("Static site is ready in dist/. Use npx netlify deploy --prod after Netlify link.");
+      console.log("Static site is ready in dist/. Deploy with the GitHub Pages workflow, or set FORKCAST_STATIC_HOST for another static host.");
       break;
     }
     case "dispatch-astro": {
