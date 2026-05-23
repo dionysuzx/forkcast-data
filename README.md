@@ -57,13 +57,13 @@ npm run migrate-pm-legacy -- --pm-root /Users/lucy/fun/pm --limit 0
 
 ## Alive Automation
 
-The `Data Pipeline` GitHub Action runs every 10 minutes and defaults to `source=canonical`. That mode checks out official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; and publishes only when canonical files changed or `force_rebuild=true`.
+The `Data Pipeline` GitHub Action runs every 12 hours and defaults to `source=canonical`. That mode checks out official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and the optional pm-lean feed; ingests them into the shared record layout; validates schemas/provenance; and publishes only when canonical files changed or `force_rebuild=true`.
 
 The pipeline no longer checks out or ingests live `ethereum/pm` repository contents. Historical PM folders are migrated into `forkcast-data` once and remain provenance-rich records here. New PM-like artifacts should flow through `pm-lean` feed artifacts or direct `forkcast-data` records instead of automated commits to `ethereum/pm` master.
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
-Before deploy, `compact-dist` keeps the current immutable read-model snapshot and writes Netlify rewrites for `/latest/*`. Raw `/records/*` artifact URLs redirect to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus every 10 minutes.
+Before deploy, `compact-dist` keeps the current immutable read-model snapshot and writes Netlify rewrites for `/latest/*`. Raw `/records/*` artifact URLs redirect to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus on every 12-hour run.
 
 ## Netlify
 

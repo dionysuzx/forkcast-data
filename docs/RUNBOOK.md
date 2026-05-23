@@ -33,11 +33,11 @@ npm run compact-dist
 
 ## Live GitHub Actions Loop
 
-1. `forkcast-data` runs `data-pipeline.yml` every 10 minutes with `source=canonical`.
-2. The pipeline checks out upstream PM, official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and optional `pm-lean-feed`.
+1. `forkcast-data` runs `data-pipeline.yml` every 12 hours with `source=canonical`.
+2. The pipeline checks out official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and optional `pm-lean-feed`.
 3. The pipeline ingests all sources into one shared record layout and validates the result every run.
 4. If canonical files changed, or `force_rebuild=true`, it builds immutable snapshots, builds search, runs fixture evals, compacts the deploy artifact, deploys Netlify, and dispatches `forkcast-astro`.
-5. If no canonical files changed on a scheduled run, it stops before snapshot/deploy so the 10-minute loop does not build a backlog of timestamp-only deployments.
+5. If no canonical files changed on a scheduled run, it stops before snapshot/deploy so the 12-hour loop does not build a backlog of timestamp-only deployments.
 6. `pm-lean` may also dispatch `forkcast-data` with `source=pm-lean`, but pm-lean is an optional upstream source, not the canonical data plane.
 
 Manual dispatch:

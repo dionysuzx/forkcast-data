@@ -62,7 +62,7 @@ export const schedulerTargets: WorkflowTarget[] = [
   {
     repo: "pm-lean",
     workflow: "asset-generation.yml",
-    staleAfterMinutes: 25,
+    staleAfterMinutes: 700,
     inputs: {
       source: "fixture-live",
       limit: "25",
@@ -73,7 +73,7 @@ export const schedulerTargets: WorkflowTarget[] = [
   {
     repo: "forkcast-data",
     workflow: "data-pipeline.yml",
-    staleAfterMinutes: 18,
+    staleAfterMinutes: 700,
     inputs: {
       source: "canonical",
       source_limit: "0",
@@ -85,7 +85,7 @@ export const schedulerTargets: WorkflowTarget[] = [
   {
     repo: "forkcast-astro",
     workflow: "snapshot-rebuild.yml",
-    staleAfterMinutes: 28,
+    staleAfterMinutes: 700,
     inputs: {
       target_snapshot: "",
       force_rebuild: false,

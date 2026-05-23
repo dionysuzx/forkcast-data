@@ -64,5 +64,5 @@ export default async () => {
 };
 
 export const config: Config = {
-  schedule: "*/10 * * * *"
+  schedule: "17 2,14 * * *"
 };
