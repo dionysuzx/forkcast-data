@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,6 +26,7 @@ const tempRepo = async (): Promise<string> => {
 
 afterEach(async () => {
   delete process.env.ENABLE_DUMMY_PIPELINE;
+  delete process.env.FORKCAST_STATIC_HOST;
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   dirs.length = 0;
 });
@@ -54,7 +55,7 @@ describe("data pipeline", () => {
     expect(eip.id).toBe(7702);
     await compactDist(join(repo, "dist"));
     await expect(readJson(join(repo, "dist", "snapshots", manifest.snapshot_id, "eips", "7702.json"))).resolves.toMatchObject({ id: 7702 });
-    await expect(readJson(join(repo, "dist", "latest", "eips", "7702.json"))).resolves.toMatchObject({ id: 7702 });
+    await expect(readFile(join(repo, "dist", "_redirects"), "utf8")).resolves.toContain(`/latest/* /snapshots/${manifest.snapshot_id}/:splat 200`);
   });
 
   it("keeps derived call intelligence stable across identical derives", async () => {

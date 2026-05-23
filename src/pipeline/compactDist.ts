@@ -22,7 +22,7 @@ export type CompactDistResult = {
 };
 
 export const compactDist = async (distRoot: string): Promise<CompactDistResult> => {
-  const staticHost = (process.env.FORKCAST_STATIC_HOST ?? "github-pages").trim().toLowerCase();
+  const staticHost = (process.env.FORKCAST_STATIC_HOST ?? "cloudflare-pages").trim().toLowerCase();
   const repoRoot = join(distRoot, "..");
   const snapshotsRoot = join(distRoot, "snapshots");
   const index = await readJson<SnapshotIndex>(join(snapshotsRoot, "index.json"));
@@ -46,6 +46,7 @@ export const compactDist = async (distRoot: string): Promise<CompactDistResult> 
 
   await rm(join(distRoot, "records"), { recursive: true, force: true });
   await rm(join(snapshotRoot, "records"), { recursive: true, force: true });
+  await rm(join(snapshotRoot, "search", "index.json"), { force: true });
 
   const commit = await currentCommit(repoRoot);
   const rawRecords = `https://raw.githubusercontent.com/dionysuzx/forkcast-data/${commit}/records/:splat`;
@@ -70,6 +71,19 @@ export const compactDist = async (distRoot: string): Promise<CompactDistResult> 
       `/records/* ${rawRecords} 302`,
       `/catalog.json /snapshots/${snapshotId}/catalog.json 200`,
       `/manifest.json /snapshots/${snapshotId}/manifest.json 200`,
+      ""
+    ].join("\n"));
+    await writeText(join(distRoot, "_headers"), [
+      "/snapshots/*",
+      "  Cache-Control: public, max-age=31536000, immutable",
+      "/latest/*",
+      "  Cache-Control: public, max-age=60, stale-while-revalidate=300",
+      "/catalog.json",
+      "  Cache-Control: public, max-age=60, stale-while-revalidate=300",
+      "/manifest.json",
+      "  Cache-Control: public, max-age=60, stale-while-revalidate=300",
+      "/api/*",
+      "  Cache-Control: private, no-store",
       ""
     ].join("\n"));
   }

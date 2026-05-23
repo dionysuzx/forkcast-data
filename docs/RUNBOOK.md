@@ -11,7 +11,7 @@ cd /Users/lucy/fun/forkcast-data
 ENABLE_DUMMY_PIPELINE=true npm run dummy:e2e
 ```
 
-The latest snapshot ID is printed by the command. After `compact-dist`, `/latest/*` is materialized for GitHub Pages and raw `/records/*` artifact links point to the exact Git commit.
+The latest snapshot ID is printed by the command. After `compact-dist`, `/latest/*` is served by Cloudflare Pages redirects and raw `/records/*` artifact links point to the exact Git commit.
 
 ## Real Backfill
 
@@ -36,7 +36,7 @@ npm run compact-dist
 1. `forkcast-data` runs `data-pipeline.yml` every 12 hours with `source=canonical`.
 2. The pipeline checks out official EIPs, current Forkcast, `ethereum/eth-rnd-archive`, and optional `pm-lean-feed`.
 3. The pipeline ingests all sources into one shared record layout and validates the result every run.
-4. If canonical files changed, or `force_rebuild=true`, it builds immutable snapshots, builds search, runs fixture evals, compacts the deploy artifact, deploys GitHub Pages, and dispatches `forkcast-astro`.
+4. If canonical files changed, or `force_rebuild=true`, it builds immutable snapshots, builds search, runs fixture evals, compacts the deploy artifact, deploys Cloudflare Pages, and dispatches `forkcast-astro`.
 5. If no canonical files changed on a scheduled run, it stops before snapshot/deploy so the 12-hour loop does not build a backlog of timestamp-only deployments.
 6. `pm-lean` may also dispatch `forkcast-data` with `source=pm-lean`, but pm-lean is an optional upstream source, not the canonical data plane.
 
@@ -49,12 +49,30 @@ gh workflow run data-pipeline.yml -R dionysuzx/forkcast-data -f source=canonical
 Required automation secrets:
 
 - `FORKCAST_ASTRO_DISPATCH_TOKEN` for cross-repo Astro rebuild dispatch
+- `CLOUDFLARE_API_TOKEN` for Cloudflare Pages deploys from GitHub Actions
 
 Required variables:
 
+- `CLOUDFLARE_ACCOUNT_ID=1ca125f5f0de8e7d1aad2fb2f0a710ec`
 - `PM_LEAN_FEED_REF=pm-lean-feed`
+- `FORKCAST_DATA_SITE_URL=https://forkcast-data.pages.dev`
 - optional `FORKCAST_DATA_PIPELINE_SOURCE=canonical`
 - optional `FORKCAST_DATA_SOURCE_LIMIT=0` for full-source scheduled ingestion
+
+Cloudflare Pages Function secrets for `/api/admin`:
+
+```bash
+npx wrangler pages secret put ADMIN_TOKEN --project-name forkcast-data
+npx wrangler pages secret put GITHUB_TOKEN --project-name forkcast-data
+npx wrangler pages secret put CLOUDFLARE_API_TOKEN --project-name forkcast-data
+```
+
+GitHub Actions Cloudflare deploy secret:
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN -R dionysuzx/forkcast-data
+gh secret set CLOUDFLARE_API_TOKEN -R dionysuzx/forkcast-astro
+```
 
 ## MCP Smoke
 
@@ -69,7 +87,7 @@ Tools: `search_forkcast`, `get_upgrade`, `get_eip`, `get_call`, `get_decisions`,
 - `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`
 - `GITHUB_TOKEN` with workflow dispatch access
 - `FORKCAST_ASTRO_DISPATCH_TOKEN` for cross-repo Astro rebuild dispatch
-- `CLOUDFLARE_API_TOKEN` only if hosted admin/API functions move to Cloudflare
+- `CLOUDFLARE_API_TOKEN` for deploys and hosted admin/API functions
 - optional source/API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `DISCOURSE_API_KEY`, `DISCORD_BOT_TOKEN`
 - `MIRROR_REMOTE_URL` for backup mirror workflow
 

@@ -47,13 +47,11 @@ jobs:
   pipeline:
     runs-on: ubuntu-latest
     environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      name: cloudflare-pages
+      url: https://forkcast-data.pages.dev
     permissions:
       contents: write
       actions: read
-      pages: write
-      id-token: write
     env:
       SOURCE: ${{ inputs.source || vars.FORKCAST_DATA_PIPELINE_SOURCE || 'canonical' }}
       SOURCE_LIMIT: ${{ inputs.source_limit || vars.FORKCAST_DATA_SOURCE_LIMIT || '0' }}
@@ -64,7 +62,9 @@ jobs:
       ETH_RND_ARCHIVE_ROOT: ${{ github.workspace }}/eth-rnd-archive
       GH_TOKEN: ${{ github.token }}
       FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
-      FORKCAST_DATA_SITE_URL: ${{ vars.FORKCAST_DATA_SITE_URL || 'https://dionysuzx.github.io/forkcast-data' }}
+      FORKCAST_DATA_SITE_URL: ${{ vars.FORKCAST_DATA_SITE_URL || 'https://forkcast-data.pages.dev' }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -137,7 +137,7 @@ jobs:
           fi
       - name: Skip unchanged scheduled deploy
         if: ${{ env.SOURCE != 'dummy' && steps.canonical.outputs.changed != 'true' && env.FORCE_REBUILD != 'true' }}
-        run: echo "No canonical changes and force_rebuild=false; skipping snapshot, GitHub Pages deploy, and Astro dispatch."
+        run: echo "No canonical changes and force_rebuild=false; skipping snapshot, Cloudflare Pages deploy, and Astro dispatch."
       - name: Capture deploy commit
         id: deploy_commit
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
@@ -161,7 +161,6 @@ jobs:
       - run: npm run build-site
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         env:
-          FORKCAST_PUBLIC_BASE_PATH: /forkcast-data
           FORKCAST_RAW_RECORD_BASE: https://raw.githubusercontent.com/dionysuzx/forkcast-data/${{ steps.deploy_commit.outputs.sha }}/records
       - name: Capture snapshot id
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
@@ -173,22 +172,25 @@ jobs:
       - run: npm run compact-dist
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         env:
-          FORKCAST_STATIC_HOST: github-pages
+          FORKCAST_STATIC_HOST: cloudflare-pages
       - uses: actions/upload-artifact@v4
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         with:
           name: forkcast-data-dist
           path: dist
-      - uses: actions/configure-pages@v4
-        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
-      - uses: actions/upload-pages-artifact@v3
-        if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
-        with:
-          path: dist
-      - name: Deploy data site to GitHub Pages
+      - name: Deploy data site to Cloudflare Pages
         id: deployment
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
-        uses: actions/deploy-pages@v4
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN secret is required for Cloudflare Pages deploys" >&2
+            exit 1
+          fi
+          npx wrangler pages deploy dist \
+            --project-name forkcast-data \
+            --branch main \
+            --commit-hash "${{ steps.deploy_commit.outputs.sha }}" \
+            --commit-message "Forkcast data snapshot ${{ steps.snapshot.outputs.snapshot_id }}"
       - name: Dispatch forkcast-astro rebuild
         if: ${{ env.SOURCE == 'dummy' || steps.canonical.outputs.changed == 'true' || env.FORCE_REBUILD == 'true' }}
         uses: actions/github-script@v8

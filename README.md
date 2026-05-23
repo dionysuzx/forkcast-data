@@ -13,7 +13,7 @@ records/
   topic/ethereum-magicians/<id>/manifest.json
   thread/discord-archive/<channel>/<date>/manifest.json
 dist/
-  latest/                     # revalidating pointer materialized for GitHub Pages
+  latest/                     # revalidating pointer, or Cloudflare rewrite to latest immutable snapshot
   snapshots/<snapshotId>/...
 ```
 
@@ -63,17 +63,18 @@ The pipeline no longer checks out or ingests live `ethereum/pm` repository conte
 
 Dummy smoke data is not part of the canonical loop. pm-lean is no longer the canonical data plane; it is an optional upstream artifact source that can be dropped in or removed without changing the durable `forkcast-data` contract.
 
-Before deploy, `compact-dist` keeps the current immutable read-model snapshot and a physical `/latest/*` tree for GitHub Pages. Raw `/records/*` artifact links are written to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus on every 12-hour run.
+Before deploy, `compact-dist` keeps the current immutable read-model snapshot and writes Cloudflare Pages redirects for `/latest/*`, `/catalog.json`, and `/manifest.json`. Raw `/records/*` artifact links point to the exact Git commit on GitHub, keeping provenance inspectable without uploading duplicate copies of the full Discord/EIP corpus on every 12-hour run.
 
-## GitHub Pages
+## Cloudflare Pages
 
-The active production target is GitHub Pages:
+The active production target is Cloudflare Pages:
 
-- Data site: `https://dionysuzx.github.io/forkcast-data/`
-- Project base path: `/forkcast-data`
+- Data site: `https://forkcast-data.pages.dev/`
+- Project name: `forkcast-data`
 - Search is static and runs from prebuilt `/latest/search/fast/*` shards.
-- `/admin` is visible as static status UI; live rerun controls require a future Cloudflare Worker or another function host because GitHub Pages is static-only.
+- `/admin` is visible as status UI; live rerun controls require Cloudflare Pages Function secrets (`ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`, plus GitHub dispatch credentials).
+- Discord thread records stay canonical in GitHub-backed `records/thread/...`; the Cloudflare artifact publishes a searchable/indexed view plus raw-record redirects so the deployment fits the current Pages file-count and file-size limits.
 
-Optional Netlify function code remains in the repo as a serving-layer artifact, but Netlify is no longer the active deploy path.
+GitHub Pages and Netlify are no longer active deploy paths.
 
 See [docs/RUNBOOK.md](docs/RUNBOOK.md) and [docs/DNS.md](docs/DNS.md).
