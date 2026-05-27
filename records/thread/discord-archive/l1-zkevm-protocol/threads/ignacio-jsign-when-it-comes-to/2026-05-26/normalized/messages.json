@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/@ignacio (jsign) when it comes to",
+  "date": "2026-05-26",
+  "messageCount": 20,
+  "sourceHash": "7e9dba0c2fae6142453e753ab2040775ed93bd35ed882b1a334bb0de659581fb",
+  "searchText": "The `ChainConfig` is defined as: ``` class ChainConfig: chain_id: U64 active_fork: ForkConfig ``` With `chain_id` you could identify which network is being targeted, although we don't strictly need to be aware of \"semantics\" in the guest program but only required it for proper tx signature verification. Then we have a single `active_fork`, so it is not possible to \"have more forks activatoins\" (IIUC what you're saying). There is no point of having more than one fork activation in the `ChainConfig` in the guest program because it always validates a single block, so there is no \"pass fork boundary\" situation. LMK if this makes sense or maybe I'm missing something in your question. makes sense. maybe our implementation specifics make it a bit harder. `SszOptionalForkActivationValue` is a list, so it allows multiple items -- is it to bypass some ssz limitations? i see its max is 1 but that can be changed 🙂 Ah no, that list is a list with max length of 1. So yes, is mainly to have optionals in SSZ Just in case, note that type is only used here: ``` class SszForkActivation(Container): \"\"\"SSZ container mirroring ``ForkActivation``.\"\"\" block_number: SszOptionalForkActivationValue timestamp: SszOptionalForkActivationValue ``` (optionals there since fork activation in theory can be blocknum or timestamp based) It is not related to potentially accepting more htan one `ForkConfig` or similar (i.e. `active_fork` it is not a list as shown in my first msg). sure For active_fork, I guess the main case to analyse for sanity would be something like: block 100 is glamsterdam and block 101 is hegota Block 100 would use a different chain config than block 101 here, it would be up to the validator and prover to switch to the new chain config at block 101 Correct. This is currently the expectation: - prover: must switch to the new `active_fork` in block 101 - verifier: must swithc the public input expectation to the new `active_fork` in block 101. The current design is basically providing to the guest program the minimal information needed, since both active forks aren't strictly needed. Supporting a list would mainly mean avoiding the \"switch\" logic on both prover/verifier at fork boundary, yes. Maybe wheenver there is proper impl on the CL side reg public input verification, we could get some feedback if there is any friction on this, and if feels properly justified to having to deserialize a bigger chain config on the guest program side . Makes sense, I think the simpler approach you went for is better. It’s possible but maybe not advised to also say that a guest program only supports one fork at a time. This would simplify the guest program since it doesn’t need information about fork-1 but it means that the validator will need two different guest programs, one for block 100(glamsterdam) and then they switch to another for block 101(hegota) Uhm, yeah I wasn't thinking of advising to support only one fork. Feels that would complicate things a bit on the CL side reg verification keys (not saying this is a good approach, since as you mentioned, we don’t know where the friction will be) Yeah exactly re two verification keys i got confused -- we have both active fork and activation. what's the point of activation here? if the fork is not active, then what? btw, i guess those bpo3 to 5 should now come after amsterdam, shouldn't they? ``` @slotted_freezable @dataclass class ForkConfig: fork: ProtocolFork activation: ForkActivation blob_schedule: BlobSchedule | None ``` The `activation` is signaling at which blocknum or timestamp the (supposedly) active fork got activated. If the guest program receives a block with a timestamp (or blocknum) before that value, the guest program must fail signaling there is a misconfiguration from the prover side. We could drop `activation` and always assume the provided fork always corresponds to the provided block to prove. I decided mainly to keep it since the activation condition is part of chain configs already used in normal ELs (so not diverge much from mirroing it as I did generally), and just leave the check as a free-ish safety guard. bpos are also defined as protocol forks yes. https://github.com/ethereum/execution-specs/blob/044a515553e44e9458825a87409193f9d1d101af/src/ethereum/forks/amsterdam/stateless.py#L83-L112 so mainly they rules mainly materialize in BlobSchedule` changes but not other protocol upgrades For completeness, note that this safetyguard only covers \"one half\" of potential misconfig (i.e. blcok being earlier than activation, which is some mistake from the prover). If there is a new scheduled fork in the future, and the prover is misconfiged reg not knowing about that, then the guest program can't know that the block isn't supposed to be in a future fork. From the proof verifier side (CL), the public input verification should expect a ChainConfig that isn't the one that the prover used thus the proof verification would fail. Hopefully the above isn't confusing. Maybe a clearer way to say it: the `ChainConfig` is a public input, thus the proof verifier has a direct check on which `ChainConfig` was used for the proof. The guest program always validates the block corresponds to that `ChainConfig`. If the prover uses a wrong `ChainConfig` compared to CL network configuration expectations, it will be a direct \"public input mismatch\" (i.e. nobody cares if _only_ the proof `stateless_validation` says `True`, other public input fields also matter to accept the proof).",
+  "excerpts": [
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "",
+      "createdAt": "2026-05-26T20:11:03.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The `ChainConfig` is defined as:\n```\nclass ChainConfig:\n    chain_id: U64\n    active_fork: ForkConfig\n```\nWith `chain_id` you could identify which network is being targeted, although we don't strictly need to be aware of \"semantics\" in the guest program but only required it for proper tx signature verification.\nThen we have a single `active_fork`, so it is not possible to \"have more forks activatoins\" (IIUC what you're saying). There is no point of having more than one fork activation in the `ChainConfig` in the guest program because it always validates a single block, so there is no \"pass fork boundary\" situation.\n\nLMK if this makes sense or maybe I'm missing something in your question.",
+      "createdAt": "2026-05-26T20:11:04.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "makes sense. maybe our implementation specifics make it a bit harder. `SszOptionalForkActivationValue` is a list, so it allows multiple items -- is it to bypass some ssz limitations?",
+      "createdAt": "2026-05-26T20:14:29.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "i see its max is 1 but that can be changed 🙂",
+      "createdAt": "2026-05-26T20:15:29.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah no, that list is a list with max length of 1. So yes, is mainly to have optionals in SSZ",
+      "createdAt": "2026-05-26T20:15:33.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Just in case, note that type is only used here:\n```\nclass SszForkActivation(Container):\n    \"\"\"SSZ container mirroring ``ForkActivation``.\"\"\"\n\n    block_number: SszOptionalForkActivationValue\n    timestamp: SszOptionalForkActivationValue\n```\n(optionals there since fork activation in theory can be blocknum or timestamp based)\n\nIt is not related to potentially accepting more htan one `ForkConfig` or similar (i.e. `active_fork` it is not a list as shown in my first msg).",
+      "createdAt": "2026-05-26T20:17:01.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "sure",
+      "createdAt": "2026-05-26T20:19:17.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "For active_fork, I guess the main case to analyse for sanity would be something like: block 100 is glamsterdam and block 101 is hegota\n\nBlock 100 would use a different chain config than block 101 here, it would be up to the validator and prover to switch to the new chain config at block 101",
+      "createdAt": "2026-05-26T20:28:09.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Correct. This is currently the expectation:\n- prover: must switch to the new `active_fork` in block 101\n- verifier: must swithc the public input expectation to the new `active_fork` in block 101.\n\nThe current design is basically providing to the guest program the minimal information needed, since both active forks aren't strictly needed. Supporting a list would mainly mean avoiding the \"switch\" logic on both prover/verifier at fork boundary, yes.",
+      "createdAt": "2026-05-26T20:32:41.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Maybe wheenver there is proper impl on the CL side reg public input verification, we could get some feedback if there is any friction on this, and if feels properly justified to having to deserialize a bigger chain config on the guest program side .",
+      "createdAt": "2026-05-26T20:33:55.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Makes sense, I think the simpler approach you went for is better. \n\nIt’s possible but maybe not advised to also say that a guest program only supports one fork at a time. This would simplify the guest program since it doesn’t need information about fork-1 but it means that the validator will need two different guest programs, one for block 100(glamsterdam) and then they switch to another for block 101(hegota)",
+      "createdAt": "2026-05-26T20:37:14.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Uhm, yeah I wasn't thinking of advising to support only one fork. Feels that would complicate things a bit on the CL side reg verification keys",
+      "createdAt": "2026-05-26T20:38:03.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "(not saying this is a good approach, since as you mentioned, we don’t know where the friction will be)",
+      "createdAt": "2026-05-26T20:38:09.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Yeah exactly re two verification keys",
+      "createdAt": "2026-05-26T20:38:31.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "i got confused -- we have both active fork and activation. what's the point of activation here? if the fork is not active, then what?",
+      "createdAt": "2026-05-26T22:47:53.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "btw, i guess those bpo3 to 5 should now come after amsterdam, shouldn't they?",
+      "createdAt": "2026-05-26T22:49:43.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "```\n@slotted_freezable\n@dataclass\nclass ForkConfig:\n    fork: ProtocolFork\n    activation: ForkActivation\n    blob_schedule: BlobSchedule | None\n```\n\nThe `activation` is signaling at which blocknum or timestamp the (supposedly) active fork got activated.\nIf the guest program receives a block with a timestamp (or blocknum) before that value, the guest program must fail signaling there is a misconfiguration from the prover side.\n\nWe could drop `activation` and always assume the provided fork always corresponds to the provided block to prove. I decided mainly to keep it since the activation condition is part of chain configs already used in normal ELs (so not diverge much from mirroing it as I did generally), and just leave the check as a free-ish safety guard.",
+      "createdAt": "2026-05-26T23:45:29.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "bpos are also defined as protocol forks yes. https://github.com/ethereum/execution-specs/blob/044a515553e44e9458825a87409193f9d1d101af/src/ethereum/forks/amsterdam/stateless.py#L83-L112\nso mainly they rules mainly materialize in BlobSchedule` changes but not other protocol upgrades",
+      "createdAt": "2026-05-26T23:47:37.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "For completeness, note that this safetyguard only covers \"one half\" of potential misconfig (i.e. blcok being earlier than activation, which is some mistake from the prover). If there is a new scheduled fork in the future, and the prover is misconfiged reg not knowing about that, then the guest program can't know that the block isn't supposed to be in a future fork.\n\nFrom the proof verifier side (CL), the public input verification should expect a ChainConfig that isn't the one that the prover used thus the proof verification would fail.",
+      "createdAt": "2026-05-26T23:51:25.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Hopefully the above isn't confusing.\n\nMaybe a clearer way to say it: the `ChainConfig` is a public input, thus the proof verifier has a direct check on which `ChainConfig` was used for the proof. The guest program always validates the block corresponds to that `ChainConfig`.\n\nIf the prover uses a wrong `ChainConfig` compared to CL network configuration expectations, it will be a direct \"public input mismatch\" (i.e. nobody cares if _only_ the proof `stateless_validation` says `True`, other public input fields also matter to accept the proof).",
+      "createdAt": "2026-05-26T23:57:27.837000+00:00",
+      "attachments": []
+    }
+  ]
+}
