@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/devnet4 not lookin so hot",
+  "date": "2026-05-28",
+  "messageCount": 32,
+  "sourceHash": "46b4963b58c2ef64133fa2fde9eba0e7e65fbdc70f7884fd8ae4762463df280f",
+  "searchText": "> The chain split at slot 22688 because Gloas / ePBS envelope propagation broke — the new layer where the beacon block and its e in lodestar forkchoice debug (both lodestar_nethermind_2 and lodestar_ethrex_1), finalized checkpoint happen later at epoch 710 which is slot 22720 so 22688 is not the chain split, it was pruned in our forkchoice data because it's pre-finalized so there are 2 forks, both have slot 22853 with different roots: - majority: ``` 1702888:May-25 14:10:36.072[chain] verbose: Block processed slot=22853, root=0xee35edb73276c77e491292e78ddcd4657abcd85783728aa4de257193f90ad66c, delaySec=0.07200002670288086 ``` - prysm-nethermind-1: ``` 1702928:May-25 14:10:36.477[chain] verbose: Block processed slot=22853, root=0x7a6fda7a95fa798ee2c2963c2ee06004732ea15cb9e4333b67f8779e39982daf, delaySec=0.47699999809265137 ``` 22800 ├─ 22801 -> 22803 -> 22804 -> 22805 -> 22806 -> 22807 -> 22808 │ -> 22811 -> 22812 -> 22816 -> 22817 -> 22818 -> 22821 │ -> 22823 -> 22824 -> 22826 -> 22827 -> 22829 -> 22832 │ -> 22834 -> 22853 ee35 (majority) └─ 22820 -> 22822 -> 22833 -> 22839 -> 22840 -> 22845 -> 22853 7a6f (prysm-nethermind-1) so 22800 is where the chain split happen, it's worth to investigate why `prysm-nethermind-1` did a 12-slot reorg at 22820 and started with its own fork since then cc <@363800010518822915> so I trace `execution_block_hash` of 22800 vs 22801 vs 22820 ``` 22800 root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90 PENDING/EMPTY execution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e FULL execution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2 22801 root: 0x55d6eab2ff7a1774f56bf65c4bcd678597a3a15f7c3b1ca0467e19fd44739d84 PENDING/EMPTY execution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2 FULL execution_block_hash: 0x00a7a83d9026c2172c975a620d230f6ce7aee3b4b409d116809502cb1be63469 22820 root: 0x5d4c521a2449b5c91ed9a02aca6691c872482a09ee505900caf486e9113ba38d PENDING/EMPTY execution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e FULL execution_block_hash: 0x0e0be4e23aea311fe4fc918e62294bd319ffd32b9739dfff2d224d54bacb5374 ``` conclusion 22800 ├─ FULL -> 22801 (majority) └─ EMPTY -> 22820 (prysm-nethermind-1) so somehow `prysm-nethermind-1` reorged 12 blocks and decided to build on 22800 EMPTY, instead of FULL like the majority found an issue with `lodestar-ethrex-2`, it produced orphaned blocks - slot `22903 FULL` is head - `shouldBuildOnFull()` returned false due to ptc votes, so node produced on `22903 EMPTY` - the produced block does not become head because `22903 FULL` already won and keeps being the head there - so it was orphaned, happened both with 22929 and 22930 I think that's a design gap of `should_build_on_full()` when it conflicts to `get_head()`, would be great if someone can confirm https://github.com/ethereum/consensus-specs/issues/5307 not sure if it's the same issue to `prysm-nethermind-1` above do people think we can try to recover this bad chain? the main thing of a devnet is to find client bugs, or spec bugs, or client interop bugs I feel we have enough data to investigate, looks like we already have a spec issue here (if not, it's a lodestar issue that we need to fix first before retry) need to take some time for people to investigate first before decide if we should recover the chain or go with a new one (with new spec) would someone from prysm be able to look into it before ACD today? cc <@363800010518822915> or <@755590043632140352> I think this is not a spec issue, this may be a Lodestar issue, but the spec is correct here in that if you build on empty and you build timely then your child of empty must become your head Already left a reply in the issue there im out of office this week but i studied prysm logs on devnet4 for a little bit, i really couldnt find any prysm specific bug Tuyen can you get me the two blocks that descend from 22800 from a lodestar node? That is 22801 and 22820 in JSON? Still even if every client was attesting incorrectly I don't think Prysm could still see empty as head by 820, so I think Nethermind must have never seen the Payload. Will look at a node now 22800 EMPTY ``` slot: 22800 block_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90 parent_root: 0x73c0c8291d4fcfbdda0c23f241128b73e234701fcf6e885cface08c270bc7f56 justified_epoch: 710 finalized_epoch: 709 validity: valid execution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e weight: 6400 or 57536 ``` 22800 FULL ``` slot: 22800 block_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90 parent_root: 0x73c0c8291d4fcfbdda0c23f241128b73e234701fcf6e885cface08c270bc7f56 justified_epoch: 710 finalized_epoch: 709 validity: valid execution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2 weight: 51136 ``` 22801 EMPTY (majority) builds 22800 FULL ``` slot: 22801 block_root: 0x55d6eab2ff7a1774f56bf65c4bcd678597a3a15f7c3b1ca0467e19fd44739d84 parent_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90 justified_epoch: 710 finalized_epoch: 709 validity: valid execution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2 weight: 51136 or 0 ``` 22820 EMPTY (prysm-nethermind-1) builds on 22800 EMPTY ``` slot: 22820 block_root: 0x5d4c521a2449b5c91ed9a02aca6691c872482a09ee505900caf486e9113ba38d parent_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90 justified_epoch: 711 finalized_epoch: 710 validity: valid execution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e weight: 5728 or 0 ``` I'm analyzing logs Prysm indeed never gets the payload for 22800, also some weird stuff with timings may be affecting forkchoice, we are getting the PTC attestations **before** the beacon block (so therefore before the payload) right at the beginning of the slot, we do not queue these ones when we don't have a block, so this may be leading to a lot of reorgs if people are reorging blocks based on PTC (Prysm does not do this yet, I am waiting for stable images from clients to test this) So Lodestar for sure is sending PTC attestations very early, if every client does this then it may happen that PTC ends up being voting for empty when they intended full I meant the actual blocks, I want to see the attestations, but I think Prysm node still has them so I can check myself here but yes, the problem is that Prysm can't even sync 22801 because it does not receive the parent payload Prysm is completely isolated at the time and doesn't get anything from there on cause it can't get the payload it Only gets data when it falls back to init sync, we may have a P2P issue <@363800010518822915> or probably the peering in the devnet is still fucked up. But from the point of view of this node, it's behavior is correct <@575994543527297055> can you check if lodestar-nethermind-1 was active at the moment? this was the only active peer that Prysm had and it returns an empty stream when we request the payload by root so that's what kills Prysm from importing 22801 I restarted that node yesterday trying to get it to sync again, but it was in the same state as all other lodestar nodes before that so this seems to be the only Peer that is serving stuff to Prysm at that time, it is the same peer that serves us the child nodes so it *must* have the payload but it doesn't return the payload by envelope the stream is empty At that time Prysm downscores aggressively everyone else This is the reason why we fork on 22820, we should work out how to request more times that missing payload (we request it only twice: when we fail to have received it on time and then later when we receive a block descending from it) but we stop even requesting them after a while lodestar-nethermind-1 has the payload of slot 22800, at least I can get it via api It's weird I have logs showing that it doesn't reply with it on our request by root Twice And I am certain it's that node the second time cause it's our only peer by `0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90`?",
+  "excerpts": [
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "> The chain split at slot 22688 because Gloas / ePBS envelope propagation broke — the new layer where the beacon block and its e\nin lodestar forkchoice debug (both lodestar_nethermind_2 and lodestar_ethrex_1), finalized checkpoint happen later at epoch 710 which is slot 22720\nso 22688 is not the chain split, it was pruned in our forkchoice data because it's pre-finalized",
+      "createdAt": "2026-05-28T03:13:49.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so there are 2 forks, both have slot 22853 with different roots:\n- majority:\n```\n1702888:May-25 14:10:36.072[chain]         verbose: Block processed slot=22853, root=0xee35edb73276c77e491292e78ddcd4657abcd85783728aa4de257193f90ad66c, delaySec=0.07200002670288086\n```\n- prysm-nethermind-1:\n```\n1702928:May-25 14:10:36.477[chain]         verbose: Block processed slot=22853, root=0x7a6fda7a95fa798ee2c2963c2ee06004732ea15cb9e4333b67f8779e39982daf, delaySec=0.47699999809265137\n```",
+      "createdAt": "2026-05-28T03:39:34.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "22800\n├─ 22801 -> 22803 -> 22804 -> 22805 -> 22806 -> 22807 -> 22808\n│  -> 22811 -> 22812 -> 22816 -> 22817 -> 22818 -> 22821\n│  -> 22823 -> 22824 -> 22826 -> 22827 -> 22829 -> 22832\n│  -> 22834 -> 22853 ee35 (majority)\n└─ 22820 -> 22822 -> 22833 -> 22839 -> 22840 -> 22845 -> 22853 7a6f (prysm-nethermind-1)\n\nso 22800 is where the chain split happen, it's worth to investigate why `prysm-nethermind-1` did a 12-slot reorg at 22820 and started with its own fork since then cc <@363800010518822915>",
+      "createdAt": "2026-05-28T03:43:37.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so I trace `execution_block_hash` of 22800 vs 22801 vs 22820\n```\n22800\nroot: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90\n\nPENDING/EMPTY execution_block_hash:\n0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e\n\nFULL execution_block_hash:\n0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2\n\n22801\nroot: 0x55d6eab2ff7a1774f56bf65c4bcd678597a3a15f7c3b1ca0467e19fd44739d84\n\nPENDING/EMPTY execution_block_hash:\n0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2\n\nFULL execution_block_hash:\n0x00a7a83d9026c2172c975a620d230f6ce7aee3b4b409d116809502cb1be63469\n\n22820\nroot: 0x5d4c521a2449b5c91ed9a02aca6691c872482a09ee505900caf486e9113ba38d\n\nPENDING/EMPTY execution_block_hash:\n0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e\n\nFULL execution_block_hash:\n0x0e0be4e23aea311fe4fc918e62294bd319ffd32b9739dfff2d224d54bacb5374\n```\n\nconclusion\n\n22800\n├─ FULL  -> 22801 (majority)\n└─ EMPTY -> 22820 (prysm-nethermind-1)\n\nso somehow `prysm-nethermind-1` reorged 12 blocks and decided to build on 22800 EMPTY, instead of FULL like the majority",
+      "createdAt": "2026-05-28T04:10:07.566000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "found an issue with `lodestar-ethrex-2`, it produced orphaned blocks\n- slot `22903 FULL` is head\n- `shouldBuildOnFull()` returned false due to ptc votes, so node produced on `22903 EMPTY`\n- the produced block does not become head because `22903 FULL` already won and keeps being the head there\n- so it was orphaned, happened both with 22929 and 22930\n\nI think that's a design gap of `should_build_on_full()` when it conflicts to `get_head()`, would be great if someone can confirm https://github.com/ethereum/consensus-specs/issues/5307\nnot sure if it's the same issue to `prysm-nethermind-1` above",
+      "createdAt": "2026-05-28T07:38:40.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do people think we can try to recover this bad chain?",
+      "createdAt": "2026-05-28T08:38:18.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the main thing of a devnet is to find client bugs, or spec bugs, or client interop bugs\nI feel we have enough data to investigate, looks like we already have a spec issue here (if not, it's a lodestar issue that we need to fix first before retry)\nneed to take some time for people to investigate first before decide if we should recover the chain or go with a new one (with new spec)",
+      "createdAt": "2026-05-28T09:53:12.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "would someone from prysm be able to look into it before ACD today? cc <@363800010518822915> or <@755590043632140352>",
+      "createdAt": "2026-05-28T11:01:07.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think this is not a spec issue, this may be a Lodestar issue, but the spec is correct here in that if you build on empty and you build timely then your child of empty must become your head",
+      "createdAt": "2026-05-28T11:16:04.049000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Already left a reply in the issue there",
+      "createdAt": "2026-05-28T11:16:21.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "im out of office this week but i studied prysm logs on devnet4 for a little bit, i really couldnt find any prysm specific bug",
+      "createdAt": "2026-05-28T11:26:18.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Tuyen can you get me the two blocks that descend from 22800 from a lodestar node? That is 22801 and 22820 in JSON?   Still even if every client was attesting incorrectly I don't think Prysm could still see empty as head by 820, so I think Nethermind must have never seen the Payload. Will look at a node now",
+      "createdAt": "2026-05-28T11:37:25.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "22800 EMPTY\n\n```\nslot: 22800\nblock_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90\nparent_root: 0x73c0c8291d4fcfbdda0c23f241128b73e234701fcf6e885cface08c270bc7f56\njustified_epoch: 710\nfinalized_epoch: 709\nvalidity: valid\nexecution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e\nweight: 6400 or 57536\n```\n\n22800 FULL\n\n```\nslot: 22800\nblock_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90\nparent_root: 0x73c0c8291d4fcfbdda0c23f241128b73e234701fcf6e885cface08c270bc7f56\njustified_epoch: 710\nfinalized_epoch: 709\nvalidity: valid\nexecution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2\nweight: 51136\n```\n\n22801 EMPTY (majority) builds 22800 FULL\n\n```\nslot: 22801\nblock_root: 0x55d6eab2ff7a1774f56bf65c4bcd678597a3a15f7c3b1ca0467e19fd44739d84\nparent_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90\njustified_epoch: 710\nfinalized_epoch: 709\nvalidity: valid\nexecution_block_hash: 0xa165a9f607d3f1e853cf7b0d2d751c8c89b84507159c8b79f6463353207dccf2\nweight: 51136 or 0\n```\n\n22820 EMPTY (prysm-nethermind-1) builds on 22800 EMPTY\n\n```\nslot: 22820\nblock_root: 0x5d4c521a2449b5c91ed9a02aca6691c872482a09ee505900caf486e9113ba38d\nparent_root: 0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90\njustified_epoch: 711\nfinalized_epoch: 710\nvalidity: valid\nexecution_block_hash: 0xf7d90ad1cd0b788527a132d59adb640e8bd5ea6d4de7420174d45797ccaa8d8e\nweight: 5728 or 0\n```",
+      "createdAt": "2026-05-28T11:45:16.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I'm analyzing logs Prysm indeed never gets the payload for 22800, also some weird stuff with timings may be affecting forkchoice, we are getting the PTC attestations **before** the beacon block (so therefore before the payload) right at the beginning of the slot, we do not queue these ones when we don't have a block, so this may be leading to a lot of reorgs if people are reorging blocks based on PTC (Prysm does not do this yet, I am waiting for stable images from clients to test this)",
+      "createdAt": "2026-05-28T11:45:51.019000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "So Lodestar for sure is sending PTC attestations very early, if every client does this then it may happen that PTC ends up being voting for empty when they intended full",
+      "createdAt": "2026-05-28T11:46:48.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I meant the actual blocks, I want to see the attestations, but I think Prysm node still has them so I can check myself here",
+      "createdAt": "2026-05-28T11:47:25.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but yes, the problem is that Prysm can't even sync 22801 because it does not receive the parent payload",
+      "createdAt": "2026-05-28T11:48:28.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Prysm is completely isolated at the time and doesn't get anything from there on cause it can't get the payload",
+      "createdAt": "2026-05-28T11:50:24.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it Only gets data when it falls back to init sync, we may have a P2P issue <@363800010518822915> or probably the peering in the devnet is still fucked up. But from the point of view of this node, it's behavior is correct",
+      "createdAt": "2026-05-28T11:51:39.971000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@575994543527297055> can you check if lodestar-nethermind-1 was active at the moment? this was the only active peer that Prysm had and it returns an empty stream when we request the payload by root",
+      "createdAt": "2026-05-28T12:36:25.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so that's what kills Prysm from importing 22801",
+      "createdAt": "2026-05-28T12:36:36.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I restarted that node yesterday trying to get it to sync again, but it was in the same state as all other lodestar nodes before that",
+      "createdAt": "2026-05-28T12:37:47.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so this seems to be the only Peer that is serving stuff to Prysm at that time, it is the same peer that serves us the child nodes so it *must* have the payload",
+      "createdAt": "2026-05-28T12:39:14.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but it doesn't return the payload by envelope",
+      "createdAt": "2026-05-28T12:39:25.842000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the stream is empty",
+      "createdAt": "2026-05-28T12:39:29.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "At that time Prysm downscores aggressively everyone else",
+      "createdAt": "2026-05-28T12:39:51.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "This is the reason why we fork on 22820, we should work out how to request more times that missing payload (we request it only twice: when we fail to have received it on time and then later when we receive a block descending from it) but we stop even requesting them after a while",
+      "createdAt": "2026-05-28T12:41:06.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lodestar-nethermind-1 has the payload of slot 22800, at least I can get it via api",
+      "createdAt": "2026-05-28T12:47:13.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "It's weird I have logs showing that it doesn't reply with it on our request by root",
+      "createdAt": "2026-05-28T12:52:37.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Twice",
+      "createdAt": "2026-05-28T12:52:45.886000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "And I am certain it's that node the second time cause it's our only peer",
+      "createdAt": "2026-05-28T12:53:04.272000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "by `0xcd040759c0ba683b55417fab81b99c746c8a2ff31bd342974d56b140a4c92b90`?",
+      "createdAt": "2026-05-28T13:01:45.458000+00:00",
+      "attachments": []
+    }
+  ]
+}
