@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-06-08",
-  "messageCount": 2,
-  "sourceHash": "b8b30a2eaa7fd0932484b0e4b35b4a85bab50666db296e56b9779b9684cab50f",
-  "searchText": "Ok, so for the attack to work, the builder seems to need a fairly specific split. First, a PTC majority must see a non-executable payload envelope before the payload deadline, so they vote payload_present = True (they don't check validity post-execution, they only care about timeliness). The next-slot proposer must be in that split: it receives this bad envelope first via gossip, full verification fails, and store.payloads[root] remains empty. Then the valid payload must reach the rest of the network late enough that the proposer cannot recover it in time, even via ExecutionPayloadEnvelopesByRoot, but early enough that many next-slot attesters can verify it before voting. The proposer therefore builds on EMPTY, while those attesters, together with the PTC True/True signal, prefer the FULL branch and orphan the EMPTY block. Not sure why here you wrote ‘49% of the PTC’, the PTC should be able to vote TRUE and influence the next slot attesters and they need a quorum of TRUE for that, unless I am not understanding the attack. To me it seems that the split needs only to put the proposer inside the same portion as a 51% PTC members, and everyone else outside will receive the valid one 'too late' for the proposer to recover. If the above is right, would an assumption like this make sense to you? “For a message under Byzantine control, the adversary may choose the fraction of honest validators that have received it by time t, but not which validators by committee role. In particular, the PTC and the slot-(N+1) attesters see the same receipt fraction, so the adversary cannot deliver a message to one committee while withholding it from the other.”",
+  "messageCount": 18,
+  "sourceHash": "c1d2f7b2981601065118a181b5dacad3e998a172d1da4eb2c150a7b0b8025e82",
+  "searchText": "Ok, so for the attack to work, the builder seems to need a fairly specific split. First, a PTC majority must see a non-executable payload envelope before the payload deadline, so they vote payload_present = True (they don't check validity post-execution, they only care about timeliness). The next-slot proposer must be in that split: it receives this bad envelope first via gossip, full verification fails, and store.payloads[root] remains empty. Then the valid payload must reach the rest of the network late enough that the proposer cannot recover it in time, even via ExecutionPayloadEnvelopesByRoot, but early enough that many next-slot attesters can verify it before voting. The proposer therefore builds on EMPTY, while those attesters, together with the PTC True/True signal, prefer the FULL branch and orphan the EMPTY block. Not sure why here you wrote ‘49% of the PTC’, the PTC should be able to vote TRUE and influence the next slot attesters and they need a quorum of TRUE for that, unless I am not understanding the attack. To me it seems that the split needs only to put the proposer inside the same portion as a 51% PTC members, and everyone else outside will receive the valid one 'too late' for the proposer to recover. If the above is right, would an assumption like this make sense to you? “For a message under Byzantine control, the adversary may choose the fraction of honest validators that have received it by time t, but not which validators by committee role. In particular, the PTC and the slot-(N+1) attesters see the same receipt fraction, so the adversary cannot deliver a message to one committee while withholding it from the other.” https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.10/sync/optimistic.md#how-to-optimistically-import-blocks > The parent of the block MUST NOT have an `INVALIDATED` execution payload. is this still true in Gloas? In particular, it would disallow building on a CL block the payload of which is `INVALID`, but the rest of ePBS seems to basically interpret that as an `EMPTY` i.e. as I read it it would force CL reorgs on top of EL `INVALID`/`INVALID_BLOCK_HASH`es hey folks, this is the link to the builder api spec: https://github.com/ethereum/builder-specs/pull/138 i m quickly updating the PR description now, i realise its a bit out of date that should be changed to \"the parent blockhash must not be for an INVALID block\" i have a follow up PR here to remove the API to submit the signed beacon block back to the builder: https://github.com/ethereum/builder-specs/pull/162 I believe builders can listen to the block on the p2p and this can actually make implementations simpler for clients clients will have to submit the block only back to the builder who provided the bid and this is not trivial to know from the just the bid. so clients will have to maintain some sort of state like a mapping b/w bid -> url which might make beacon nodes more stateful for validator clients like vouch will update when i m done with this I have updated it: https://github.com/ethereum/builder-specs/pull/138 please take a look to all CLs. I think a CL dev from each time has looked at it. tersec from nimbus, eitan from lighthouse hangleang from grandine, ofc had a lot of discussions with potuz, terrence and nico. i am not aware if any teku dev has looked at it. I request someone from teku to look at it cc: <@504202741933932544> <@680234424037670912> post that I will merge PR #138 leaving PR #162 open, I suspect client devs will run into the issue with the submitBeaconBlock while implementing. and we can iterate on it as we gain more information during implementations, testing and as external entities become more aware of it we have a builder-api server side impl available in buildoor: https://github.com/ethpandaops/buildoor/pull/81 i have tested this with a builder-api prototype i wrote with prysm, so generally should work out of the box i ll work on getting this merged to main which will make everyones lives much easier if any client implements it, let me know! I am very happy to test it along with you folks! im not advocating for this.. but i think one way to strength proposer's position here may be changing something like: `[IGNORE] The node has not seen another valid SignedExecutionPayloadEnvelope for this block root from this builder.` to `[IGNORE] The node has not seen another valid SignedExecutionPayloadEnvelope for this block root from this builder. UNLESS you are the proposer of next slot` so this gives an option that attester could forward the valid payload to the proposer and proposer could build on full. Not sure if its worth it at all of what kind of new attack this opens up",
   "excerpts": [
     {
       "author": "luca_zanolini",
@@ -20,6 +20,134 @@
       "parent": "",
       "content": "If the above is right, would an assumption like this make sense to you?\n\n“For a message under Byzantine control, the adversary may choose the fraction of honest validators that have received it by time t, but not which validators by committee role. In particular, the PTC and the slot-(N+1) attesters see the same receipt fraction, so the adversary cannot deliver a message to one committee while withholding it from the other.”",
       "createdAt": "2026-06-08T07:31:23.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.10/sync/optimistic.md#how-to-optimistically-import-blocks\n> The parent of the block MUST NOT have an `INVALIDATED` execution payload.\n\nis this still true in Gloas? In particular, it would disallow building on a CL block the payload of which is `INVALID`, but the rest of ePBS seems to basically interpret that as an `EMPTY`",
+      "createdAt": "2026-06-08T13:15:25.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i.e. as I read it it would force CL reorgs on top of EL `INVALID`/`INVALID_BLOCK_HASH`es",
+      "createdAt": "2026-06-08T13:32:09.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "hey folks, this is the link to the builder api spec: https://github.com/ethereum/builder-specs/pull/138",
+      "createdAt": "2026-06-08T15:10:50.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i m quickly updating the PR description now, i realise its a bit out of date",
+      "createdAt": "2026-06-08T15:11:03.236000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that should be changed to \"the parent blockhash must not be for an INVALID block\"",
+      "createdAt": "2026-06-08T15:11:43.221000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i have a follow up PR here to remove the API to submit the signed beacon block back to the builder: https://github.com/ethereum/builder-specs/pull/162\nI believe builders can listen to the block on the p2p and this can actually make implementations simpler for clients",
+      "createdAt": "2026-06-08T15:12:05.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "clients will have to submit the block only back to the builder who provided the bid and this is not trivial to know from the just the bid. so clients will have to maintain some sort of state like a mapping b/w bid -> url",
+      "createdAt": "2026-06-08T15:13:08.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "which might make beacon nodes more stateful for validator clients like vouch",
+      "createdAt": "2026-06-08T15:13:38.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "will update when i m done with this",
+      "createdAt": "2026-06-08T15:14:04.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have updated it: https://github.com/ethereum/builder-specs/pull/138 please take a look to all CLs. \nI think a CL dev from each time has looked at it.  tersec from nimbus, eitan from lighthouse hangleang from grandine, ofc had a lot of discussions with potuz, terrence and nico. \ni am not aware if any teku dev has looked at it. I request someone from teku to look at it cc: <@504202741933932544> <@680234424037670912>",
+      "createdAt": "2026-06-08T15:46:46.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "post that I will merge PR #138 leaving PR #162 open, I suspect client devs will run into the issue with the submitBeaconBlock while implementing.",
+      "createdAt": "2026-06-08T15:47:44.545000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and we can iterate on it as we gain more information during implementations, testing and as external entities become more aware of it",
+      "createdAt": "2026-06-08T15:48:27.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we have a builder-api server side impl available in buildoor: https://github.com/ethpandaops/buildoor/pull/81 i have tested this with a builder-api prototype i wrote with prysm, so generally should work out of the box",
+      "createdAt": "2026-06-08T16:18:08.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i ll work on getting this merged to main which will make everyones lives much easier",
+      "createdAt": "2026-06-08T16:18:57.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if any client implements it, let me know! I am very happy to test it along with you folks!",
+      "createdAt": "2026-06-08T16:19:14.090000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "im not advocating for this.. but i think one way to strength proposer's position here may be changing something like: \n`[IGNORE] The node has not seen another valid SignedExecutionPayloadEnvelope for this block root from this builder.`\n\nto \n\n`[IGNORE] The node has not seen another valid SignedExecutionPayloadEnvelope for this block root from this builder. UNLESS you are the proposer of next slot`\n\nso this gives an option that attester could forward the valid payload to the proposer and proposer could build on full. Not sure if its worth it at all of what kind of new attack this opens up",
+      "createdAt": "2026-06-08T21:36:03.623000+00:00",
       "attachments": []
     }
   ]
