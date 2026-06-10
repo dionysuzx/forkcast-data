@@ -1,0 +1,432 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/ethrex error logs",
+  "date": "2026-06-10",
+  "messageCount": 52,
+  "sourceHash": "8d229b2956fbc1477a2fbaedb0fee7e017e873065559954c7de550a41bcb657e",
+  "searchText": "I think I permanently damaged dora for this block/attestations view https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations oh, that looks bad o.O does a restart maybe fix it? it happens if I click into the attestations view and then out of it into a different tab, but not exactly sure about the exact trigger that causes this also it seems like indices are no longer mapped to client labels The underlying issue is that there is a \"null\" passed as validator names lookup dict.. So there is a JS exception thrown that kills the client side rendering nice find o.O it's a bug in my ssz lib 😅 fixed 🙂 thanks, it works now, but do you know why we don't see the labels anymorehttps://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations yea, the attester duties are not persisted in the dora db. that'd be megabytes of data for every epoch for mainnet sized networks. So the duties are kept in memory only for the most recent 2 or 3 epochs. Afterwards it's dropped off. Anything building on top of the duties (like the attestestation bitmask lookups) is then no longer available I could probably store them in S3 or so to not clutter the DB 🤔 Would it be helpful to have it available long term? hmm I am just looking at older block right now trying to understand what happened, but of course I can also just pull that data from somewhere else, it's tricky to reconstruct old shufflings though, so useful for sure I am just not sure how common it is to look at such old blocks the reason I am doing it right now is because we stopped accepting deathstar blocks as canonical (which is good) https://dora.glamsterdam-devnet-5.ethpandaops.io/slots/filtered?f&f.missing=1&f.orphaned=1&f.pname=lodestar-ethrex-1 but I wanna understand why, the theory right now is because grandine is offline and before in some cases they added enough attestation weight (since they voted incorrectly together with Nimbus) with proposer boost to flip the head, so the proposer that build on top of the deathstar branch in some cases are actually correct, but this can only happen if we have ~20% malicious attesters supporting it cc <@755590043632140352> does that explain it? Yes. PB alone shouldn't be enough to flip the view of honest attesters We definitely need to fix nimbus and grandine. Hopefully today I'll deliver on my promise to merge 5222 and also fix the majority of PTC yes so since grandine (the deathstar supporters) went offline we no longer flip the view, so it's only possible if you have a large amount attesters that you control and that support your payload reorg also honest attesters are not having full pariticipation (for whatever reason) so we miss a few votes there too I am actually surprised how it's possible that Prysm is voting correctly even without 5222, you need to explain this to me. Does prysm keep track locally if it sees the payload timely and doesn't care about PTC votes in that case? Arresters never care about PTC, I've been telling you this forever. They only care in case the proposer reorgs and the PTC achieved quorum, which in this devnet never should happen what's your definition of PTC achieved quorum? so consider this, if you don't count ptc votes correctly (ie. you don't reach >256 as timely then this shoulnd't be possible) ``` 1 - honest lighthouse FULL (slot 1 ) 2 - deathstar EMPTY (reorg 1 FULL) (slot 2) should_extend_payload(1) = false - payload_is_timely = false - payload_data_is_available = false - proposer_root == Root() = false - store.blocks[proposer_root].parent_root != root = false - is_parent_node_full = false 2 is on_block <-- proposer_root slot 1 lighthouse proposes block, slot 1 attester vote for lighthouse block as PENDING in slot 1 lighthouse reveals payload (ptc in slot 1 votes timely/available) slot 2 deathstar build on slot 1 empty prysm receive block from deathstar in slot 2 at ~2 seconds (no attestations yet) why does prysm set it as head? what you set as head will determine if you vote for 1 FULL or 2 EMPTY ``` so here ``` - payload_is_timely = false - payload_data_is_available = false ``` is like this for prysm because you don't have 5222 Well, in the situation yuou describe above: There is no quorum, slot N, full is our head, N+1 proposes on top of empty, we follow the proposer of N+1 as the spec says, so if we are voting agains the proposer there must be something else going on but you are voting against deathstar blocks which is good, but I can't explain why This is all the decision making: ``` 257 func (s *Store) shouldExtendPayload(fn *PayloadNode) bool { 258 if fn == nil { 259 return false 260 } 261 n := fn.node 262 if n.payloadAvailabilityVote.Count() > fieldparams.PTCSize/2 && n.payloadDataAvailabilityVote.Count() > fieldparams.PTCSize/2 { 263 return true 264 } 265 if s.proposerBoostRoot == [32]byte{} { 266 return true 267 } 268 pn := s.emptyNodeByRoot[s.proposerBoostRoot] 269 if pn == nil { 270 return true 271 } 272 if pn.node.parent.node != fn.node { 273 return true 274 } 275 return pn.node.parent.full 276 } 277 278 // choosePayloadContent chooses between empty or full for the passed consensus node. 279 func (s *Store) choosePayloadContent(n *Node) *PayloadNode { 280 if n == nil { 281 return nil 282 } 283 fn := s.fullNodeByRoot[n.root] 284 en := s.emptyNodeByRoot[n.root] 285 if fn == nil { 286 return en 287 } 288 if fn.weight > en.weight { 289 return fn 290 } else if fn.weight < en.weight { 291 return en 292 } 293 previousSlot := n.slot+1 == s.currentSlot() 294 if !previousSlot || s.shouldExtendPayload(fn) { 295 return fn 296 } 297 return en 298 } ``` I will remove 5222 from lodestar and see if we do the same why is 288 to 293 not guarded by previous slot check? sure if the weight are all 0 this is fine, but if those are not? I'll leave that as an excercise, both Preston and Terence complained about this. Curious, did you get an AI to diagnose that? I am asking, I have a claude instance dedicated to your fork choice 😄 The weight must be zero for for previous slot you cannot have counted attestations that differentiate between full or empty because the max attestations you could have counted are for the previous committee that could not have voted either way The python spec has a funny way of going through forkchoice because of the way it applies weights, we do something different, I don't need to care about proposer boost cause it's not in either of the weights for these nodes. But what I want to stress is that the spec is phrased as is, just to deal with proposer boost. If for any reason later in the slot we do count attestations for the current committe, we definitely want to count them and differentiate by weight, not by the slot condition yes, `fn.weight` and `en.weight` should be 0 is what you saying? yes assuming there is no bug this seems right but https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43111#attestations, you clearly vote correctly here but how? only Nimbus votes (because Grandine is offline) are incorrect hmm potuz can it be that you receive attestations over the wire and add them to the weight before you attest? no, we don't count attestations for same slot committee, if we do that's a serious bug I'd be happy to get such a report 🙂 I agree it would be a serious issue, but it shouldn't be relevant pre-gloas probably my claude is insisting that prysm doesn't freeze te weights and counts attestations 🤷 I refuse to listen to Claude without a report... I can help you avoid wasting my time: UpdateHead in PRysm indeed does count same slot attestations (which we do on purpose). But this is called only later in the slot and it would be the right behavior anyway I haven't even asked claude before you asked me here can you do an image which guards the weight comparison? it would be easy to see quickly on the devnet That may make us work incorrectly on a bunch of scenarios or at least it would make me have to spend time thinking if it is sound that's why I rather not change that",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think I permanently damaged dora for this block/attestations view https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations",
+      "createdAt": "2026-06-10T11:02:15.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh,  that looks bad o.O",
+      "createdAt": "2026-06-10T11:03:20.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "does a restart maybe fix it?",
+      "createdAt": "2026-06-10T11:03:32.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it happens if I click into the attestations view and then out of it into a different tab, but not exactly sure about the exact trigger that causes this",
+      "createdAt": "2026-06-10T11:04:06.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also it seems like indices are no longer mapped to client labels",
+      "createdAt": "2026-06-10T11:04:21.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The underlying issue is that there is a \"null\" passed as validator names lookup dict..  So there is a JS exception thrown that kills the client side rendering",
+      "createdAt": "2026-06-10T11:04:59.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nice find o.O  it's a bug in my ssz lib 😅",
+      "createdAt": "2026-06-10T11:26:31.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "fixed 🙂",
+      "createdAt": "2026-06-10T11:42:37.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "thanks, it works now, but do you know why we don't see the labels anymorehttps://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations",
+      "createdAt": "2026-06-10T11:51:50.970000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "58d1d0256fc6b6e551dcde2739416a795bd4567974c8fdd5e463ddb0a05f9b97"
+        }
+      ]
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yea,  the attester duties are not persisted in the dora db.  that'd be megabytes of data for every epoch for mainnet sized networks.\nSo the duties are kept in memory only for the most recent 2 or 3 epochs.  Afterwards it's dropped off.\nAnything building on top of the duties (like the attestestation bitmask lookups) is then no longer available",
+      "createdAt": "2026-06-10T11:54:09.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I could probably store them in S3 or so to not clutter the DB 🤔 \nWould it be helpful to have it available long term?",
+      "createdAt": "2026-06-10T11:55:46.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm I am just looking at older block right now trying to understand what happened, but of course I can also just pull that data from somewhere else, it's tricky to reconstruct old shufflings though, so useful for sure",
+      "createdAt": "2026-06-10T11:56:58.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am just not sure how common it is to look at such old blocks",
+      "createdAt": "2026-06-10T11:57:25.123000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the reason I am doing it right now is because we stopped accepting deathstar blocks as canonical (which is good) https://dora.glamsterdam-devnet-5.ethpandaops.io/slots/filtered?f&f.missing=1&f.orphaned=1&f.pname=lodestar-ethrex-1 but I wanna understand why, the theory right now is because grandine is offline and before in some cases they added enough attestation weight (since they voted incorrectly together with Nimbus) with proposer boost to flip the head, so the proposer that build on top of the deathstar branch in some cases are actually correct, but this can only happen if we have ~20% malicious attesters supporting it cc <@755590043632140352> does that explain it?",
+      "createdAt": "2026-06-10T12:00:27.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yes. PB alone shouldn't be enough to flip the view of honest attesters",
+      "createdAt": "2026-06-10T12:02:01.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "We definitely need to fix nimbus and grandine. Hopefully today I'll deliver on my promise to merge 5222 and also fix the majority of PTC",
+      "createdAt": "2026-06-10T12:02:41.673000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes so since grandine (the deathstar supporters) went offline we no longer flip the view, so it's only possible if you have a large amount attesters that you control and that support your payload reorg",
+      "createdAt": "2026-06-10T12:03:49.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also honest attesters are not having full pariticipation (for whatever reason) so we miss a few votes there too",
+      "createdAt": "2026-06-10T12:05:25.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am actually surprised how it's possible that Prysm is voting correctly even without 5222, you need to explain this to me. Does prysm keep track locally if it sees the payload timely and doesn't care about PTC votes in that case?",
+      "createdAt": "2026-06-10T12:06:39.440000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Arresters never care about PTC, I've been telling you this forever. They only care in case the proposer reorgs and the PTC achieved quorum, which in this devnet never should happen",
+      "createdAt": "2026-06-10T12:07:46.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what's your definition of PTC achieved  quorum?",
+      "createdAt": "2026-06-10T12:10:15.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so consider this, if you don't count ptc votes correctly (ie. you don't reach >256 as timely then this shoulnd't be possible)",
+      "createdAt": "2026-06-10T12:11:52.249000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\n1 - honest lighthouse FULL (slot 1 )\n2 - deathstar EMPTY (reorg 1 FULL) (slot 2)\n\nshould_extend_payload(1) = false\n- payload_is_timely = false\n- payload_data_is_available = false\n- proposer_root == Root() = false\n- store.blocks[proposer_root].parent_root != root = false\n- is_parent_node_full = false\n\n2 is on_block <-- proposer_root\n\nslot 1 lighthouse proposes block, slot 1 attester vote for lighthouse block as PENDING\nin slot 1 lighthouse reveals payload (ptc in slot 1 votes timely/available)\nslot 2  deathstar build on slot 1 empty\n\n\nprysm receive block from deathstar in slot 2 at ~2 seconds (no attestations yet)\n\nwhy does prysm set it as head? what you set as head will determine if you vote for 1 FULL or 2 EMPTY\n```",
+      "createdAt": "2026-06-10T12:12:11.773000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so here\n```\n- payload_is_timely = false\n- payload_data_is_available = false\n```\nis like this for prysm because you don't have 5222",
+      "createdAt": "2026-06-10T12:13:06.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Well, in the situation yuou describe above: There is no quorum, slot N, full is our head, N+1 proposes on top of empty, we follow the proposer of N+1 as the spec says, so if we are voting agains the proposer there must be something else going on",
+      "createdAt": "2026-06-10T12:29:11.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but you are voting against deathstar blocks which is good, but I can't explain why",
+      "createdAt": "2026-06-10T12:31:24.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "This is all the decision making:\n```\n257 func (s *Store) shouldExtendPayload(fn *PayloadNode) bool {\n258         if fn == nil {\n259                 return false\n260         }\n261         n := fn.node\n262         if n.payloadAvailabilityVote.Count() > fieldparams.PTCSize/2 && n.payloadDataAvailabilityVote.Count() > fieldparams.PTCSize/2 {\n263                 return true\n264         }\n265         if s.proposerBoostRoot == [32]byte{} {\n266                 return true\n267         }\n268         pn := s.emptyNodeByRoot[s.proposerBoostRoot]\n269         if pn == nil {\n270                 return true\n271         }\n272         if pn.node.parent.node != fn.node {\n273                 return true\n274         }\n275         return pn.node.parent.full\n276 }\n277\n278 // choosePayloadContent chooses between empty or full for the passed consensus node.\n279 func (s *Store) choosePayloadContent(n *Node) *PayloadNode {\n280         if n == nil {\n281                 return nil\n282         }\n283         fn := s.fullNodeByRoot[n.root]\n284         en := s.emptyNodeByRoot[n.root]\n285         if fn == nil {\n286                 return en\n287         }\n288         if fn.weight > en.weight {\n289                 return fn\n290         } else if fn.weight < en.weight {\n291                 return en\n292         }\n293         previousSlot := n.slot+1 == s.currentSlot()\n294         if !previousSlot || s.shouldExtendPayload(fn) {\n295                 return fn\n296         }\n297         return en\n298 }\n```",
+      "createdAt": "2026-06-10T12:31:52.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I will remove 5222 from lodestar and see if we do the same",
+      "createdAt": "2026-06-10T12:31:52.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "why is 288 to 293 not guarded by previous slot check? sure if the weight are all 0 this is fine, but if those are not?",
+      "createdAt": "2026-06-10T12:39:46.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I'll leave that as an excercise, both Preston and Terence complained about this. Curious, did you get an AI to diagnose that?",
+      "createdAt": "2026-06-10T12:40:47.563000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am asking, I have a claude instance dedicated to your fork choice 😄",
+      "createdAt": "2026-06-10T12:42:58.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The weight must be zero for for previous slot",
+      "createdAt": "2026-06-10T12:43:18.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you cannot have counted attestations that differentiate between full or empty",
+      "createdAt": "2026-06-10T12:43:31.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "because the max attestations you could have counted are for the previous committee that could not have voted either way",
+      "createdAt": "2026-06-10T12:43:46.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The python spec has a funny way of going through forkchoice because of the way it applies weights, we do something different, I don't need to care about proposer boost cause it's not in either of the weights for these nodes.",
+      "createdAt": "2026-06-10T12:44:41.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "But what I want to stress is that the spec is phrased as is, just to deal with proposer boost. If for any reason later in the slot we do count attestations for the current committe, we definitely want to count them and differentiate by weight, not by the slot condition",
+      "createdAt": "2026-06-10T12:46:14.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes, `fn.weight` and `en.weight` should be 0 is what you saying?",
+      "createdAt": "2026-06-10T12:47:26.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes",
+      "createdAt": "2026-06-10T12:47:34.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "assuming there is no bug this seems right",
+      "createdAt": "2026-06-10T12:51:50.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43111#attestations, you clearly vote correctly here but how? only Nimbus votes (because Grandine is offline) are incorrect",
+      "createdAt": "2026-06-10T12:52:17.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm potuz can it be that you receive attestations over the wire and add them to the weight before you attest?",
+      "createdAt": "2026-06-10T12:54:45.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no, we don't count attestations for same slot committee, if we do that's a serious bug",
+      "createdAt": "2026-06-10T12:55:09.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I'd be happy to get such a report 🙂",
+      "createdAt": "2026-06-10T12:55:18.801000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I agree it would be a serious issue, but it shouldn't be relevant pre-gloas probably",
+      "createdAt": "2026-06-10T12:55:53.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "my claude is insisting that prysm doesn't freeze te weights and counts attestations 🤷",
+      "createdAt": "2026-06-10T12:56:49.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I refuse to listen to Claude without a report... I can help you avoid wasting my time: UpdateHead in PRysm indeed does count same slot attestations (which we do on purpose). But this is called only later in the slot and it would be the right behavior anyway",
+      "createdAt": "2026-06-10T12:57:50.087000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I haven't even asked claude before you asked me",
+      "createdAt": "2026-06-10T12:58:09.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "here",
+      "createdAt": "2026-06-10T12:58:32.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you do an image which guards the weight comparison? it would be easy to see quickly on the devnet",
+      "createdAt": "2026-06-10T12:59:11.793000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "That may make us work incorrectly on a bunch of scenarios",
+      "createdAt": "2026-06-10T13:05:32.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "or at least it would make me have to spend time thinking if it is sound",
+      "createdAt": "2026-06-10T13:05:53.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "that's why I rather not change that",
+      "createdAt": "2026-06-10T13:05:59.804000+00:00",
+      "attachments": []
+    }
+  ]
+}
