@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs/_threads/builder deposit processing optimizations",
   "date": "2026-06-10",
-  "messageCount": 5,
-  "sourceHash": "186d75acda6ed22699d809d294572381c9fd9ce39f007e110b67227945e3417a",
-  "searchText": "<@&1417820113981145228> I am curious, does your implementation optimize all the 4 scenarios already? - (1) 8192 if you have 8192 builder deposits (valid and for new builders), ETH can be recycled - (2) 8192 if you have 8192 builder deposits with invalid signatures (sprinkle in some invalid ones to make batching harder), ETH will be burned for invalid sigs - (3) fill up `pending_deposits` with invalid deposits for same pubkey (each has different invalid sig), then do 1 valid builder deposit for that pubkey, can be up to 50k or more, depending on how much ETH you can burn - (4) 8192 if you have 1 builder deposit (valid) but 8191 validator deposits for the same pubkey (sig invalid) before in the same payload, ETH will be burned for the validator deposits <@592004585506340885> have we tested these scenarios, or did we just test (1) and maybe (2) so far? Nimbus hasn't particularly optimized any of this, no Teku optimizes only for 1 so far, for 2 if there is invalid builder deposit, the whole signature batching fails and we go back to validating signature one by one, not sure how we can optimize this further with the current BLS apis, for 3 we only cache the pubkey for the valid pending deposits, so we would end up looping for that pubkey if all are invalid Yes, I've tested 1 and 2 on some clients. For 3, does it matter if there's a valid builder deposit at the end? The \"then do 1 valid builder deposit for that pubkey\" part. For 4, do you expect validator deposits to the verified differently here? Good test ideas though. For 2, you could split the big batch into smaller sub-batches.",
+  "messageCount": 202,
+  "sourceHash": "2e08273e6af6896fc0befd12f92ee94ea4e333acf25a6f9bc9fbd47b3a4f6cde",
+  "searchText": "<@&1417820113981145228> I am curious, does your implementation optimize all the 4 scenarios already? - (1) 8192 if you have 8192 builder deposits (valid and for new builders), ETH can be recycled - (2) 8192 if you have 8192 builder deposits with invalid signatures (sprinkle in some invalid ones to make batching harder), ETH will be burned for invalid sigs - (3) fill up `pending_deposits` with invalid deposits for same pubkey (each has different invalid sig), then do 1 valid builder deposit for that pubkey, can be up to 50k or more, depending on how much ETH you can burn - (4) 8192 if you have 1 builder deposit (valid) but 8191 validator deposits for the same pubkey (sig invalid) before in the same payload, ETH will be burned for the validator deposits <@592004585506340885> have we tested these scenarios, or did we just test (1) and maybe (2) so far? Nimbus hasn't particularly optimized any of this, no Teku optimizes only for 1 so far, for 2 if there is invalid builder deposit, the whole signature batching fails and we go back to validating signature one by one, not sure how we can optimize this further with the current BLS apis, for 3 we only cache the pubkey for the valid pending deposits, so we would end up looping for that pubkey if all are invalid Yes, I've tested 1 and 2 on some clients. For 3, does it matter if there's a valid builder deposit at the end? The \"then do 1 valid builder deposit for that pubkey\" part. For 4, do you expect validator deposits to the verified differently here? Good test ideas though. For 2, you could split the big batch into smaller sub-batches. what you mean by at the end? you can fill up `pending_deposits` over multiple epochs make it huge in theory, all for the same pubkey but invalid signatures, then you need 1 builder deposit for this pubkey to trigger a signature verification for all these new pending deposits, so if clients don't pre-verify here, it's over, because it could be up to 100k, depending how much ETH you wanna burn I don't know how to solve (4) you need to verify 8191 signatures one-by-one if they all invalid Okay I see. That 1 builder deposit is the trigger. how did you test (2)? I think sprinkeling in 4-5 invalids in the whole 8k batch is enough to make most strategies very inefficient, what do clients do if there is a single invalid one? divide and conquer can be dos if you have more than 4-5 invalid sigs in the right place and very inefficient, so doing 1-by-1 might be better probably? I added an `invalidSigPercent` option to the assertoor deposit tool. https://github.com/ethpandaops/assertoor/pull/174 I was only able to test like 4-5k deposits with that though. Needed the batched deposit tool for more. we should have that Unsure if they've added that option to it. cc <@808969530608451584> I think you added the batching capabilities to assertoor right? Oh yes. I know the batching capability exists. I've been using it. Just not sure if it has the `invalidSigPercent` option. ah should work fine ? Yup. Just confirmed. The option exists: https://github.com/ethpandaops/assertoor/blob/816b3af4b8ede44795bb6ba6bc7aea20a168a806/pkg/tasks/generate_batch_deposits/README.md?plain=1#L34 <@586161934425128960> does lodestar have all of these optimizations? hell no it's impossible I wouldn't say it's impossible. But very difficult, yes. I mean it's possible, but very hard to get right and we love those caches in our state transitons don't we? 😄 When testing prysm, it seemed to handle invalid sigs just fine. but did you test (3) and (4)? No. (1) and (2) is much easier I'll try to work on 3 & 4 some today. Test it out on prysm. so for (3) you can prefill the `pending_deposits` way ahead with like >50k or so, I mean there is no limit really besides like ETH supply, but 50k seems realistic The limit is available ETH 😄 But yeah. 50k seems like a reasonable max. a lot of the optimizations are not in the main branch, sorry we have to use that deposit branch to test What is the latest branch with the deposit optimizations? Hopefully not `glamsterdam-devnet-3-deposits` 😅 we went with DC2 even linear may seem best in most cases, but the only relevant case is someone burn 1-2 eth. if ppl want to burn large amount of eth, so be it https://gist.github.com/terencechain/31e57c1a702143578a47e15d116ece73 it is glamsterdam-devnet-3-deposits 🙂 Okay lol. All good. <@363800010518822915> <@586161934425128960> seems that Prysm can handle case 3 just fine. case 3 is only fulu -> gloas transition right? where we on board builder at the fork Yes correct. which image are you using? But with 50k invalid deposits followed by 1 valid deposit. For builders. See this: https://github.com/jtraglia/kurtosis-devnets/blob/master/builder-deposit-same-pubkey-spam.yml but (3) is not about that I mean yes, testing the fork transition is good to, I am assuming prysm is pre-validating them before the fork boundary, like many slots ahead? Hmm did you want invalid *validator* deposits? I'm pretty sure those will be treated the same. also all deposits need to be done post-gloas ideally (3) has nothing to do with onboard builders at fork invalid validator deposit should be irrelevant by https://github.com/ethereum/consensus-specs/pull/5254 but we should be ble to handle them as well it's related, but not what I mean Oh sorry. Misunderstood. but yes, its good to know that (3) like scenario is good during onboardbuilders, because we need that for EIP-8282 no this test is great actually 😄 also <@592004585506340885> it takes multiple blocks to fill up the pending deposits, so need to make sure they are no processed, but I guess this is really slow anyways, but on mainnet we have a large queue which also prevents this, so these invalid deposits stay in `pending_deposits` forever, if I am not wrong <@534934855113506836> seems like we just proved that the onboard at fork is fine Pending deposits aren't processed until finalization or something iirc. And all of our testing takes place in the first two epochs. but even then, we queue them and rate limit, isn't it `MAX_PENDING_DEPOSITS_PER_EPOCH`? They're already in the queue. What do you mean exactly? for (3) you want ~50k validator deposits (with invalid sigs) for the same pubkey in the queue, ie. in `pending_deposits` then you submit 1 builder deposit with a valid signature for that same pubkey Should this be done post-Gloas? shouldn't matter but ideally, mayeb there is something I can't think off Lemme try this. Give me 15 minutes. so I am assuming in prysm you don't validate them right at the fork boundary (since 50k sigs would be alot) so you pre-validate them 1-2 epochs ahead? yes, but this changes to only builder deposits though we dont need to do this for validator deposit anymore because of the change Tuyen did? I was OOO that week I think so I didn't follow that closely yes ok cool which is much nicer that's good, because in EIP-8282 we still wanna have that mechanism, otherwise you can't have builders at the fork <@534934855113506836> can you sanity check this, was there another scenario at the fork boundary? you can start filling up pending_deposits before the fork, doesn't matter I think this was the only one we came up with earlier yes but what I mean is `onboard_builders_from_pending_deposits` is actually quite safe and can't be easily exploited, (3) is not something to consider there ~~you are never forced to verify validator deposit signature there, which is the dos that (3) introduces~~ might be wrong just saw we still call `is_pending_validator` Okay I have results. A little more interesting. The builder deposit was processed in slot 47. And caused sync agg for slot 48 to be missed. Appears to have taken ~3 seconds to verify the 50k validator pending deposits. Now I want to have another scenario where there are 50k invalid validator deposits, followed by 1 valid validator deposit, then 1 valid builder deposit. All for the same pubkey. as soon as you have one valid validator deposit for that pubkey is should be fine again What do you mean exactly? No point in doing this test? no, still good to do it this is kinda surprising, becasue if all signatures are invalid you can't batch at all, so prysm pre-verifies them? No idea what it's doing. But my laptop is toasty from it. cc <@363800010518822915> we do the following - batch verify divide and conque by 2 - pre verify them as soon as we have the payload (dont wait until next slot) - pre verify everything before gloas fork (used to be validator + builder) so you pre-verify all `pending_deposits`? and have like a global cache for it? before the fork yes but now we only need to pre-verify all pending deposits (builder only) This was fun to see. But yeah works just fine. The final valid builder deposit gets added to the pending deposits queue instead of creating a builder, as expected. Took about ~3 seconds to process (according to dora, not a great metric). Moving on to scenario 4 testing. but for (3), when would prysm validate the 50k invlaid signatures in `pending_deposits`, this is not at the fork boundary, these are coming in post-gloas these are validator deposits? with Tuyen i no longer need to care about them this is not about at the fork boundary though yes i understand they will come after the fork boundary and during epoch processing will there be a bottle neck How does Prysm verify those 50k signatures so quickly in this scenario? The 50k invalid validator deposits in the pending deposit queue. they are pre cached both builder and validator i didnt change anything based on Tuyen's PR yet but i wanted to chagne to builder only.. i need to think about this more why epoch processing, those are triggered as soon as `process_deposit_request` is called with a builder pubkey that matches these deposits ```python is_builder_withdrawal_credential(deposit_request.withdrawal_credentials) and not is_validator and not is_pending_validator(state.pending_deposits, deposit_request.pubkey) ``` so you need a builder deposit to trigger `is_pending_validator`, then you need to verify all 50k ya that's a good point, so i probably should still cache the validator result then.. 🙁 is there a prysm log that shows how many and when you validated signatures? will have to check.. havne't visited that branch in a while and we dont have any of those caches merged to the main branch Doing 5000 + 1 instead of 8191 + 1, but it appears to work. I'm not sure why dora doesn't show the deposits though. Strange. cc <@808969530608451584> did you make sure the builder deposit comes last? I would have expected to see 5001 deposits in dora on slot 38. I will double check. But I'm pretty sure the fact that they are in the state's pending queue means they were first. Otherwise it would have gone straight to the builder instead. they have invalid sigs though Ah yeah, true. Well they would have just been dropped then. can you send your config? I'm not sure, dora usually shows 8192 deposits happily.. do we dequeue them instantly if all have invalid sigs? I would have to recheck the spec for that FYI claude wrote this, not me 😅 * https://github.com/jtraglia/kurtosis-devnets/blob/master/builder-deposit-mixed-creds.yml * https://github.com/jtraglia/assertoor/blob/0b9f742ae59f48a0829e9b0177a72d2a0f51a856/playbooks/gloas-dev/builder-deposit-mixed-creds.yaml If there's a builder with the same pubkey, it would never be queued. And actually, it wouldn't just drop them. It would be considered a top-up which doesn't required a valid signature. See: https://ethspec.tools/#specs/nightly/functions-apply_deposit_for_builder-gloas Executed with: `kurtosis clean -a && kurtosis run --enclave devnet github.com/ethpandaops/ethereum-package --args-file builder-deposit-mixed-creds.yml --image-download always` sorry late to the party. I think lighthouse can also do (3) and (4). can you give it a try <@592004585506340885> ? i can try it too. it it the builder-deposit-mixed-creds.yaml assertoor test? Hey there. Yes I can run the",
   "excerpts": [
     {
       "author": "nflaig",
@@ -44,6 +44,965 @@
       "parent": "epbs",
       "content": "For 2, you could split the big batch into smaller sub-batches.",
       "createdAt": "2026-06-10T12:51:54.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "what you mean by at the end? you can fill up `pending_deposits` over multiple epochs make it huge in theory, all for the same pubkey but invalid signatures, then you need 1 builder deposit for this pubkey to trigger a signature verification for all these new pending deposits, so if clients don't pre-verify here, it's over, because it could be up to 100k, depending how much ETH you wanna burn",
+      "createdAt": "2026-06-10T13:14:04.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I don't know how to solve (4) you need to verify 8191 signatures one-by-one if they all invalid",
+      "createdAt": "2026-06-10T13:15:00.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Okay I see. That 1 builder deposit is the trigger.",
+      "createdAt": "2026-06-10T13:16:02.130000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "how did you test (2)?",
+      "createdAt": "2026-06-10T13:16:06.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think sprinkeling in 4-5 invalids in the whole 8k batch is enough to make most strategies very inefficient, what do clients do if there is a single invalid one?",
+      "createdAt": "2026-06-10T13:16:41.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "divide and conquer can be dos if you have more than 4-5 invalid sigs in the right place and very inefficient, so doing 1-by-1 might be better probably?",
+      "createdAt": "2026-06-10T13:17:26.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I added an `invalidSigPercent` option to the assertoor deposit tool.\nhttps://github.com/ethpandaops/assertoor/pull/174",
+      "createdAt": "2026-06-10T13:18:44.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was only able to test like 4-5k deposits with that though.",
+      "createdAt": "2026-06-10T13:19:09.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Needed the batched deposit tool for more.",
+      "createdAt": "2026-06-10T13:19:24.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we should have that",
+      "createdAt": "2026-06-10T13:19:34.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Unsure if they've added that option to it.",
+      "createdAt": "2026-06-10T13:19:34.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "cc <@808969530608451584> I think you added the batching capabilities to assertoor right?",
+      "createdAt": "2026-06-10T13:19:52.401000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh yes. I know the batching capability exists. I've been using it.",
+      "createdAt": "2026-06-10T13:20:15.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Just not sure if it has the `invalidSigPercent` option.",
+      "createdAt": "2026-06-10T13:20:23.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ah",
+      "createdAt": "2026-06-10T13:20:30.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "should work fine ?",
+      "createdAt": "2026-06-10T13:20:49.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yup. Just confirmed. The option exists:\nhttps://github.com/ethpandaops/assertoor/blob/816b3af4b8ede44795bb6ba6bc7aea20a168a806/pkg/tasks/generate_batch_deposits/README.md?plain=1#L34",
+      "createdAt": "2026-06-10T13:22:25.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@586161934425128960> does lodestar have all of these optimizations?",
+      "createdAt": "2026-06-10T13:26:04.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hell no",
+      "createdAt": "2026-06-10T13:26:13.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's impossible",
+      "createdAt": "2026-06-10T13:26:17.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I wouldn't say it's impossible.",
+      "createdAt": "2026-06-10T13:26:44.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But very difficult, yes.",
+      "createdAt": "2026-06-10T13:26:52.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I mean it's possible, but very hard to get right",
+      "createdAt": "2026-06-10T13:26:52.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "and we love those caches in our state transitons don't we? 😄",
+      "createdAt": "2026-06-10T13:27:10.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "When testing prysm, it seemed to handle invalid sigs just fine.",
+      "createdAt": "2026-06-10T13:27:12.335000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but did you test (3) and (4)?",
+      "createdAt": "2026-06-10T13:27:30.263000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No.",
+      "createdAt": "2026-06-10T13:27:33.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "(1) and (2) is much easier",
+      "createdAt": "2026-06-10T13:27:41.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'll try to work on 3 & 4 some today.",
+      "createdAt": "2026-06-10T13:28:09+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Test it out on prysm.",
+      "createdAt": "2026-06-10T13:28:13.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so for (3) you can prefill the `pending_deposits` way ahead with like >50k or so, I mean there is no limit really besides like ETH supply, but 50k seems realistic",
+      "createdAt": "2026-06-10T13:29:45.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The limit is available ETH 😄",
+      "createdAt": "2026-06-10T13:30:24.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But yeah. 50k seems like a reasonable max.",
+      "createdAt": "2026-06-10T13:30:50.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "a lot of the optimizations are not in the main branch, sorry we have to use that deposit branch to test",
+      "createdAt": "2026-06-10T13:34:56.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "What is the latest branch with the deposit optimizations? Hopefully not `glamsterdam-devnet-3-deposits` 😅",
+      "createdAt": "2026-06-10T13:35:31.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we went with DC2 even linear may seem best in most cases, but the only relevant case is someone burn 1-2 eth. if ppl want to burn large amount of eth, so be it\nhttps://gist.github.com/terencechain/31e57c1a702143578a47e15d116ece73",
+      "createdAt": "2026-06-10T13:40:08.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it is glamsterdam-devnet-3-deposits 🙂",
+      "createdAt": "2026-06-10T13:40:26.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Okay lol. All good.",
+      "createdAt": "2026-06-10T13:42:05.024000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@363800010518822915> <@586161934425128960> seems that Prysm can handle case 3 just fine.",
+      "createdAt": "2026-06-10T15:47:01.589000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "7fbe884a9b89153ba23b293983dc2ba964da8cf905d29f906ca25c9e28d8e143"
+        }
+      ]
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "case 3 is only fulu -> gloas transition right? where we on board builder at the fork",
+      "createdAt": "2026-06-10T15:48:39.305000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Yes correct.",
+      "createdAt": "2026-06-10T15:48:58.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which image are you using?",
+      "createdAt": "2026-06-10T15:49:19.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "But with 50k invalid deposits followed by 1 valid deposit. For builders.",
+      "createdAt": "2026-06-10T15:49:36.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "See this: https://github.com/jtraglia/kurtosis-devnets/blob/master/builder-deposit-same-pubkey-spam.yml",
+      "createdAt": "2026-06-10T15:49:58.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but (3) is not about that",
+      "createdAt": "2026-06-10T15:50:06.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I mean yes, testing the fork transition is good to, I am assuming prysm is pre-validating them before the fork boundary, like many slots ahead?",
+      "createdAt": "2026-06-10T15:50:33.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hmm did you want invalid *validator* deposits?",
+      "createdAt": "2026-06-10T15:50:34.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm pretty sure those will be treated the same.",
+      "createdAt": "2026-06-10T15:50:59.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also all deposits need to be done post-gloas ideally",
+      "createdAt": "2026-06-10T15:51:03.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "(3) has nothing to do with onboard builders at fork",
+      "createdAt": "2026-06-10T15:51:25.201000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "invalid validator deposit should be irrelevant by https://github.com/ethereum/consensus-specs/pull/5254 \nbut we should be ble to handle them as well",
+      "createdAt": "2026-06-10T15:51:35.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "it's related, but not what I mean",
+      "createdAt": "2026-06-10T15:51:36.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Oh sorry. Misunderstood.",
+      "createdAt": "2026-06-10T15:52:02.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but yes, its good to know that (3) like scenario is good during onboardbuilders, because we need that for EIP-8282",
+      "createdAt": "2026-06-10T15:52:04.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "no this test is great actually 😄",
+      "createdAt": "2026-06-10T15:52:12.999000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "also <@592004585506340885> it takes multiple blocks to fill up the pending deposits, so need to make sure they are no processed, but I guess this is really slow anyways, but on mainnet we have a large queue which also prevents this, so these invalid deposits stay in `pending_deposits` forever, if I am not wrong",
+      "createdAt": "2026-06-10T15:53:51.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@534934855113506836> seems like we just proved that the onboard at fork is fine",
+      "createdAt": "2026-06-10T15:54:12.649000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Pending deposits aren't processed until finalization or something iirc.",
+      "createdAt": "2026-06-10T15:54:36.002000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And all of our testing takes place in the first two epochs.",
+      "createdAt": "2026-06-10T15:54:49.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but even then, we queue them and rate limit, isn't it `MAX_PENDING_DEPOSITS_PER_EPOCH`?",
+      "createdAt": "2026-06-10T15:55:16.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "They're already in the queue. What do you mean exactly?",
+      "createdAt": "2026-06-10T15:56:10.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "for (3) you want ~50k validator deposits (with invalid sigs) for the same pubkey in the queue, ie. in `pending_deposits`",
+      "createdAt": "2026-06-10T15:56:36.574000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "then you submit 1 builder deposit with a valid signature for that same pubkey",
+      "createdAt": "2026-06-10T15:57:15.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Should this be done post-Gloas?",
+      "createdAt": "2026-06-10T15:57:43.550000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "shouldn't matter",
+      "createdAt": "2026-06-10T15:58:03.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but ideally, mayeb there is something I can't think off",
+      "createdAt": "2026-06-10T15:58:14.702000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Lemme try this. Give me 15 minutes.",
+      "createdAt": "2026-06-10T15:59:40.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so I am assuming in prysm you don't validate them right at the fork boundary (since 50k sigs would be alot) so you pre-validate them 1-2 epochs ahead?",
+      "createdAt": "2026-06-10T16:00:15.765000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, but this changes to only builder deposits though",
+      "createdAt": "2026-06-10T16:00:52.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we dont need to do this for validator deposit anymore",
+      "createdAt": "2026-06-10T16:01:14.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "because of the change Tuyen did?",
+      "createdAt": "2026-06-10T16:01:37.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was OOO that week I think so I didn't follow that closely",
+      "createdAt": "2026-06-10T16:01:51.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes",
+      "createdAt": "2026-06-10T16:01:53.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok cool",
+      "createdAt": "2026-06-10T16:01:58.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "which is much nicer",
+      "createdAt": "2026-06-10T16:02:07.799000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "that's good, because in EIP-8282 we still wanna have that mechanism, otherwise you can't have builders at the fork",
+      "createdAt": "2026-06-10T16:02:17.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@534934855113506836> can you sanity check this, was there another scenario at the fork boundary?",
+      "createdAt": "2026-06-10T16:03:38.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "you can start filling up pending_deposits before the fork, doesn't matter",
+      "createdAt": "2026-06-10T16:07:15.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think this was the only one we came up with earlier",
+      "createdAt": "2026-06-10T16:07:27.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes but what I mean is `onboard_builders_from_pending_deposits` is actually quite safe and can't be easily exploited, (3) is not something to consider there",
+      "createdAt": "2026-06-10T16:10:14.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "~~you are never forced to verify validator deposit signature there, which is the dos that (3) introduces~~ might be wrong just saw we still call `is_pending_validator`",
+      "createdAt": "2026-06-10T16:11:34.074000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Okay I have results. A little more interesting.",
+      "createdAt": "2026-06-10T16:14:33.864000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "7c4f38f3731d5a97f21466c81e1207558ff1a735153709d89d815c1ac5d4cc24"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "021da1748e3685f9eb6850558551cda86d2b2a9653710d662d3cf4f899fb6ad7"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The builder deposit was processed in slot 47.",
+      "createdAt": "2026-06-10T16:14:58.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "And caused sync agg for slot 48 to be missed.",
+      "createdAt": "2026-06-10T16:15:06.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Appears to have taken ~3 seconds to verify the 50k validator pending deposits.",
+      "createdAt": "2026-06-10T16:15:21.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Now I want to have another scenario where there are 50k invalid validator deposits, followed by 1 valid validator deposit, then 1 valid builder deposit. All for the same pubkey.",
+      "createdAt": "2026-06-10T16:17:03.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "as soon as you have one valid validator deposit for that pubkey is should be fine again",
+      "createdAt": "2026-06-10T16:19:15.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "What do you mean exactly? No point in doing this test?",
+      "createdAt": "2026-06-10T16:19:51.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "no, still good to do it",
+      "createdAt": "2026-06-10T16:20:16.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is kinda surprising, becasue if all signatures are invalid you can't batch at all, so prysm pre-verifies them?",
+      "createdAt": "2026-06-10T16:23:30.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "No idea what it's doing. But my laptop is toasty from it. cc <@363800010518822915>",
+      "createdAt": "2026-06-10T16:24:03.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "we do the following\n- batch verify divide and conque by 2\n- pre verify them as soon as we have the payload (dont wait until next slot)\n- pre verify everything before gloas fork (used to be validator + builder)",
+      "createdAt": "2026-06-10T16:31:22.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so you pre-verify all `pending_deposits`? and have like a global cache for it?",
+      "createdAt": "2026-06-10T16:32:21.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "before the fork yes\nbut now we only need to pre-verify all pending deposits (builder only)",
+      "createdAt": "2026-06-10T16:32:57.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "This was fun to see. But yeah works just fine. The final valid builder deposit gets added to the pending deposits queue instead of creating a builder, as expected. Took about ~3 seconds to process (according to dora, not a great metric).",
+      "createdAt": "2026-06-10T16:34:11.783000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "763a7fa9f8e315762753dfd58c46b7b01de44e3fab291d7cb6da15519ee9361a"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "150b88edcee76192093e4835c26222e8736b53e005695d761c1307fd46bdb372"
+        }
+      ]
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Moving on to scenario 4 testing.",
+      "createdAt": "2026-06-10T16:35:36.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but for (3), when would prysm validate the 50k invlaid signatures in `pending_deposits`, this is not at the fork boundary, these are coming in post-gloas",
+      "createdAt": "2026-06-10T16:36:50.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "these are validator deposits? with Tuyen i no longer need to care about them",
+      "createdAt": "2026-06-10T16:37:43.937000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "this is not about at the fork boundary though",
+      "createdAt": "2026-06-10T16:38:01.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes i understand they will come after the fork boundary and during epoch processing",
+      "createdAt": "2026-06-10T16:38:18.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "will there be a bottle neck",
+      "createdAt": "2026-06-10T16:38:22.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "How does Prysm verify those 50k signatures so quickly in this scenario?",
+      "createdAt": "2026-06-10T16:38:50.986000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "The 50k invalid validator deposits in the pending deposit queue.",
+      "createdAt": "2026-06-10T16:39:17.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "they are pre cached both builder and validator",
+      "createdAt": "2026-06-10T16:39:32.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "i didnt change anything based on Tuyen's PR yet",
+      "createdAt": "2026-06-10T16:39:39.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "but i wanted to chagne to builder only.. i need to think about this more",
+      "createdAt": "2026-06-10T16:39:54.983000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "why epoch processing, those are triggered as soon as `process_deposit_request` is called with a builder pubkey that matches these deposits\n```python\n is_builder_withdrawal_credential(deposit_request.withdrawal_credentials)\n and not is_validator\n and not is_pending_validator(state.pending_deposits, deposit_request.pubkey)\n```\nso you need a builder deposit to trigger `is_pending_validator`, then you need to verify all 50k",
+      "createdAt": "2026-06-10T16:39:56.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ya that's a good point, so i probably should still cache the validator result then.. 🙁",
+      "createdAt": "2026-06-10T16:40:27.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "is there a prysm log that shows how many and when you validated signatures?",
+      "createdAt": "2026-06-10T16:41:51.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "will have to check.. havne't visited that branch in a while and we dont have any of those caches merged to the main branch",
+      "createdAt": "2026-06-10T16:43:55.695000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Doing 5000 + 1 instead of 8191 + 1, but it appears to work. I'm not sure why dora doesn't show the deposits though. Strange. cc <@808969530608451584>",
+      "createdAt": "2026-06-10T16:52:08.611000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "fc3b349b87e2c4752a8c14f4f229b66350576b79262f7a91b2de0a5418423a66"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "5296ebb81d786b7c66febcdfa4bdce268d039d75f4cd1ae4be5bfe2403d16295"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "did you make sure the builder deposit comes last?",
+      "createdAt": "2026-06-10T16:52:35.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I would have expected to see 5001 deposits in dora on slot 38.",
+      "createdAt": "2026-06-10T16:52:38.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I will double check. But I'm pretty sure the fact that they are in the state's pending queue means they were first.",
+      "createdAt": "2026-06-10T16:53:28.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Otherwise it would have gone straight to the builder instead.",
+      "createdAt": "2026-06-10T16:54:09.398000+00:00",
       "attachments": []
     }
   ]

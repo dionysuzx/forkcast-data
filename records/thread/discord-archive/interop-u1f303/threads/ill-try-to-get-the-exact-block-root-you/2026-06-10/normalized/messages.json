@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/ill try to get the exact block root you",
+  "date": "2026-06-10",
+  "messageCount": 37,
+  "sourceHash": "c2f8af748b34991bbdbe6c87ebd8045d30f097a0398b6e0ed366e7a8ed89f8d0",
+  "searchText": "you do exactly what lodestar does, do you know around which slot you downscored prysm? <@1467247836117860547> can you check glamsterdam-devnet-5 lodestar nodes (debug logs) and see if we downscored prysm due to the same reason that Eitan mentioned here https://discord.com/channels/595666850260713488/892088344438255616/1514374732215095418 im trying to get the exact log messages one sec Hmm yeah I'll be interested in knowing the voted blockroot. It may be our bug cc <@884836500037066862> this might be more AI slop but claude is saying prysm might be setting the beacon_block_root in the payload attestation via `HighestReceivedBlockRoot()` which may not match its view of the shuffling literally what I said here https://discord.com/channels/595666850260713488/1511476199967297647/1514380438347710505 rejects were all in around 14:04:30, i.e. slots 43520+, right at the epoch-1360 boundary slot 43521 and 43522 all referencing canonical blocks Oh no that actually may be true lol We don't check that's compatible Yeah this looks like the bug. On the cell now but can verify it soon. Thanks for this one! Cc <@363800010518822915> this one seems right also related to prysm here https://discord.com/channels/595666850260713488/1511476199967297647/1511667020284821660, not sure you fixed the \"first seen\" already <@1467247836117860547> can you check around these slots No we haven't touched that yet seems like https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 caused a epoch boundary reorg which could cause these issues Pattern confirmed across all 4 ax41 nodes. Posting findings to the Discord thread. Checked Lodestar logs on all 4 ax41 nodes (devnet-ax41-{0..3}): - **All 47 rejects clustered at 14:04:09.018–14:04:10.240 UTC** — actually a ~1s burst, not 14:04:30. The reject log doesn't carry `data.slot` directly, but the surrounding chain progression pins them to slot 43520: - 14:04:00.230 — block 43520 imported (epoch-1360 first slot) - 14:04:09–10 — reject burst - 14:04:12.154 — block 43521 imported cleanly, no follow-on rejects - **Strictly slot 43520 only.** Block 43521 and 43522 imported clean, no PAYLOAD_ATTESTATION_ERROR on those slots and no recurrence at slot 43552 (epoch 1361) or 43584 (epoch 1362). So \"slots 43520+\" overstates it — it's the boundary slot alone. - All 47 rejects came from a single Prysm peer (`16...MGtWqy`, `Prysm/v7.1.3-rc.3`), ~12 distinct attester indices (2910, 2924, 2937, 2964, 2965, 3008, 3022, …). Lodestar's `state.getIndicesInPayloadTimelinessCommittee(idx, 43520)` returned `[]` for all of them — matches Eitan's `compute_ptc(state, slot)` divergence at the epoch boundary that potuz just confirmed. - Finalized epoch advanced 1357→1358 across the boundary normally; no other PAYLOAD_ATTESTATION rejects in a 90-minute window around it. So this looks like a single-shot divergence on the epoch-1360 boundary PTC committee, not a sustained \"43520+\" issue. Checked glamsterdam-devnet-5 Lodestar nodes (devnet-ax41-0 through -3). Yes, Lodestar also rejected Prysm PTC attestations at ~14:04:09 UTC (epoch 1360 boundary) with `PAYLOAD_ATTESTATION_ERROR_INVALID_ATTESTER` for validators 2910, 2924, 2937, 2964, 2965, 3008, 3022 — same Prysm peer `16Uiu2HAmKCKSwAx77MCXxfYcgAyMKmgWMSDJojVFJYY75sMGtWqy` (Prysm v7.1.3-rc.3), all 4 nodes. These REJECTs do trigger gossipsub score penalties (TopicValidatorResult.Reject). Lodestar's committee check uses `getBlockSlotState(block, data.slot)` where `block = forkChoice.getBlockDefaultStatus(data.beaconBlockRoot)` — so it uses the state at the referenced block root, not head state. The validators were still not in the PTC committee at that state, which confirms the Prysm bug (likely `HighestReceivedBlockRoot()` mismatch). ya we always use current slot block root whether it respects our current shuffling or not, nice catch probably explains why prysm gets isolated often after long non finality opening in a bit, for now won't add the multiple blocks on the slot issue, but just will attest if the shuffling is canonical https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 there was a reorg which changed the dependent root if you imported the grandine block at slot 0, so might be that ah wait but this should be for next epoch duties 🤔 ah no I was right, so prysm voted for this block https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/0x052b451762dbcf4c6c7b8742b85653805f72f104dc5e6234140b5a7a99afd60b and his has a different shuffling than you head view https://github.com/OffchainLabs/prysm/pull/16946 Thanks <@358120958726373381> <@586161934425128960> that's a very nice find, we can improve on this but this is the lazy fix ok this grandine branch is kinda crazy they build blocks 10 slots apart of each other, and only grandine nodes, they seem isolated from canonical but prysm imported block at `43520` It's funny that LH had a different head block than PRysm, PRysm voted on LH head that was not canonical for us, but we had imported it why do you say you had different heads? from what I can see `43520` wasn't prysm head but your ptc votes are for that block root so `highestReceivedSlot = 43520`, `root = 0x052b451762dbcf4c6c7b8742b85653805f72f104dc5e6234140b5a7a99afd60b`, but your head should be `43519` at that time, maybe you can confirm that via logs https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 build on `43519` at least ok I am out, time to sleep, feel free to ask lodekeeper if you need lodestar pov 🙂 1. LH validated our attestation with their head state. 2. Prysm attested to a block root that must have matched LH shuffling (otherwise they would not have validated and just would ignore it) 3. Prysm attested when they were not in the committee, so Prysm's head was in a different shuffling than LH (not commenting on that, just wanna note, lodestar nodes vote incorrectly right now beasue I removed 5222, so we support deathstar blocks right now)",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-06-10T21:51:13.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you do exactly what lodestar does, do you know around which slot you downscored prysm?",
+      "createdAt": "2026-06-10T21:51:14.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you check glamsterdam-devnet-5 lodestar nodes (debug logs) and see if we downscored prysm due to the same reason that Eitan mentioned here https://discord.com/channels/595666850260713488/892088344438255616/1514374732215095418",
+      "createdAt": "2026-06-10T21:52:25.927000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "im trying to get the exact log messages one sec",
+      "createdAt": "2026-06-10T21:53:14.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Hmm yeah I'll be interested in knowing the voted blockroot. It may be our bug cc <@884836500037066862>",
+      "createdAt": "2026-06-10T21:53:34.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "this might be more AI slop but claude is saying prysm might be setting the beacon_block_root in the payload attestation via `HighestReceivedBlockRoot()` which may not match its view of the shuffling",
+      "createdAt": "2026-06-10T21:54:37.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "literally what I said here https://discord.com/channels/595666850260713488/1511476199967297647/1514380438347710505",
+      "createdAt": "2026-06-10T21:55:24.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "rejects were all in around 14:04:30, i.e. slots 43520+, right at the epoch-1360 boundary",
+      "createdAt": "2026-06-10T21:55:29.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "slot 43521 and 43522 all referencing canonical blocks",
+      "createdAt": "2026-06-10T21:57:33.913000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Oh no that actually may be true lol",
+      "createdAt": "2026-06-10T21:58:03.531000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "We don't check that's compatible",
+      "createdAt": "2026-06-10T21:58:09.151000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah this looks like the bug. On the cell now but can verify it soon. Thanks for this one!",
+      "createdAt": "2026-06-10T21:58:36.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Cc <@363800010518822915> this one seems right",
+      "createdAt": "2026-06-10T21:58:46.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also related to prysm here https://discord.com/channels/595666850260713488/1511476199967297647/1511667020284821660, not sure you fixed the \"first seen\" already",
+      "createdAt": "2026-06-10T21:59:44.411000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you check around these slots",
+      "createdAt": "2026-06-10T22:01:36.494000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "No we haven't touched that yet",
+      "createdAt": "2026-06-10T22:02:46.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seems like https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 caused a epoch boundary reorg which could cause these issues",
+      "createdAt": "2026-06-10T22:03:35.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Pattern confirmed across all 4 ax41 nodes. Posting findings to the Discord thread.\n\nChecked Lodestar logs on all 4 ax41 nodes (devnet-ax41-{0..3}):\n\n- **All 47 rejects clustered at 14:04:09.018–14:04:10.240 UTC** — actually a ~1s burst, not 14:04:30. The reject log doesn't carry `data.slot` directly, but the surrounding chain progression pins them to slot 43520:\n  - 14:04:00.230 — block 43520 imported (epoch-1360 first slot)\n  - 14:04:09–10 — reject burst\n  - 14:04:12.154 — block 43521 imported cleanly, no follow-on rejects\n- **Strictly slot 43520 only.** Block 43521 and 43522 imported clean, no PAYLOAD_ATTESTATION_ERROR on those slots and no recurrence at slot 43552 (epoch 1361) or 43584 (epoch 1362). So \"slots 43520+\" overstates it — it's the boundary slot alone.\n- All 47 rejects came from a single Prysm peer (`16...MGtWqy`, `Prysm/v7.1.3-rc.3`), ~12 distinct attester indices (2910, 2924, 2937, 2964, 2965, 3008, 3022, …). Lodestar's `state.getIndicesInPayloadTimelinessCommittee(idx, 43520)` returned `[]` for all of them — matches Eitan's `compute_ptc(state, slot)` divergence at the epoch boundary that potuz just confirmed.\n- Finalized epoch advanced 1357→1358 across the boundary normally; no other PAYLOAD_ATTESTATION rejects in a 90-minute window around it.\n\nSo this looks like a single-shot divergence on the epoch-1360 boundary PTC committee, not a sustained \"43520+\" issue.",
+      "createdAt": "2026-06-10T22:04:49.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Checked glamsterdam-devnet-5 Lodestar nodes (devnet-ax41-0 through -3). Yes, Lodestar also rejected Prysm PTC attestations at ~14:04:09 UTC (epoch 1360 boundary) with `PAYLOAD_ATTESTATION_ERROR_INVALID_ATTESTER` for validators 2910, 2924, 2937, 2964, 2965, 3008, 3022 — same Prysm peer `16Uiu2HAmKCKSwAx77MCXxfYcgAyMKmgWMSDJojVFJYY75sMGtWqy` (Prysm v7.1.3-rc.3), all 4 nodes.\n\nThese REJECTs do trigger gossipsub score penalties (TopicValidatorResult.Reject).\n\nLodestar's committee check uses `getBlockSlotState(block, data.slot)` where `block = forkChoice.getBlockDefaultStatus(data.beaconBlockRoot)` — so it uses the state at the referenced block root, not head state. The validators were still not in the PTC committee at that state, which confirms the Prysm bug (likely `HighestReceivedBlockRoot()` mismatch).",
+      "createdAt": "2026-06-10T22:22:50.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ya we always use current slot block root whether it respects our current shuffling or not, nice catch",
+      "createdAt": "2026-06-10T23:15:45.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "probably explains why prysm gets isolated often after long non finality",
+      "createdAt": "2026-06-10T23:16:14.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "opening in a bit, for now won't add the multiple blocks on the slot issue, but just will attest if the shuffling is canonical",
+      "createdAt": "2026-06-10T23:26:52.247000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 there was a reorg which changed the dependent root if you imported the grandine block at slot 0, so might be that",
+      "createdAt": "2026-06-10T23:30:17.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah wait but this should be for next epoch duties 🤔",
+      "createdAt": "2026-06-10T23:30:44.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah no I was right, so prysm voted for this block https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/0x052b451762dbcf4c6c7b8742b85653805f72f104dc5e6234140b5a7a99afd60b and his has a different shuffling than you head view",
+      "createdAt": "2026-06-10T23:41:22.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/OffchainLabs/prysm/pull/16946 Thanks <@358120958726373381> <@586161934425128960> that's a very nice find, we can improve on this but this is the lazy fix",
+      "createdAt": "2026-06-10T23:41:28.999000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok this grandine branch is kinda crazy",
+      "createdAt": "2026-06-10T23:41:32.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "they build blocks 10 slots apart of each other, and only grandine nodes, they seem isolated from canonical but prysm imported block at `43520`",
+      "createdAt": "2026-06-10T23:43:41.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "It's funny that LH had a different head block than PRysm, PRysm voted on LH head that was not canonical for us, but we had imported it",
+      "createdAt": "2026-06-10T23:46:23.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "why do you say you had different heads?",
+      "createdAt": "2026-06-10T23:47:03.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "from what I can see `43520` wasn't prysm head",
+      "createdAt": "2026-06-10T23:47:15.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but your ptc votes are for that block root",
+      "createdAt": "2026-06-10T23:47:29.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so `highestReceivedSlot = 43520`, `root = 0x052b451762dbcf4c6c7b8742b85653805f72f104dc5e6234140b5a7a99afd60b`, but your head should be `43519` at that time, maybe you can confirm that via logs",
+      "createdAt": "2026-06-10T23:52:34.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43521 build on `43519` at least",
+      "createdAt": "2026-06-10T23:53:11.005000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok I am out, time to sleep, feel free to ask lodekeeper if you need lodestar pov 🙂",
+      "createdAt": "2026-06-10T23:53:29.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "1. LH validated our attestation with their head state. \n2. Prysm attested to a block root that must have matched LH shuffling (otherwise they would not have validated and just would ignore it)\n3. Prysm attested when they were not in the committee, so Prysm's head was in a different shuffling than LH",
+      "createdAt": "2026-06-10T23:55:01.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "(not commenting on that, just wanna note, lodestar nodes vote incorrectly right now beasue I removed 5222, so we support deathstar blocks right now)",
+      "createdAt": "2026-06-10T23:56:56.877000+00:00",
+      "attachments": []
+    }
+  ]
+}

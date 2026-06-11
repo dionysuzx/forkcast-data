@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "interop-🌃/_threads/ethrex error logs",
   "date": "2026-06-10",
-  "messageCount": 52,
-  "sourceHash": "8d229b2956fbc1477a2fbaedb0fee7e017e873065559954c7de550a41bcb657e",
-  "searchText": "I think I permanently damaged dora for this block/attestations view https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations oh, that looks bad o.O does a restart maybe fix it? it happens if I click into the attestations view and then out of it into a different tab, but not exactly sure about the exact trigger that causes this also it seems like indices are no longer mapped to client labels The underlying issue is that there is a \"null\" passed as validator names lookup dict.. So there is a JS exception thrown that kills the client side rendering nice find o.O it's a bug in my ssz lib 😅 fixed 🙂 thanks, it works now, but do you know why we don't see the labels anymorehttps://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations yea, the attester duties are not persisted in the dora db. that'd be megabytes of data for every epoch for mainnet sized networks. So the duties are kept in memory only for the most recent 2 or 3 epochs. Afterwards it's dropped off. Anything building on top of the duties (like the attestestation bitmask lookups) is then no longer available I could probably store them in S3 or so to not clutter the DB 🤔 Would it be helpful to have it available long term? hmm I am just looking at older block right now trying to understand what happened, but of course I can also just pull that data from somewhere else, it's tricky to reconstruct old shufflings though, so useful for sure I am just not sure how common it is to look at such old blocks the reason I am doing it right now is because we stopped accepting deathstar blocks as canonical (which is good) https://dora.glamsterdam-devnet-5.ethpandaops.io/slots/filtered?f&f.missing=1&f.orphaned=1&f.pname=lodestar-ethrex-1 but I wanna understand why, the theory right now is because grandine is offline and before in some cases they added enough attestation weight (since they voted incorrectly together with Nimbus) with proposer boost to flip the head, so the proposer that build on top of the deathstar branch in some cases are actually correct, but this can only happen if we have ~20% malicious attesters supporting it cc <@755590043632140352> does that explain it? Yes. PB alone shouldn't be enough to flip the view of honest attesters We definitely need to fix nimbus and grandine. Hopefully today I'll deliver on my promise to merge 5222 and also fix the majority of PTC yes so since grandine (the deathstar supporters) went offline we no longer flip the view, so it's only possible if you have a large amount attesters that you control and that support your payload reorg also honest attesters are not having full pariticipation (for whatever reason) so we miss a few votes there too I am actually surprised how it's possible that Prysm is voting correctly even without 5222, you need to explain this to me. Does prysm keep track locally if it sees the payload timely and doesn't care about PTC votes in that case? Arresters never care about PTC, I've been telling you this forever. They only care in case the proposer reorgs and the PTC achieved quorum, which in this devnet never should happen what's your definition of PTC achieved quorum? so consider this, if you don't count ptc votes correctly (ie. you don't reach >256 as timely then this shoulnd't be possible) ``` 1 - honest lighthouse FULL (slot 1 ) 2 - deathstar EMPTY (reorg 1 FULL) (slot 2) should_extend_payload(1) = false - payload_is_timely = false - payload_data_is_available = false - proposer_root == Root() = false - store.blocks[proposer_root].parent_root != root = false - is_parent_node_full = false 2 is on_block <-- proposer_root slot 1 lighthouse proposes block, slot 1 attester vote for lighthouse block as PENDING in slot 1 lighthouse reveals payload (ptc in slot 1 votes timely/available) slot 2 deathstar build on slot 1 empty prysm receive block from deathstar in slot 2 at ~2 seconds (no attestations yet) why does prysm set it as head? what you set as head will determine if you vote for 1 FULL or 2 EMPTY ``` so here ``` - payload_is_timely = false - payload_data_is_available = false ``` is like this for prysm because you don't have 5222 Well, in the situation yuou describe above: There is no quorum, slot N, full is our head, N+1 proposes on top of empty, we follow the proposer of N+1 as the spec says, so if we are voting agains the proposer there must be something else going on but you are voting against deathstar blocks which is good, but I can't explain why This is all the decision making: ``` 257 func (s *Store) shouldExtendPayload(fn *PayloadNode) bool { 258 if fn == nil { 259 return false 260 } 261 n := fn.node 262 if n.payloadAvailabilityVote.Count() > fieldparams.PTCSize/2 && n.payloadDataAvailabilityVote.Count() > fieldparams.PTCSize/2 { 263 return true 264 } 265 if s.proposerBoostRoot == [32]byte{} { 266 return true 267 } 268 pn := s.emptyNodeByRoot[s.proposerBoostRoot] 269 if pn == nil { 270 return true 271 } 272 if pn.node.parent.node != fn.node { 273 return true 274 } 275 return pn.node.parent.full 276 } 277 278 // choosePayloadContent chooses between empty or full for the passed consensus node. 279 func (s *Store) choosePayloadContent(n *Node) *PayloadNode { 280 if n == nil { 281 return nil 282 } 283 fn := s.fullNodeByRoot[n.root] 284 en := s.emptyNodeByRoot[n.root] 285 if fn == nil { 286 return en 287 } 288 if fn.weight > en.weight { 289 return fn 290 } else if fn.weight < en.weight { 291 return en 292 } 293 previousSlot := n.slot+1 == s.currentSlot() 294 if !previousSlot || s.shouldExtendPayload(fn) { 295 return fn 296 } 297 return en 298 } ``` I will remove 5222 from lodestar and see if we do the same why is 288 to 293 not guarded by previous slot check? sure if the weight are all 0 this is fine, but if those are not? I'll leave that as an excercise, both Preston and Terence complained about this. Curious, did you get an AI to diagnose that? I am asking, I have a claude instance dedicated to your fork choice 😄 The weight must be zero for for previous slot you cannot have counted attestations that differentiate between full or empty because the max attestations you could have counted are for the previous committee that could not have voted either way The python spec has a funny way of going through forkchoice because of the way it applies weights, we do something different, I don't need to care about proposer boost cause it's not in either of the weights for these nodes. But what I want to stress is that the spec is phrased as is, just to deal with proposer boost. If for any reason later in the slot we do count attestations for the current committe, we definitely want to count them and differentiate by weight, not by the slot condition yes, `fn.weight` and `en.weight` should be 0 is what you saying? yes assuming there is no bug this seems right but https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43111#attestations, you clearly vote correctly here but how? only Nimbus votes (because Grandine is offline) are incorrect hmm potuz can it be that you receive attestations over the wire and add them to the weight before you attest? no, we don't count attestations for same slot committee, if we do that's a serious bug I'd be happy to get such a report 🙂 I agree it would be a serious issue, but it shouldn't be relevant pre-gloas probably my claude is insisting that prysm doesn't freeze te weights and counts attestations 🤷 I refuse to listen to Claude without a report... I can help you avoid wasting my time: UpdateHead in PRysm indeed does count same slot attestations (which we do on purpose). But this is called only later in the slot and it would be the right behavior anyway I haven't even asked claude before you asked me here can you do an image which guards the weight comparison? it would be easy to see quickly on the devnet That may make us work incorrectly on a bunch of scenarios or at least it would make me have to spend time thinking if it is sound that's why I rather not change that",
+  "messageCount": 80,
+  "sourceHash": "b056c8264ee5988381f1839d8e25e882fe147c18dd5343105adc3c791b35d089",
+  "searchText": "I think I permanently damaged dora for this block/attestations view https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations oh, that looks bad o.O does a restart maybe fix it? it happens if I click into the attestations view and then out of it into a different tab, but not exactly sure about the exact trigger that causes this also it seems like indices are no longer mapped to client labels The underlying issue is that there is a \"null\" passed as validator names lookup dict.. So there is a JS exception thrown that kills the client side rendering nice find o.O it's a bug in my ssz lib 😅 fixed 🙂 thanks, it works now, but do you know why we don't see the labels anymorehttps://dora.glamsterdam-devnet-5.ethpandaops.io/slot/37917#attestations yea, the attester duties are not persisted in the dora db. that'd be megabytes of data for every epoch for mainnet sized networks. So the duties are kept in memory only for the most recent 2 or 3 epochs. Afterwards it's dropped off. Anything building on top of the duties (like the attestestation bitmask lookups) is then no longer available I could probably store them in S3 or so to not clutter the DB 🤔 Would it be helpful to have it available long term? hmm I am just looking at older block right now trying to understand what happened, but of course I can also just pull that data from somewhere else, it's tricky to reconstruct old shufflings though, so useful for sure I am just not sure how common it is to look at such old blocks the reason I am doing it right now is because we stopped accepting deathstar blocks as canonical (which is good) https://dora.glamsterdam-devnet-5.ethpandaops.io/slots/filtered?f&f.missing=1&f.orphaned=1&f.pname=lodestar-ethrex-1 but I wanna understand why, the theory right now is because grandine is offline and before in some cases they added enough attestation weight (since they voted incorrectly together with Nimbus) with proposer boost to flip the head, so the proposer that build on top of the deathstar branch in some cases are actually correct, but this can only happen if we have ~20% malicious attesters supporting it cc <@755590043632140352> does that explain it? Yes. PB alone shouldn't be enough to flip the view of honest attesters We definitely need to fix nimbus and grandine. Hopefully today I'll deliver on my promise to merge 5222 and also fix the majority of PTC yes so since grandine (the deathstar supporters) went offline we no longer flip the view, so it's only possible if you have a large amount attesters that you control and that support your payload reorg also honest attesters are not having full pariticipation (for whatever reason) so we miss a few votes there too I am actually surprised how it's possible that Prysm is voting correctly even without 5222, you need to explain this to me. Does prysm keep track locally if it sees the payload timely and doesn't care about PTC votes in that case? Arresters never care about PTC, I've been telling you this forever. They only care in case the proposer reorgs and the PTC achieved quorum, which in this devnet never should happen what's your definition of PTC achieved quorum? so consider this, if you don't count ptc votes correctly (ie. you don't reach >256 as timely then this shoulnd't be possible) ``` 1 - honest lighthouse FULL (slot 1 ) 2 - deathstar EMPTY (reorg 1 FULL) (slot 2) should_extend_payload(1) = false - payload_is_timely = false - payload_data_is_available = false - proposer_root == Root() = false - store.blocks[proposer_root].parent_root != root = false - is_parent_node_full = false 2 is on_block <-- proposer_root slot 1 lighthouse proposes block, slot 1 attester vote for lighthouse block as PENDING in slot 1 lighthouse reveals payload (ptc in slot 1 votes timely/available) slot 2 deathstar build on slot 1 empty prysm receive block from deathstar in slot 2 at ~2 seconds (no attestations yet) why does prysm set it as head? what you set as head will determine if you vote for 1 FULL or 2 EMPTY ``` so here ``` - payload_is_timely = false - payload_data_is_available = false ``` is like this for prysm because you don't have 5222 Well, in the situation yuou describe above: There is no quorum, slot N, full is our head, N+1 proposes on top of empty, we follow the proposer of N+1 as the spec says, so if we are voting agains the proposer there must be something else going on but you are voting against deathstar blocks which is good, but I can't explain why This is all the decision making: ``` 257 func (s *Store) shouldExtendPayload(fn *PayloadNode) bool { 258 if fn == nil { 259 return false 260 } 261 n := fn.node 262 if n.payloadAvailabilityVote.Count() > fieldparams.PTCSize/2 && n.payloadDataAvailabilityVote.Count() > fieldparams.PTCSize/2 { 263 return true 264 } 265 if s.proposerBoostRoot == [32]byte{} { 266 return true 267 } 268 pn := s.emptyNodeByRoot[s.proposerBoostRoot] 269 if pn == nil { 270 return true 271 } 272 if pn.node.parent.node != fn.node { 273 return true 274 } 275 return pn.node.parent.full 276 } 277 278 // choosePayloadContent chooses between empty or full for the passed consensus node. 279 func (s *Store) choosePayloadContent(n *Node) *PayloadNode { 280 if n == nil { 281 return nil 282 } 283 fn := s.fullNodeByRoot[n.root] 284 en := s.emptyNodeByRoot[n.root] 285 if fn == nil { 286 return en 287 } 288 if fn.weight > en.weight { 289 return fn 290 } else if fn.weight < en.weight { 291 return en 292 } 293 previousSlot := n.slot+1 == s.currentSlot() 294 if !previousSlot || s.shouldExtendPayload(fn) { 295 return fn 296 } 297 return en 298 } ``` I will remove 5222 from lodestar and see if we do the same why is 288 to 293 not guarded by previous slot check? sure if the weight are all 0 this is fine, but if those are not? I'll leave that as an excercise, both Preston and Terence complained about this. Curious, did you get an AI to diagnose that? I am asking, I have a claude instance dedicated to your fork choice 😄 The weight must be zero for for previous slot you cannot have counted attestations that differentiate between full or empty because the max attestations you could have counted are for the previous committee that could not have voted either way The python spec has a funny way of going through forkchoice because of the way it applies weights, we do something different, I don't need to care about proposer boost cause it's not in either of the weights for these nodes. But what I want to stress is that the spec is phrased as is, just to deal with proposer boost. If for any reason later in the slot we do count attestations for the current committe, we definitely want to count them and differentiate by weight, not by the slot condition yes, `fn.weight` and `en.weight` should be 0 is what you saying? yes assuming there is no bug this seems right but https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/43111#attestations, you clearly vote correctly here but how? only Nimbus votes (because Grandine is offline) are incorrect hmm potuz can it be that you receive attestations over the wire and add them to the weight before you attest? no, we don't count attestations for same slot committee, if we do that's a serious bug I'd be happy to get such a report 🙂 I agree it would be a serious issue, but it shouldn't be relevant pre-gloas probably my claude is insisting that prysm doesn't freeze te weights and counts attestations 🤷 I refuse to listen to Claude without a report... I can help you avoid wasting my time: UpdateHead in PRysm indeed does count same slot attestations (which we do on purpose). But this is called only later in the slot and it would be the right behavior anyway I haven't even asked claude before you asked me here can you do an image which guards the weight comparison? it would be easy to see quickly on the devnet That may make us work incorrectly on a bunch of scenarios or at least it would make me have to spend time thinking if it is sound that's why I rather not change that no, just to proof this case, you can revert it after I can make a branch, I don't think I have permission to upload images <@412614104222531604> can help? but we can build a prysm image from any branch I will also work on a branch taht reverts 5222 in lodestar always you know how to trigger an image build of a specific branch already let me know when you have a built docker image that needs to be rolled, and I can roll it on a single host hmm I might have caused more choas on the devnet now do we know hwy prysm is missing blocks? what did you trigger? Look slike prysm-ethrex-2 and prysm-nethermind-2 and prysm-erigon-1 all offline I removed 5222 from lodestar, but that can't have such an impact ah nvm, I removed it but we are still counting them actually from blocks so that cannot be it now all prysm is offline cc <@363800010518822915> <@755590043632140352> I love the new v2 fork choice api, finally can see ptc votes <@755590043632140352> 🙏 `deathstar` is kinda dumb, it packs the ptc votes into it's own block that show that it is acting wrongly 😄 looks like prysm just fell back to initial sync again? super strange there is another <@1356328576970002452> in this channel 🤔 I somehow pinged that other guy here <@755590043632140352> I removed 5222 from lodestar, and now are voting for the deathstar blocks, see https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/44427#attestations in fact, most `deathstar` blocks are now canonical because we do not reorg them we are doing the saem wrong votes as nimbus/grandine now curious how this looks when prysm is back online, right now there are no prysm votes",
   "excerpts": [
     {
       "author": "nflaig",
@@ -426,6 +426,242 @@
       "parent": "interop-🌃",
       "content": "that's why I rather not change that",
       "createdAt": "2026-06-10T13:05:59.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no, just to proof this case, you can revert it after",
+      "createdAt": "2026-06-10T13:06:08.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I can make a branch, I don't think I have permission to upload images",
+      "createdAt": "2026-06-10T13:06:26.869000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> can help?",
+      "createdAt": "2026-06-10T13:06:48.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but we can build a prysm image from any branch",
+      "createdAt": "2026-06-10T13:07:06.747000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I will also work on a branch taht reverts 5222 in lodestar",
+      "createdAt": "2026-06-10T13:07:15.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "always",
+      "createdAt": "2026-06-10T13:09:49.605000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you know how to trigger an image build of a specific branch already",
+      "createdAt": "2026-06-10T13:10:05.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "let me know when you have a built docker image that needs to be rolled, and I can roll it on a single host",
+      "createdAt": "2026-06-10T13:10:18.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm I might have caused more choas on the devnet now",
+      "createdAt": "2026-06-10T14:51:49.794000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do we know hwy prysm is missing blocks?",
+      "createdAt": "2026-06-10T14:51:57.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what did you trigger?",
+      "createdAt": "2026-06-10T14:52:33.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Look slike prysm-ethrex-2 and prysm-nethermind-2 and prysm-erigon-1 all offline",
+      "createdAt": "2026-06-10T14:52:52.704000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I removed 5222 from lodestar, but that can't have such an impact",
+      "createdAt": "2026-06-10T14:55:47.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah nvm, I removed it but we are still counting them actually from blocks",
+      "createdAt": "2026-06-10T15:11:43.671000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so that cannot be it",
+      "createdAt": "2026-06-10T15:11:47.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "now all prysm is offline",
+      "createdAt": "2026-06-10T15:13:01.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@363800010518822915> <@755590043632140352>",
+      "createdAt": "2026-06-10T15:13:16.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I love the new v2 fork choice api, finally can see ptc votes <@755590043632140352> 🙏",
+      "createdAt": "2026-06-10T15:18:26.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "`deathstar` is kinda dumb, it packs the ptc votes into it's own block that show that it is acting wrongly 😄",
+      "createdAt": "2026-06-10T15:19:15.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "looks like prysm just fell back to initial sync again?",
+      "createdAt": "2026-06-10T15:20:34.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "super strange",
+      "createdAt": "2026-06-10T15:20:43.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-06-10T15:22:55.874000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=ISO-8859-1",
+          "origin_name": "message.txt",
+          "content": "251f6f2520be5aeb2993e75431c5b5225f0b59ecb6a07703ba9c63f9dbfcf5c9"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "there is another <@1356328576970002452> in this channel 🤔",
+      "createdAt": "2026-06-10T15:25:17.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I somehow pinged that other guy here",
+      "createdAt": "2026-06-10T15:28:49.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@755590043632140352> I removed 5222 from lodestar, and now are voting for the deathstar blocks, see https://dora.glamsterdam-devnet-5.ethpandaops.io/slot/44427#attestations",
+      "createdAt": "2026-06-10T17:25:37.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "in fact, most `deathstar` blocks are now canonical because we do not reorg them",
+      "createdAt": "2026-06-10T17:26:09.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we are doing the saem wrong votes as nimbus/grandine now",
+      "createdAt": "2026-06-10T17:27:57.677000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "8e192f7cfe15873e142b51becd863af0d1e22bd4d9304d7a2deb2a229d25a481"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "curious how this looks when prysm is back online, right now there are no prysm votes",
+      "createdAt": "2026-06-10T17:28:26.459000+00:00",
       "attachments": []
     }
   ]
