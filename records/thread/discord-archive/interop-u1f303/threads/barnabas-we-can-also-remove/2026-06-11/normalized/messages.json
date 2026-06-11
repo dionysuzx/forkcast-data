@@ -1,0 +1,724 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/@Barnabas we can also remove",
+  "date": "2026-06-11",
+  "messageCount": 87,
+  "sourceHash": "04b9d6065e33a7d14760f915c8198370e40b66d5b9d3ec08b4364978e356b7c0",
+  "searchText": "``` Jun-11 08:25:00.924[chain] error: Error pushing notifyForkchoiceUpdate() blockHashHex=0x1b2cb63e55372dbc4fcdd526fe326dc93585f4d4893599d4e0d133cbad5b76a8, finalizedBlockHash=0xa3c8f081ebd1f3641466bbae0470ad3d8fb95685a05399a8925368112b485de7 - JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4 Error: JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4 at parseRpcResponse (file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:317:11) at file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:173:14 at processTicksAndRejections (node:internal/process/task_queues:104:5) at JsonRpcHttpClient.wrapWithEvents (file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:205:24) at JobItemQueue.runJob (file:///usr/app/packages/beacon-node/src/util/queue/itemQueue.ts:149:22) ``` im seeing this on that node now but it seems to be syncing now ~5k slots behind tho yes, will start from last finalized checkpoint yeah that's also the reorg warning seems to be slowing down but the reorg warning is new, this didn't happen before, likely the change that EL introduced to allow reorgs on the same branch also 26 peers down to 6 and now it seems to have halted only restarted the CL btw might need to restart the EL too? give me a sec if you add `--lastPersistedCheckpointState` it will start from last unfinalized checkpoint it has I restarted it and it stalled again.. ``` Jun-11 08:30:42.001[] info: Syncing - 18 minutes left - 3.90 slots/s - slot: 49053 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 6 Jun-11 08:30:54.001[] info: Syncing - 28 minutes left - 2.52 slots/s - slot: 49054 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 7 Jun-11 08:31:06.000[] info: Syncing - 1.5 hours left - 0.764 slots/s - slot: 49055 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5 Jun-11 08:31:10.005[rest] warn: Req req-7i getEpochCommittees failed reason=Epoch 1533 must be within one epoch of state epoch 1400 Jun-11 08:31:12.504[rest] warn: Req req-7v getEpochCommittees failed reason=Epoch 1533 must be within one epoch of state epoch 1400 Jun-11 08:31:18.001[] info: Syncing - ? left - 0.00 slots/s - slot: 49056 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5 Jun-11 08:31:27.508[rest] warn: Req req-8s getEpochCommittees failed reason=Epoch 1532 must be within one epoch of state epoch 1400 Jun-11 08:31:30.001[] info: Syncing - ? left - 0.00 slots/s - slot: 49057 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5 Jun-11 08:31:42.001[] info: Syncing - ? left - 0.00 slots/s - slot: 49058 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5 Jun-11 08:31:54.000[] info: Syncing - ? left - 0.00 slots/s - slot: 49059 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5 ``` im adding the flag well it pruned all checkpoint locally already but looks like the stop gracefully flag is no longer working? it should seems like some regression our range sync is having issues likely but could also be clients not serving data correctly cc <@575994543527297055> <@534934855113506836> might be somehow related to the sync stall <@1467247836117860547> can you check why`lodestar-ethrex-1.srv.glamsterdam-devnet-5.ethpandaops.io` is not shutting down gracefully, also why did sync stall, check the debug logs in `/data` worst case you can recover the node via `--unsafeCheckpointState=<healthy_ls_node>/eth/v1/lodestar/persisted_checkpoint_state` it just restarted I think your sync needs to be fixed lol good node to test your range sync can anyone properly range sync? prysm for sure can't, otherwise we didn't have to almost relaunch the devnet <@575994543527297055> we can test sync on our internal infra nodes, likely better to do it there **Stall — ethrex EL rejecting forkchoice, not a Lodestar bug** `docker logs execution` is full of: ``` WARN Rejecting fork choice update. Reason: Reorg depth 2548 exceeds the client's limit of 128 ``` 974 rejections in the CL log (`Too deep reorg, engine_forkchoiceUpdatedV4`). After checkpoint-sync init from slot 44384, every FCU is past ethrex's hardcoded 128-block reorg cap (depth was 2200-2548). EL flips SYNCED→SYNCING and never accepts a head, so Lodestar's head stays optimistic at 44807, blocks keep importing internally, \"0.00 slots/s\" in the syncing line because EL won't validate. Lines up with what Nico flagged in chat — the recent EL reorg-handling change. Ping ethrex team to bump the limit or change semantics for genesis/checkpoint-init. **Graceful shutdown — actual Lodestar regression** SIGTERM at `08:32:53.156`. Network worker shuts down cleanly in ~110ms (REST API closed, all goodbyes sent, gossip/reqResp/libp2p/peerManager all closed, \"terminating network worker\" at `08:32:53.263`). Then main thread keeps running interval timers for **2m22s** — \"Syncing\", \"Clock slot\", \"PrepareNextSlotScheduler\", \"After importBlock caching postState\" all keep firing — until `08:35:15.287` \"Forcing process exit\" (Lodestar's internal force timeout, not docker; container `StopTimeout=300s`). Network teardown works, main loop doesn't unwind. Smells like chain/notifier/scheduler timers (or an unresolved sync promise) keeping the event loop alive after network closes. `verifyBlocksSanityChecks` errors also keep firing during the stop window, so block-processing queue is still draining. cc @twoeths | lodestar @wemeetagain — for the main-loop side. Want me to open a Lodestar issue with the timeline + log excerpts? <@412614104222531604> seems like even after restart ethrex is giving those errors? maybe need to get rid of db for that happy to yeet the ethrex db do you mean range sync from genesis? checkpoint sync worked there ah or you mean from the last finalized checkpoint? so checkpoint sync right now, range sync from last finalized (~5k slots from head) back to head you can't sync devnet-5 from genesis, pretty sure about that we yeeted dbs many times over are you doing that already? its done yeeted the ethrex db ok restarted beacon <@1467247836117860547> why is the sync on `lodestar-ethrex-1` stalling? devnet node 3 was synced in 3 mins 😄 do we set custom flags there? which custom flags may change the behavior? I don't see any there I noticed something funny last time, we can increase sync import tolerance to a really high value so we subscribe to gossip and then use our unknown block sync to sync the chain is that possible <@575994543527297055> ? but yeah seems fine there synced really fast we run `glamsterdam-devnet-5/078e689` there yeah the unknownblock/backward was designed that way to backward sync, but i haven't tested for a long unfinality time so should give it a try if needed yeah but I mean using it to sync 5k slots seems kinda strange lol <@1467247836117860547> did you find anything? I still need to give him access to panda which I think Sam has figured out <@1467247836117860547> what's up? Nothing on my end — I was just lurking the thread. Don't have context on what to dig into here beyond the backward-sync discussion you and Tuyen were having. I asked you to check why `lodestar-ethrex-1` is stalling Got enough to report. Posting the findings. Yeah — `lodestar-ethrex-1` is hard-stalled at head **slot 44456** (~4767 slots / ~16h behind canonical, which is at ~slot 49223). Timeline from dora: - `44457` deathstar proposed → **canonical** (its own empty-payload block at exec_block 27224, overrode lodestar-ethrex-2's full payload at 27224) - `44520`, `44580` deathstar proposed → **orphaned** (network rejected them) - After slot 44580 → no more deathstar proposals; lodestar-ethrex-1's validator slots are all `Missing` So it's not \"behind sync\" — it published 3 blocks (1 canonical, 2 orphaned) and then went silent ~15.5h ago. The pattern matches the deathstar getting wedged on its own minority empty-builder fork after PTC majority kept voting timely on others' FULL payloads, plus likely the ethrex EL \"block body missing below latest known block\" stall Barnabas was tracking on 2026-06-08. Can't differentiate CL fork-choice wedge vs EL crash without log access — would need Loki/SSH on the node to confirm. If you want me to dig further, send Sam's panda creds or shell access on `lodestar-ethrex-1` and I'll pull the actual cause. you should be able to ssh into `lodestar-ethrex-1.srv.glamsterdam-devnet-5.ethpandaops.io`, debug logs are at `/data/lodestar` Got the root cause. Posting it now. Found it. **Root cause: ethrex EL is the broken side, Lodestar is healthy but wedged downstream.** Ethrex JSON-RPC right now: - `eth_blockNumber`: `0x6800` → block **26624** - `eth_syncing`: currentBlock=26624, highestBlock=27966 — doing **P2P sync, not engine-driven**, from block 0 - ethrex logs flooding: `WARN [SYNCING] Didn't receive block bodies from peer, penalizing peer ...` + `WARN No messages from the consensus layer` every 30s Lodestar beacon API: - head_slot=44456, sync_distance=4810, is_syncing=true, is_optimistic=true, el_offline=false - Lodestar log: 1170 errors in 47min, all `Error pushing notifyForkchoiceUpdate() - JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4` - 13 restart loops since 08:23 UTC (last restart 08:47, current uptime 25min — backoff stabilizing) What happened: when the deathstar branch went out, ethrex ended up on some divergent chain (probably from importing the EMPTY-payload deathstar block at slot 44457). It then got reset / hit a bug and switched into eth-P2P sync mode targeting block 27966 — but its devnet peers refuse to serve block bodies. So ethrex is wedged at block 26624. Lodestar can't FCU past slot 44456 because each fcU asks ethrex to set head to a block hash it doesn't have, ethrex returns \"Too deep reorg\", Lodestar errors and eventually restarts. Secondary Lodestar bug worth flagging separately: 22× `error: Error onDiscovered - Cannot read properties of undefined (reading 'includes')` — peer discovery code (v1.43.0/8021d8c) crashing on some peer record. Not the cause of the stall, but noise. Worth a quick grep + fix. Fix is on ethrex side: nuke ethrex chaindb and let it engine-API-sync from CL, or swap to nethermind like you did on 2026-06-08. P2P sync to mainnet-style block bodies isn't going to work on a devnet where peers are also borked. Want me to save this as a memory entry so we don't re-derive it next time ethrex stalls? <@1467247836117860547> the ethrex db has been wiped already Yeah that's the issue — after the wipe ethrex flipped into eth-P2P SYNCING mode (not engine-driven). It's at block 26624 trying to reach 27966 via `eth/getBlockBodies`, and peers keep refusing/penalizing: ``` WARN [SYNCING] Didn't receive block bodies from peer, penalizing peer 0x... WARN Failed to fetch block bodies (attempt 1/10), retrying in 2s eth_capable_peers=10 WARN No messages from the consensus layer. Is the consensus client running? ``` So Lodestar IS hitting ethrex's engine API but ethrex ignores fcU/newPayload while in P2P SYNCING — and returns `Too deep reorg, engine_forkchoiceUpdatedV4` because its head is ~600 blocks behind what Lodestar's asking for. Lodestar then can't advance past slot 44456. Two ways out without waiting on ethrex devs: 1. **Force engine sync only**: relaunch ethrex with `--syncmode full` (or whichever flag disables eth-P2P sync on ethrex) so it accepts newPayload from Lodestar instead of trying to fetch bodies P2P. Lodestar has the blocks locally. 2. **Swap to nethermind** like the 2026-06-08 fix — quickest unblock. ethrex going into network-P2P sync after a fresh DB on a CL-driven devnet looks like an ethrex default-mode bug worth filing upstream — same symptom Tersec/etc were seeing earlier. Want me to file an issue again",
+  "excerpts": [
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-06-11T08:25:30.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\nJun-11 08:25:00.924[chain]           error: Error pushing notifyForkchoiceUpdate() blockHashHex=0x1b2cb63e55372dbc4fcdd526fe326dc93585f4d4893599d4e0d133cbad5b76a8, finalizedBlockHash=0xa3c8f081ebd1f3641466bbae0470ad3d8fb95685a05399a8925368112b485de7 - JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4\nError: JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4\n    at parseRpcResponse (file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:317:11)\n    at file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:173:14\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at JsonRpcHttpClient.wrapWithEvents (file:///usr/app/packages/beacon-node/src/execution/engine/jsonRpcHttpClient.ts:205:24)\n    at JobItemQueue.runJob (file:///usr/app/packages/beacon-node/src/util/queue/itemQueue.ts:149:22)\n```",
+      "createdAt": "2026-06-11T08:25:33.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "im seeing this on that node now",
+      "createdAt": "2026-06-11T08:25:39.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but it seems to be syncing now",
+      "createdAt": "2026-06-11T08:25:57.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "~5k slots behind tho",
+      "createdAt": "2026-06-11T08:26:11.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes, will start from last finalized checkpoint",
+      "createdAt": "2026-06-11T08:26:28.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah",
+      "createdAt": "2026-06-11T08:26:33.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "that's also the reorg warning",
+      "createdAt": "2026-06-11T08:26:34.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seems to be slowing down",
+      "createdAt": "2026-06-11T08:26:39.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but the reorg warning is new, this didn't happen before, likely the change that EL introduced to allow reorgs on the same branch",
+      "createdAt": "2026-06-11T08:27:05.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also 26 peers down to 6",
+      "createdAt": "2026-06-11T08:27:08.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "and now it seems to have halted",
+      "createdAt": "2026-06-11T08:27:22.829000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "only restarted the CL btw",
+      "createdAt": "2026-06-11T08:27:27.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "might need to restart the EL too?",
+      "createdAt": "2026-06-11T08:27:32.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "give me a sec",
+      "createdAt": "2026-06-11T08:27:39.389000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if you add `--lastPersistedCheckpointState` it will start from last unfinalized checkpoint it has",
+      "createdAt": "2026-06-11T08:32:02.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I restarted it and it stalled again..\n```\nJun-11 08:30:42.001[]                 info: Syncing - 18 minutes left - 3.90 slots/s - slot: 49053 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 6\nJun-11 08:30:54.001[]                 info: Syncing - 28 minutes left - 2.52 slots/s - slot: 49054 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 7\nJun-11 08:31:06.000[]                 info: Syncing - 1.5 hours left - 0.764 slots/s - slot: 49055 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5\nJun-11 08:31:10.005[rest]             warn: Req req-7i getEpochCommittees failed reason=Epoch 1533 must be within one epoch of state epoch 1400\nJun-11 08:31:12.504[rest]             warn: Req req-7v getEpochCommittees failed reason=Epoch 1533 must be within one epoch of state epoch 1400\nJun-11 08:31:18.001[]                 info: Syncing - ? left - 0.00 slots/s - slot: 49056 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5\nJun-11 08:31:27.508[rest]             warn: Req req-8s getEpochCommittees failed reason=Epoch 1532 must be within one epoch of state epoch 1400\nJun-11 08:31:30.001[]                 info: Syncing - ? left - 0.00 slots/s - slot: 49057 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5\nJun-11 08:31:42.001[]                 info: Syncing - ? left - 0.00 slots/s - slot: 49058 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5\nJun-11 08:31:54.000[]                 info: Syncing - ? left - 0.00 slots/s - slot: 49059 - head: 44807 0x12ee…ab68 - exec-block: valid(27435 0xe0f5…) - finalized: 0xe0df…2ca0:1387 - peers: 5\n```",
+      "createdAt": "2026-06-11T08:33:12.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "im adding the flag",
+      "createdAt": "2026-06-11T08:33:20.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "well it pruned all checkpoint locally already",
+      "createdAt": "2026-06-11T08:33:33.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but looks like the stop gracefully flag is no longer working?",
+      "createdAt": "2026-06-11T08:33:34.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it should",
+      "createdAt": "2026-06-11T08:34:01.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-06-11T08:34:12.823000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-06-11_at_10.34.07.png",
+          "content": "5141896e851285c95955223e676d91b82dde2a7eac6e17893344900499456daa"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seems like some regression",
+      "createdAt": "2026-06-11T08:34:15.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "our range sync is having issues likely but could also be clients not serving data correctly cc <@575994543527297055> <@534934855113506836>",
+      "createdAt": "2026-06-11T08:34:57.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "might be somehow related to the sync stall",
+      "createdAt": "2026-06-11T08:35:48.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you check why`lodestar-ethrex-1.srv.glamsterdam-devnet-5.ethpandaops.io` is not shutting down gracefully, also why did sync stall, check the debug logs in `/data`",
+      "createdAt": "2026-06-11T08:36:40.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "worst case you can recover the node via `--unsafeCheckpointState=<healthy_ls_node>/eth/v1/lodestar/persisted_checkpoint_state`",
+      "createdAt": "2026-06-11T08:38:22.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it just restarted",
+      "createdAt": "2026-06-11T08:38:24.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think your sync needs to be fixed lol",
+      "createdAt": "2026-06-11T08:38:42.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "good node to test your range sync",
+      "createdAt": "2026-06-11T08:38:51.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can anyone properly range sync? prysm for sure can't, otherwise we didn't have to almost relaunch the devnet",
+      "createdAt": "2026-06-11T08:39:20.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@575994543527297055> we can test sync on our internal infra nodes, likely better to do it there",
+      "createdAt": "2026-06-11T08:40:40.468000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "**Stall — ethrex EL rejecting forkchoice, not a Lodestar bug**\n\n`docker logs execution` is full of:\n```\nWARN Rejecting fork choice update. Reason: Reorg depth 2548 exceeds the client's limit of 128\n```\n974 rejections in the CL log (`Too deep reorg, engine_forkchoiceUpdatedV4`). After checkpoint-sync init from slot 44384, every FCU is past ethrex's hardcoded 128-block reorg cap (depth was 2200-2548). EL flips SYNCED→SYNCING and never accepts a head, so Lodestar's head stays optimistic at 44807, blocks keep importing internally, \"0.00 slots/s\" in the syncing line because EL won't validate. Lines up with what Nico flagged in chat — the recent EL reorg-handling change. Ping ethrex team to bump the limit or change semantics for genesis/checkpoint-init.\n\n**Graceful shutdown — actual Lodestar regression**\n\nSIGTERM at `08:32:53.156`. Network worker shuts down cleanly in ~110ms (REST API closed, all goodbyes sent, gossip/reqResp/libp2p/peerManager all closed, \"terminating network worker\" at `08:32:53.263`). Then main thread keeps running interval timers for **2m22s** — \"Syncing\", \"Clock slot\", \"PrepareNextSlotScheduler\", \"After importBlock caching postState\" all keep firing — until `08:35:15.287` \"Forcing process exit\" (Lodestar's internal force timeout, not docker; container `StopTimeout=300s`).\n\nNetwork teardown works, main loop doesn't unwind. Smells like chain/notifier/scheduler timers (or an unresolved sync promise) keeping the event loop alive after network closes. `verifyBlocksSanityChecks` errors also keep firing during the stop window, so block-processing queue is still draining.\n\ncc @twoeths | lodestar @wemeetagain — for the main-loop side. Want me to open a Lodestar issue with the timeline + log excerpts?",
+      "createdAt": "2026-06-11T08:40:54.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> seems like even after restart ethrex is giving those errors?",
+      "createdAt": "2026-06-11T08:43:08.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "maybe need to get rid of db for that",
+      "createdAt": "2026-06-11T08:43:14.778000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "happy to yeet the ethrex db",
+      "createdAt": "2026-06-11T08:44:44.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do you mean range sync from genesis? checkpoint sync worked there",
+      "createdAt": "2026-06-11T08:45:05.050000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah or you mean from the last finalized checkpoint? so checkpoint sync",
+      "createdAt": "2026-06-11T08:45:21.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "right now, range sync from last finalized (~5k slots from head) back to head",
+      "createdAt": "2026-06-11T08:45:26.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you can't sync devnet-5 from genesis, pretty sure about that",
+      "createdAt": "2026-06-11T08:45:39.772000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we yeeted dbs many times over",
+      "createdAt": "2026-06-11T08:45:45.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "are you doing that already?",
+      "createdAt": "2026-06-11T08:46:41.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "its done",
+      "createdAt": "2026-06-11T08:46:49.166000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeeted the ethrex db",
+      "createdAt": "2026-06-11T08:46:59.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok restarted beacon",
+      "createdAt": "2026-06-11T08:47:29.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> why is the sync on `lodestar-ethrex-1` stalling?",
+      "createdAt": "2026-06-11T08:49:27.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "devnet node 3 was synced in 3 mins 😄",
+      "createdAt": "2026-06-11T08:50:34.418000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do we set custom flags there?",
+      "createdAt": "2026-06-11T08:51:09.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "which custom flags may change the behavior? I don't see any there",
+      "createdAt": "2026-06-11T08:51:53.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I noticed something funny last time, we can increase sync import tolerance to a really high value so we subscribe to gossip and then use our unknown block sync to sync the chain",
+      "createdAt": "2026-06-11T08:52:42.452000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "is that possible <@575994543527297055> ?",
+      "createdAt": "2026-06-11T08:53:33.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but yeah seems fine there synced really fast",
+      "createdAt": "2026-06-11T08:54:08.278000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "49681a3c69436b041316d92a18ca2601ab479e46e8b577e9a7567be1dd905149"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we run `glamsterdam-devnet-5/078e689` there",
+      "createdAt": "2026-06-11T08:54:33.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah the unknownblock/backward  was designed that way to backward sync, but i haven't tested for a long unfinality time\nso should give it a try if needed",
+      "createdAt": "2026-06-11T08:56:03.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah but I mean using it to sync 5k slots seems kinda strange lol",
+      "createdAt": "2026-06-11T08:56:48.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> did you find anything?",
+      "createdAt": "2026-06-11T08:57:54.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I still need to give him access to panda which I think Sam has figured out",
+      "createdAt": "2026-06-11T08:58:16.634000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> what's up?",
+      "createdAt": "2026-06-11T09:01:20.027000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Nothing on my end — I was just lurking the thread. Don't have context on what to dig into here beyond the backward-sync discussion you and Tuyen were having.",
+      "createdAt": "2026-06-11T09:01:37.676000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I asked you to check why `lodestar-ethrex-1` is stalling",
+      "createdAt": "2026-06-11T09:02:16.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Got enough to report. Posting the findings.\n\nYeah — `lodestar-ethrex-1` is hard-stalled at head **slot 44456** (~4767 slots / ~16h behind canonical, which is at ~slot 49223).\n\nTimeline from dora:\n- `44457` deathstar proposed → **canonical** (its own empty-payload block at exec_block 27224, overrode lodestar-ethrex-2's full payload at 27224)\n- `44520`, `44580` deathstar proposed → **orphaned** (network rejected them)\n- After slot 44580 → no more deathstar proposals; lodestar-ethrex-1's validator slots are all `Missing`\n\nSo it's not \"behind sync\" — it published 3 blocks (1 canonical, 2 orphaned) and then went silent ~15.5h ago. The pattern matches the deathstar getting wedged on its own minority empty-builder fork after PTC majority kept voting timely on others' FULL payloads, plus likely the ethrex EL \"block body missing below latest known block\" stall Barnabas was tracking on 2026-06-08. Can't differentiate CL fork-choice wedge vs EL crash without log access — would need Loki/SSH on the node to confirm.\n\nIf you want me to dig further, send Sam's panda creds or shell access on `lodestar-ethrex-1` and I'll pull the actual cause.",
+      "createdAt": "2026-06-11T09:08:29.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you should be able to ssh into `lodestar-ethrex-1.srv.glamsterdam-devnet-5.ethpandaops.io`, debug logs are at `/data/lodestar`",
+      "createdAt": "2026-06-11T09:09:54.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Got the root cause. Posting it now.\n\nFound it. **Root cause: ethrex EL is the broken side, Lodestar is healthy but wedged downstream.**\n\nEthrex JSON-RPC right now:\n- `eth_blockNumber`: `0x6800` → block **26624**\n- `eth_syncing`: currentBlock=26624, highestBlock=27966 — doing **P2P sync, not engine-driven**, from block 0\n- ethrex logs flooding: `WARN [SYNCING] Didn't receive block bodies from peer, penalizing peer ...` + `WARN No messages from the consensus layer` every 30s\n\nLodestar beacon API:\n- head_slot=44456, sync_distance=4810, is_syncing=true, is_optimistic=true, el_offline=false\n- Lodestar log: 1170 errors in 47min, all `Error pushing notifyForkchoiceUpdate() - JSON RPC error: Too deep reorg, engine_forkchoiceUpdatedV4`\n- 13 restart loops since 08:23 UTC (last restart 08:47, current uptime 25min — backoff stabilizing)\n\nWhat happened: when the deathstar branch went out, ethrex ended up on some divergent chain (probably from importing the EMPTY-payload deathstar block at slot 44457). It then got reset / hit a bug and switched into eth-P2P sync mode targeting block 27966 — but its devnet peers refuse to serve block bodies. So ethrex is wedged at block 26624. Lodestar can't FCU past slot 44456 because each fcU asks ethrex to set head to a block hash it doesn't have, ethrex returns \"Too deep reorg\", Lodestar errors and eventually restarts.\n\nSecondary Lodestar bug worth flagging separately: 22× `error: Error onDiscovered - Cannot read properties of undefined (reading 'includes')` — peer discovery code (v1.43.0/8021d8c) crashing on some peer record. Not the cause of the stall, but noise. Worth a quick grep + fix.",
+      "createdAt": "2026-06-11T09:14:04.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Fix is on ethrex side: nuke ethrex chaindb and let it engine-API-sync from CL, or swap to nethermind like you did on 2026-06-08. P2P sync to mainnet-style block bodies isn't going to work on a devnet where peers are also borked.\n\nWant me to save this as a memory entry so we don't re-derive it next time ethrex stalls?",
+      "createdAt": "2026-06-11T09:14:05.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> the ethrex db has been wiped already",
+      "createdAt": "2026-06-11T09:14:56.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah that's the issue — after the wipe ethrex flipped into eth-P2P SYNCING mode (not engine-driven). It's at block 26624 trying to reach 27966 via `eth/getBlockBodies`, and peers keep refusing/penalizing:\n\n```\nWARN [SYNCING] Didn't receive block bodies from peer, penalizing peer 0x...\nWARN Failed to fetch block bodies (attempt 1/10), retrying in 2s eth_capable_peers=10\nWARN No messages from the consensus layer. Is the consensus client running?\n```\n\nSo Lodestar IS hitting ethrex's engine API but ethrex ignores fcU/newPayload while in P2P SYNCING — and returns `Too deep reorg, engine_forkchoiceUpdatedV4` because its head is ~600 blocks behind what Lodestar's asking for. Lodestar then can't advance past slot 44456.\n\nTwo ways out without waiting on ethrex devs:\n1. **Force engine sync only**: relaunch ethrex with `--syncmode full` (or whichever flag disables eth-P2P sync on ethrex) so it accepts newPayload from Lodestar instead of trying to fetch bodies P2P. Lodestar has the blocks locally.\n2. **Swap to nethermind** like the 2026-06-08 fix — quickest unblock.\n\nethrex going into network-P2P sync after a fresh DB on a CL-driven devnet looks like an ethrex default-mode bug worth filing upstream — same symptom Tersec/etc were seeing earlier. Want me to file an issue against `lambdaclass/ethrex` with this log evidence?",
+      "createdAt": "2026-06-11T09:15:54.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seems like he wants to blame it on ethrex 😂",
+      "createdAt": "2026-06-11T09:23:18.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "🥲",
+      "createdAt": "2026-06-11T09:23:27.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> can you roll out `078e689`, maybe I broke something on the latest image",
+      "createdAt": "2026-06-11T09:23:44.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "definitely not ethrex issue here, should be fine to sync CL side while EL is syncing/optimistic",
+      "createdAt": "2026-06-11T09:24:57.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "done",
+      "createdAt": "2026-06-11T09:32:14.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "doesn't seem to matter :/",
+      "createdAt": "2026-06-11T09:33:03.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also peer count goes down like crazy from 24 to 5 in a few sec",
+      "createdAt": "2026-06-11T09:33:22.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so likely getting banned like crzy",
+      "createdAt": "2026-06-11T09:33:28.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seems like all peers it has left are behind\n```\n~ curl -s localhost:5052/eth/v1/lodestar/peers | jq \".data\" | grep head_slot\n      \"head_slot\": \"43817\",\n      \"head_slot\": \"43803\",\n      \"head_slot\": \"40374\",\n      \"head_slot\": \"43636\",\n      \"head_slot\": \"43562\",\n      \"head_slot\": \"49407\",\n      \"head_slot\": \"49407\",\n```",
+      "createdAt": "2026-06-11T09:42:32.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "there are two ahead, but those don't serve us data",
+      "createdAt": "2026-06-11T09:42:50.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "currently only ocnnected to prysm",
+      "createdAt": "2026-06-11T09:45:15.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so no shit they can't serve stuff",
+      "createdAt": "2026-06-11T09:45:19.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "any ideas why `/eth/v1/lodestar/peers` not showing enr of the connected peers ? I see enr null for everyone",
+      "createdAt": "2026-06-11T09:46:55.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we don't expose that becasue you need to hook into discv5, but we have a PR for it, but even then, afaik you only have the enr of peers that you dial (outbound) and not inbound, might be wrong though",
+      "createdAt": "2026-06-11T09:48:00.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\n  {\n    \"peer_id\": \"16Uiu2HAm7hkTP9vNJr9UkjA6572nrEgUYRiDLPV6Z1ANXHwEGtMx\",\n    \"enr\": \"enr:-QEYuEDOINcuaMZJIh_OHzQxDIhx8Xv6BYtKiv3cqQFEzrYnWD8zYoCw1AdBSt5ju8VBXSPUkt5rpwJxj2agSy35p7gmOIdhdHRuZXRziAAYAAAAAAAAg2NnY4GAhmNsaWVudM-IR3JhbmRpbmWFMi4wLjSEZXRoMpCk2jlNgHZlcf__________gmlkgnY0gmlwhLJpzR2DaXA2kCoBBPgMF9_iAAAAAAAAAAuDbmZkhAAAAACEcXVpY4IjKYVxdWljNoIjW4lzZWNwMjU2azGhArZqmML_32RYB4aZHqRzTd2zACCCPgrFl8BornwwVBLTiHN5bmNuZXRzD4N0Y3CCIyiEdGNwNoIjWoN1ZHCCIyiEdWRwNoIjWg\",\n    \"last_seen_p2p_address\": \"/ip4/178.105.205.29/udp/9001/quic-v1\",\n    \"state\": \"connected\",\n    \"direction\": \"inbound\"\n  },\n  {\n```",
+      "createdAt": "2026-06-11T09:49:08.225000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "this is on lighthouse's",
+      "createdAt": "2026-06-11T09:49:11.839000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "`/eth/v1/node/peers` endpoint tho",
+      "createdAt": "2026-06-11T09:49:18.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\nJun-11 09:45:15.386[network]       verbose: Resp error method=beacon_blocks_by_range, version=2, client=Prysm, peer=16...q8i4bh, requestId=1320, status=3, errorMessage=Requested range is before earliestAvailableSlot startSlot=40567 count=32 earliestAvailableSlot=44384\n```\n```\nJun-11 09:51:39.828[network]       verbose: Resp error method=execution_payload_envelopes_by_range, version=1, client=Prysm, peer=16...q8i4bh, requestId=1864, status=3, errorMessage=Requested range is before earliestAvailableSlot startSlot=40438 count=64 earliestAvailableSlot=44384\n```\nseeing bunch of these could be us requesting wrongly, or prysm, but anyways prysm doesn't have useful data right now to serve us",
+      "createdAt": "2026-06-11T09:53:55.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah idk right now <@412614104222531604> everyone but prysm disconnected (maybe banned?) us, but on our dev infra node that could sync I don't see any prysm peers",
+      "createdAt": "2026-06-11T09:56:34.877000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "19b467bbf462f8e7850667029d405a39bfb023c8811587ccbd7dbf2ac09e6e83"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lodestar seems to get 26 peers very fast",
+      "createdAt": "2026-06-11T09:59:45.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "then gets booted yeah",
+      "createdAt": "2026-06-11T09:59:49.010000+00:00",
+      "attachments": []
+    }
+  ]
+}
