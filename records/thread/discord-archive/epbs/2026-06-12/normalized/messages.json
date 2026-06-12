@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-06-12",
-  "messageCount": 4,
-  "sourceHash": "28460061fad2bf3c1a63167768832822c40c466ba0e210e65152f663590e77eb",
-  "searchText": "> Adding a new contract with pending audit and review/improvement loops will take some time I am not sure how much time it takes to audit the contract (I have zero knowledge about this), but afaik it should be very similar to 7002 contracts. Also arguably, the spec is simplified nicely, no more validator and builder flow clustered together, and a lot of `if (builder) do this elif (validator) do this` statements are removed. well, the proposed contract is written in solidity, not asm and reusing the queue logic. So I'd threat that as a completely new audit of a new codebase.. But might be wrong https://github.com/ethereum/EIPs/pull/11760 it is rewritten in eas, to align more closely with 7002 contracts. oh yea, that changed since I last saw that proposal o.O thx for the hint",
+  "messageCount": 59,
+  "sourceHash": "26e74cda19499e90eaeefdc1842791d1ea8f79cd511a780f5af495dc0a179b6b",
+  "searchText": "> Adding a new contract with pending audit and review/improvement loops will take some time I am not sure how much time it takes to audit the contract (I have zero knowledge about this), but afaik it should be very similar to 7002 contracts. Also arguably, the spec is simplified nicely, no more validator and builder flow clustered together, and a lot of `if (builder) do this elif (validator) do this` statements are removed. well, the proposed contract is written in solidity, not asm and reusing the queue logic. So I'd threat that as a completely new audit of a new codebase.. But might be wrong https://github.com/ethereum/EIPs/pull/11760 it is rewritten in eas, to align more closely with 7002 contracts. oh yea, that changed since I last saw that proposal o.O thx for the hint Hey <@808969530608451584> how did you manage to trigger that SIGILL with qemu? I've been trying the same and can't lol. Oh crap wrong venue... Well will stay for posterity Why would a seperate deposit contract for builders help? I assume the one for validators stays as-is, wouldn't the problem with 8192 remain? cap it at 1028 on the EL might be fine. It's still larger than a single tx thus no single tx turns a block invalid Validator deposits are queued on the CL side (state.pending_deposits), never forced to verify them all at once. The builder deposits add flows where we are forced to verify them all at once. Splitting out builder deposits remove these new scenarios, both by not comingling validator and builder deposits, and by having a lower capacity. I think Toni is referring to the case that a block contains deposits more than the SSZ limit. EIP-7688 When would Prysm and Teku be ready? I don't know, devnet 5 started with, I think, 4 CLs. 3 CLs are ready today but there is no dos protection, how would you prevent a large/wealthy builder from filling this up each block and not letting anyone do top-ups? since the ETH can be recycled this can be done indefinitely This wouldn't be doable with a increasing basefee. You cannot continue spamming forever and it's also not free The question is how many validator deposits CLs can handle. If it's <8192, we should cap it. If it's above, we should just increase the constant/limit and still discuss capping it on the EL. The bottleneck for handling deposits is almost entirely BLS signatures, and as <@534934855113506836> indicates, there's a natural chunking on that I don't see the constant being the problem here. More the fact that having 8192 deposits makes no sense at all. Stable containers, in this regard, doesn't help at all. The problem is the work coming with deposits. For _validators_ Right, so, if it's bls sigs, then let's cap it at 1028 on the EL and don't touch the constant. Independent from splitting away builders. But we may not need a seperate contract for builders if we cap it somewhere where sigs can be validated in time. why 1028 by the way? it's a strange number. if it's big-power-of-2, I guess, 1024. If one wants to calibrate it empirically, sure, ok. if it's \"what makes sense\", I guess it's arbitrary Sorry typo, i meant 1024. It needs to be greater than 728 to avoid dos. That's all it needs. And 1024 keeps enough \"flexibility\" for big deposits, bigger than we ever saw in a block I believe. How many sigs can CLs handle? Assuming we wouldn't split up validator <> builder deposit contracts. If the CL can handle 1024 sigs, builders and validators mixed, then we should go with that solution as it's the simplest and effective, and not have a deposit contract split. If the CL can't we could even reduce the cap to 728. As long as we stay above 728 we introduce a mild packing knapsack but never a dos. E.g. with a limit at 728, in the worst-case, there's a single block that has 300M gas available but only consumes 16.78M gas (1 max-gas tx). The builder would hit the deposit limit right on and could from there on only include tx that have def no deposits (e.g. simple eth transfers consuming the base tx gas). Putting the limit to 1024, leaves some buffer. In practice, we never saw that many deposits, so either may be fine. Sophisticated builders will have an easy time to work around this knapsack and local builders are protected from dos. where does 728 come from? Tx gas limit (2**24) divided by the deposit cost (e.g. 23k gas). (actual min gas tbd, but likely 22k will be fine, having a buffer) 2**24/X with X being the cheapest way to deposit (e.g. batch deposit in a max gas tx, amortizing the base cost over many) The 23k are from <@845691100072509460>'s analysis [here](https://hackmd.io/@jihoonsong/SJWAnFakMg). It uses standard batch contracts and one could probably go even cheaper, which we must account for, and in addition we should have a small buffer. even if EL caps 728 signatures, I'm worried that all CL clients will go with pre-verifying signatures solution to improve head vote, because there could be more same-pubkey pending validator signatures and the cache solution for state-transition is a concern as stated here https://discord.com/channels/595666850260713488/1514209319283982516/1514471976838758460 Ok, this then speaks for doing both, the builder/validator deposit split and the cap in the validator side. Or are 8192 sigs (and more in the future if we bump the limit) fine if it's validators only? yes I think it does not matter if it's validators only because we don't have to validate deposit requests per block at all https://github.com/ethereum/consensus-specs/blob/a84880a47a88700d8dfa451c2a7cd4b3f309bd0d/specs/electra/beacon-chain.md?plain=1#L1812 I see! Do we know how many (builder) deposit req the CL could process? I'm trying to get an estimate if e.g. 1028 would be doable and how the curve scales over incressing nr of deposits The problem is in the joint path, not in the number Some of the attacks are sending multiple invalid validator deposits and just a single builder deposit <@1474928862411362437> I can see you're trying to type here 🙂 is proactively banning possible:) how do you know I'm not your official help desk? https://klipy.com/gifs/it-turn-on-and-off I see, so the split is good for processing both paths more efficiently. And with that split, validator deposit validation might be ready to go beyond 8192, but seperately, we have to decide if this number, the worst-case deposits, should really be determined by the gas limit, or if we'd cap in on the EL at some reasonable number. To me doing the builder validator split + el cap (even if at 8192 which is more than ever needed) seems best. There is no need for any limit with and without the split, they can be handled with optimizations (and the attack can't really happen to begin with). What the split does is to go to the right design that was the original design but that couldn't have been proposed to start with. It takes away all the attack surface and it is semantically the right thing as it allows us to further change the requests types and processing independently in the future It is obviously the right thing that should have been in the specification since the beginning. The only question here is the trade-off of further delaying the fork or not > but that couldn't have been proposed to start with Why not? Do you really think ePBS had remotely a chance of being selected if it included engine API changes, new requests and a new contract? Ah. Fair point. So two things we try to achieve here is: * CL must be able to differentiate between builder and validator deposits * builder deposits are capped, validator withdrawals can be uncapped <@792404665068158998> maybe someone has mentioned this already I might have missed it, but how does capping per block help with any of the attacks that are essentially poisoning the `pending_deposits` and force us to validate signatures each slot, like s9 from [Justin's list](https://github.com/jtraglia/kurtosis-devnets/tree/master/gloas-deposits) irrespective of that, if we can limit validator deposits to 1024 per block, this is a good thing too so we don't need to worry about worst case block size, so the concerns from Raul would be addressed by that and we don't need https://github.com/ethereum/consensus-specs/issues/5185 Is there a graph with validation time (y) and deposits (x)? I'd be curious at which number things start breaking, assuming an adversary that could cause a worst-case scenario would need to ask Justin if he tested s9 with prysm already, but I don't see how you can solve that scenario without a cache Again we would break at 1 deposit if they are coupled and there's no caching There's no need to bench this: the deposit queue is unbounded regardless of a cap and only one builder deposit triggers signature validation on the uncapped list Caps are kinda irrelevant to this problem Decoupling allows us to have both lists untapped if we want and we can cap inclusion on the CL",
   "excerpts": [
     {
       "author": "nc1234",
@@ -36,6 +36,446 @@
       "parent": "",
       "content": "oh yea, that changed since I last saw that proposal o.O  thx for the hint",
       "createdAt": "2026-06-12T00:24:25.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hey <@808969530608451584> how did you manage to trigger that SIGILL with qemu? I've been trying the same and can't lol.",
+      "createdAt": "2026-06-12T02:33:55.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Oh crap wrong venue... Well will stay for posterity",
+      "createdAt": "2026-06-12T02:34:25.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Why would a seperate deposit contract for builders help? I assume the one for validators stays as-is, wouldn't the problem with 8192 remain?",
+      "createdAt": "2026-06-12T04:56:19.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cap it at 1028 on the EL might be fine. It's still larger than a single tx thus no single tx turns a block invalid",
+      "createdAt": "2026-06-12T06:16:51.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Validator deposits are queued on the CL side (state.pending_deposits), never forced to verify them all at once. The builder deposits add flows where we are forced to verify them all at once. Splitting out builder deposits remove these new scenarios, both by not comingling validator and builder deposits, and by having a lower capacity.",
+      "createdAt": "2026-06-12T07:47:14.477000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jih2nn",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think Toni is referring to the case that a block contains deposits more than the SSZ limit.",
+      "createdAt": "2026-06-12T07:50:14.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "EIP-7688",
+      "createdAt": "2026-06-12T07:51:43.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jih2nn",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "When would Prysm and Teku be ready?",
+      "createdAt": "2026-06-12T07:52:49.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't know, devnet 5 started with, I think, 4 CLs. 3 CLs are ready today",
+      "createdAt": "2026-06-12T07:53:08.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but there is no dos protection, how would you prevent a large/wealthy builder from filling this up each block and not letting anyone do top-ups? since the ETH can be recycled this can be done indefinitely",
+      "createdAt": "2026-06-12T08:01:11.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This wouldn't be doable with a increasing basefee. You cannot continue spamming forever and it's also not free",
+      "createdAt": "2026-06-12T08:04:54.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The question is how many validator deposits CLs can handle. If it's <8192, we should cap it.\nIf it's above, we should just increase the constant/limit and still discuss capping it on the EL.",
+      "createdAt": "2026-06-12T08:06:11.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The bottleneck for handling deposits is almost entirely BLS signatures, and as <@534934855113506836> indicates, there's a natural chunking on that",
+      "createdAt": "2026-06-12T08:08:39.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't see the constant being the problem here. More the fact that having 8192 deposits makes no sense  at all.\nStable containers, in this regard, doesn't help at all. The problem is the work coming with deposits.",
+      "createdAt": "2026-06-12T08:08:49.160000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "For _validators_",
+      "createdAt": "2026-06-12T08:09:03.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Right, so, if it's bls sigs, then let's cap it at 1028 on the EL and don't touch the constant.",
+      "createdAt": "2026-06-12T08:09:22.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Independent from splitting away builders. But we may not need a seperate contract for builders if we cap it somewhere where sigs can be validated in time.",
+      "createdAt": "2026-06-12T08:10:14.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "why 1028 by the way? it's a strange number. if it's big-power-of-2, I guess, 1024. If one wants to calibrate it empirically, sure, ok. if it's \"what makes sense\", I guess it's arbitrary",
+      "createdAt": "2026-06-12T08:10:17.560000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sorry typo, i meant 1024.\nIt needs to be greater than 728 to avoid dos. That's all it needs. And 1024 keeps enough \"flexibility\" for big deposits, bigger than we ever saw in a block I believe.",
+      "createdAt": "2026-06-12T08:11:58.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How many sigs can CLs handle?",
+      "createdAt": "2026-06-12T08:14:30.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Assuming we wouldn't split up validator <> builder deposit contracts.",
+      "createdAt": "2026-06-12T08:14:45.608000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If the CL can handle 1024 sigs, builders and validators mixed, then we should go with that solution as it's the simplest and effective, and not have a deposit contract split. \nIf the CL can't we could even reduce the cap to 728. As long as we stay above 728 we introduce a mild packing knapsack but never a dos.",
+      "createdAt": "2026-06-12T08:25:09.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "E.g.  with a limit at 728, in the worst-case, there's a single block that has 300M gas available but only consumes 16.78M gas (1 max-gas tx). The builder would hit the deposit limit right on and could from there on only include tx that have def no deposits (e.g. simple eth transfers consuming the base tx gas).\nPutting the limit to 1024, leaves some buffer. In practice, we never saw that many deposits, so either may be fine.",
+      "createdAt": "2026-06-12T08:29:32.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Sophisticated builders will have an easy time to work around this knapsack and local builders are protected from dos.",
+      "createdAt": "2026-06-12T08:30:58.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "where does 728 come from?",
+      "createdAt": "2026-06-12T08:31:24.726000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Tx gas limit (2**24) divided by the deposit cost (e.g. 23k gas).\n(actual min gas tbd, but likely 22k will be fine, having a buffer)",
+      "createdAt": "2026-06-12T08:33:52.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "2**24/X with X being the cheapest way to deposit (e.g. batch deposit in a max gas tx, amortizing the base cost over many)",
+      "createdAt": "2026-06-12T08:36:06.187000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The 23k are from <@845691100072509460>'s analysis [here](https://hackmd.io/@jihoonsong/SJWAnFakMg).\n\nIt uses standard batch contracts and one could probably go even cheaper, which we must account for, and in addition we should have a small buffer.",
+      "createdAt": "2026-06-12T08:50:37.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "even if EL caps 728 signatures, I'm worried that all CL clients will go with pre-verifying signatures solution to improve head vote, because there could be more same-pubkey pending validator signatures\nand the cache solution for state-transition is a concern as stated here https://discord.com/channels/595666850260713488/1514209319283982516/1514471976838758460",
+      "createdAt": "2026-06-12T09:47:20.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, this then speaks for doing both, the builder/validator deposit split and the cap in the validator side.",
+      "createdAt": "2026-06-12T10:40:04.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Or are 8192 sigs (and more in the future if we bump the limit) fine if it's validators only?",
+      "createdAt": "2026-06-12T10:42:10.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tuyen4818",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes I think it does not matter if it's validators only because we don't have to validate deposit requests per block at all https://github.com/ethereum/consensus-specs/blob/a84880a47a88700d8dfa451c2a7cd4b3f309bd0d/specs/electra/beacon-chain.md?plain=1#L1812",
+      "createdAt": "2026-06-12T10:50:43.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see! Do we know how many (builder) deposit req the CL could process?",
+      "createdAt": "2026-06-12T10:58:00.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm trying to get an estimate if e.g. 1028 would be doable and how the curve scales over incressing nr of deposits",
+      "createdAt": "2026-06-12T10:59:05.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem is in the joint path, not in the number",
+      "createdAt": "2026-06-12T11:06:03.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Some of the attacks are sending multiple invalid validator deposits and just a single builder deposit",
+      "createdAt": "2026-06-12T11:06:27.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@1474928862411362437> I can see you're trying to type here 🙂 is proactively banning possible:)",
+      "createdAt": "2026-06-12T11:08:22.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "how do you know I'm not your official help desk?",
+      "createdAt": "2026-06-12T11:10:38.614000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://klipy.com/gifs/it-turn-on-and-off",
+      "createdAt": "2026-06-12T11:11:06.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I see, so the split is good for processing both paths more efficiently.\nAnd with that split, validator deposit validation might be ready to go beyond 8192, but seperately, we have to decide if this number, the worst-case deposits, should really be determined by the gas limit, or if we'd cap in on the EL at some reasonable number.\nTo me doing the builder validator split + el cap (even if at 8192 which is more than ever needed) seems best.",
+      "createdAt": "2026-06-12T11:11:35.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There is no need for any limit with and without the split, they can be handled with optimizations (and the attack can't really happen to begin with). What the split does is to go to the right design that was the original design but that couldn't have been proposed to start with.",
+      "createdAt": "2026-06-12T11:13:30.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It takes away all the attack surface and it is semantically the right thing as it allows us to further change the requests types and processing independently in the future",
+      "createdAt": "2026-06-12T11:14:21.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It is obviously the right thing that should have been in the specification since the beginning. The only question here is the trade-off of further delaying the fork or not",
+      "createdAt": "2026-06-12T11:15:01.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> but that couldn't have been proposed to start with\n\nWhy not?",
+      "createdAt": "2026-06-12T11:15:48.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Do you really think ePBS had remotely a chance of being selected if it included engine API changes, new requests and a new contract?",
+      "createdAt": "2026-06-12T11:16:38.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah. Fair point.",
+      "createdAt": "2026-06-12T11:16:55.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "So two things we try to achieve here is:\n* CL must be able to differentiate between builder and validator deposits\n* builder deposits are capped, validator withdrawals can be uncapped",
+      "createdAt": "2026-06-12T11:20:50.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@792404665068158998> maybe someone has mentioned this already I might have missed it, but how does capping per block help with any of the attacks that are essentially poisoning the `pending_deposits` and force us to validate signatures each slot, like s9 from [Justin's list](https://github.com/jtraglia/kurtosis-devnets/tree/master/gloas-deposits)",
+      "createdAt": "2026-06-12T11:25:36.763000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "irrespective of that, if we can limit validator deposits to 1024 per block, this is a good thing too so we don't need to worry about worst case block size, so the concerns from Raul would be addressed by that and we don't need https://github.com/ethereum/consensus-specs/issues/5185",
+      "createdAt": "2026-06-12T11:28:26.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is there a graph with validation time (y) and deposits (x)? I'd be curious at which number things start breaking, assuming an adversary that could cause a worst-case scenario",
+      "createdAt": "2026-06-12T11:29:46.332000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "would need to ask Justin if he tested s9 with prysm already, but I don't see how you can solve that scenario without a cache",
+      "createdAt": "2026-06-12T11:30:51.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Again we would break at 1 deposit if they are coupled and there's no caching",
+      "createdAt": "2026-06-12T11:40:34.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There's no need to bench this: the deposit queue is unbounded regardless of a cap and only one builder deposit triggers signature validation on the uncapped list",
+      "createdAt": "2026-06-12T11:41:23.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Caps are kinda irrelevant to this problem",
+      "createdAt": "2026-06-12T11:41:54.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Decoupling allows us to have both lists untapped if we want and we can cap inclusion on the CL",
+      "createdAt": "2026-06-12T11:43:09.633000+00:00",
       "attachments": []
     }
   ]
