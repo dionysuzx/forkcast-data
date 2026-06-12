@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-06-11",
-  "messageCount": 16,
-  "sourceHash": "7636b11bd4c61e975a4dd06f385f7ac6353d6be96876f04663892af35c91793e",
-  "searchText": "One general concern about the order-dependency: some are not order-dependent in any intrinsic way, but throw off either REJECT or IGNORE detectably. Nimbus intentionally rearranges these sometimes because various gossip validations have performancewise suboptimal ordering for efficiently rejecting messages. But this can change whether one sees REJECT or IGNORE, even though the net effect on the network is comparable (not identical). The right answer is ultimately to address these in the spec, but in the meantime, we're not going to randomly pessimize our code But also, the \"address these in the spec\" strarts venturing towards a kind of performance optimization it's not clear the spec should even have this is a good spec test candidate, we found out about this bug today. For attestations in block, we missed the following check. ``` if block_slot == attestation.data.slot: assert attestation.data.index == 0 ``` that means a bad proposer/attester could propose a block, and pack an attestation such that its block slot == attestation slot, but yet vote for 1, and in our fork choice accounting, we would have chosen full over empty even majority PTC voted for not available <@592004585506340885> Yup I understand & agree. Let’s deal with this if/when it comes up. For now, the important thing is that the networking specs are more explicit/clear as executable code. Worst case, the existing tests could be thought of as internal unit tests. Are we talking about the `validate_on_attestation` function? There should be a reference test for this already. See [`test_validate_on_attestation_later_slot_full_vote_valid`](https://github.com/ethereum/consensus-specs/blob/6ebb2216ca8d7fdac7c108fcfddb74d0e56c42ab/tests/core/pyspec/eth_consensus_specs/test/gloas/fork_choice/test_on_attestation.py#L57-L85). This test hits that assert. This was in the alpha.9 release. Could you confirm you're running that test? but these attestations are separate, not in the block right? do we also have tests that count attestations that's in the block Regarding circuit breakers for gloas, should it be specified in the consensus spec or do we want to keep it implementation dependent? Today, we specified in the bellatrix builder-specs that it is implementation specific: https://github.com/ethereum/builder-specs/blob/main/specs/bellatrix/validator.md?plain=1#L198 Would that remain for today too? i was thinking that we could use the `state.execution_payload_availability` bit vector to determine if payloads have been revealed for N consecutive slots or N slots in an epoch window and choose to trip the circuit breaker based on that I have merged https://github.com/ethereum/builder-specs/pull/138 🙂 Yes that’s right. Hmm. We can add more tests. In Prysm, is this split into two functions? yes, this was our testing gap I believe the spectests are fine in that they cover the `on_attestation` paths, Prysm's implementation using separate paths for blocks and gossip should deal with testing on its own I believe I originally thought this would be a spectest gap because the bug is kinda brutal, but didn't realize that we have attestations from blocks differently than over the wire Regarding the builder deposit contract discussed today: this is a different discussion than the \"what to do with CLs not being able to process X deposits coming from the EL\" one. Am I right on that? Like, independently from what we do with builders, if we change nothing in the 8192 deposits from validators, the problem persists.",
+  "messageCount": 33,
+  "sourceHash": "9b98b4d7eb3da92b1920d41e7337831f9ad6d25d6c19584988597bd66eace62a",
+  "searchText": "One general concern about the order-dependency: some are not order-dependent in any intrinsic way, but throw off either REJECT or IGNORE detectably. Nimbus intentionally rearranges these sometimes because various gossip validations have performancewise suboptimal ordering for efficiently rejecting messages. But this can change whether one sees REJECT or IGNORE, even though the net effect on the network is comparable (not identical). The right answer is ultimately to address these in the spec, but in the meantime, we're not going to randomly pessimize our code But also, the \"address these in the spec\" strarts venturing towards a kind of performance optimization it's not clear the spec should even have this is a good spec test candidate, we found out about this bug today. For attestations in block, we missed the following check. ``` if block_slot == attestation.data.slot: assert attestation.data.index == 0 ``` that means a bad proposer/attester could propose a block, and pack an attestation such that its block slot == attestation slot, but yet vote for 1, and in our fork choice accounting, we would have chosen full over empty even majority PTC voted for not available <@592004585506340885> Yup I understand & agree. Let’s deal with this if/when it comes up. For now, the important thing is that the networking specs are more explicit/clear as executable code. Worst case, the existing tests could be thought of as internal unit tests. Are we talking about the `validate_on_attestation` function? There should be a reference test for this already. See [`test_validate_on_attestation_later_slot_full_vote_valid`](https://github.com/ethereum/consensus-specs/blob/6ebb2216ca8d7fdac7c108fcfddb74d0e56c42ab/tests/core/pyspec/eth_consensus_specs/test/gloas/fork_choice/test_on_attestation.py#L57-L85). This test hits that assert. This was in the alpha.9 release. Could you confirm you're running that test? but these attestations are separate, not in the block right? do we also have tests that count attestations that's in the block Regarding circuit breakers for gloas, should it be specified in the consensus spec or do we want to keep it implementation dependent? Today, we specified in the bellatrix builder-specs that it is implementation specific: https://github.com/ethereum/builder-specs/blob/main/specs/bellatrix/validator.md?plain=1#L198 Would that remain for today too? i was thinking that we could use the `state.execution_payload_availability` bit vector to determine if payloads have been revealed for N consecutive slots or N slots in an epoch window and choose to trip the circuit breaker based on that I have merged https://github.com/ethereum/builder-specs/pull/138 🙂 Yes that’s right. Hmm. We can add more tests. In Prysm, is this split into two functions? yes, this was our testing gap I believe the spectests are fine in that they cover the `on_attestation` paths, Prysm's implementation using separate paths for blocks and gossip should deal with testing on its own I believe I originally thought this would be a spectest gap because the bug is kinda brutal, but didn't realize that we have attestations from blocks differently than over the wire Regarding the builder deposit contract discussed today: this is a different discussion than the \"what to do with CLs not being able to process X deposits coming from the EL\" one. Am I right on that? Like, independently from what we do with builders, if we change nothing in the 8192 deposits from validators, the problem persists. you can still have >8192 validator deposits per payload so that limit still needs to be dealt with (if we want >194M gas limit) but this resolves issues due to expensive signature verification, see https://discord.com/channels/595666850260713488/1514209319283982516 ok, so it is fair to 2 those two topics are orthogonal? I mean if we go with EIP-8282, the remaining issue to solve is just the 8192 sszlimit itself, so we can either bump that constant or go with EIP-7688 or we hard-cap it on the EL and make blocks invalid that include more than we're fine with I thought that idea was rejected to have such a cap as it makes block building harder for ELs? It depends where we set that cap. E.g. with eip-7825, the tx gas limit is 2**24. Assuming a deposit costs 23k gas, one can do ~730 deposits per tx. If we put the deposit cap at something above that, e.g. 1028, there's no DoS as for each tx, a builder could take the block gas limit / 23k and assume the tx goes all-in on deposits, while at the same time keeping track of the nr of deposits. If gaslimit / 23k > available deposits, one doesn't simulate the tx. This closes the loophole and since there are never such deposit-heavy blocks in practice, everything is fine. The worst-case deposits are inferable from the tx.gasLimit and the deposit cost I think the discussion around the economic viability of the builder deposit attack is very much misguided. The block price has been 0.01 ETH forever, and filling it with garbage transactions is also quite cheap. At these prices, an attacker willing to burn 50KETH will buy every single block for the next 19 years. a) Why do we know this will not happen? simply because of economic pressure: users want their transactions included, they pay more, builders make money bidding higher and therefore honest builder start bidding and thus the attacker's cost is higher. Do we need to trust the builders to bid higher? no we don't, we trust that at least some users send high paying transactions to the mempool or that at least one buillder bids higher. b) What happens when the builder gets an honest block on chain? well, the attacker has spent some of his money preventing liveness up to that point, but gets to keep the rest or decide if they will continue the attack. The situation in the deposit flow attack is even worse for the attacker. They need to upfront their 50K ETH. Now, as blocks stop landing, the price for inclusion continues to rise up, now any builder/local proposer that decides to verify signatures before including transactions can land a block and make all of the money, The longer the liveness issue the faster the race to include an executable block since the larger the price. a') Do we need to rely on builders being honest? no, we, just as above, rely on them being rational. b') What happens when the chain recovers liveness? the attacker has lost all of the 50K ETH I honestly feel that we are going over this issue just because it's an ugly thing to have in the spec, we should have gone with a separate contract since the start, but now we have this and really doing malabarisms just over some theoretical attack that is irrational does not make sense to me. The problem is that the attack is real and we need real counters to the attacks in our codebases to deter them, and we need to maintain that code, and we need to actually test that code. All of this takes time. Time that we could instead use doing the right thing, which is avoiding having an attackable spec in the first place. The change really is quite small, it just touches several layers: deploying a system contract, calling the contract at the end of block, packing that info into execution requests, passing thru to the CL. But all of those things are wiring. Wiring that has already been done before in EIP 7251. The tradeoff is obvious here. Just deploy the contract and add wiring. Don't force new caches and introduce new testing and attack surface. I disagree with that being the trade-off, the trade-off is coordination and delay. If everyone is clear on this then I don't mind further delaying this fork In my opinion, EIP-8282 is a good solution. It's what we should have done originally. It will allow us to further scale the gas limit without repeatedly running benchmarks & improving complex optimizations. I think we should bite the bullet & make this change quickly. Here's a draft PR on which we can review/discuss things: https://github.com/ethereum/consensus-specs/pull/5359 aren't you forcing a cache anyway at the fork boundary? The temporary one for onboarding builders? The deposit contract has logic to send logs pre genesis, we can probably do the same with the new contract and avoid the fork attack also. Yea, I agree with this. To be fair, the single deposit contract would have worked nicely without the signature validation issue. But given the uncovered problem, EIP-8282 is the cleaner approach. It is an expensive attack, but still possible and effective (with many invalid sigs so lost funds). The question is if we want to accept delaying the fork further or not. Adding a new contract with pending audit and review/improvement loops will take some time..",
   "excerpts": [
     {
       "author": "tersec",
@@ -138,6 +138,142 @@
       "parent": "",
       "content": "Regarding the builder deposit contract discussed today: this is a different discussion than the \"what to do with CLs not being able to process X deposits coming from the EL\" one. Am I right on that? \nLike, independently from what we do with builders, if we change nothing in the 8192 deposits from validators, the problem persists.",
       "createdAt": "2026-06-11T12:59:51.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can still have >8192 validator deposits per payload so that limit still needs to be dealt with (if we want >194M gas limit) but this resolves issues due to expensive signature verification, see https://discord.com/channels/595666850260713488/1514209319283982516",
+      "createdAt": "2026-06-11T13:13:02.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, so it is fair to 2 those two topics are orthogonal?",
+      "createdAt": "2026-06-11T13:19:53.785000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I mean if we go with EIP-8282, the remaining issue to solve is just the 8192 sszlimit itself, so we can either bump that constant or go with EIP-7688",
+      "createdAt": "2026-06-11T13:21:32.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or we hard-cap it on the EL and make blocks invalid that include more than we're fine with",
+      "createdAt": "2026-06-11T13:22:10.492000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I thought that idea was rejected to have such a cap as it makes block building harder for ELs?",
+      "createdAt": "2026-06-11T13:22:44.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It depends where we set that cap.\nE.g. with eip-7825, the tx gas limit is 2**24. Assuming a deposit costs 23k gas, one can do ~730 deposits per tx.\nIf we put the deposit cap at something above that, e.g. 1028, there's no DoS as for each tx, a builder could take the block gas limit / 23k and assume the tx goes all-in on deposits, while at the same time keeping track of the nr of deposits. If gaslimit / 23k > available deposits, one doesn't simulate the tx. \nThis closes the loophole and since there are never such deposit-heavy blocks in practice, everything is fine.",
+      "createdAt": "2026-06-11T13:29:48.407000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The worst-case deposits are inferable from the tx.gasLimit and the deposit cost",
+      "createdAt": "2026-06-11T13:30:54.737000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the discussion around the economic viability of the builder deposit attack is very much misguided. The block price has been 0.01 ETH forever, and filling it with garbage transactions is also quite cheap.  At these prices, an attacker willing to burn 50KETH will buy every single block for the next 19 years. \n\na) Why do we know this will not happen? simply because of economic pressure: users want their transactions included, they pay more, builders make money bidding higher and therefore honest builder start bidding and thus the attacker's cost is higher. Do we need to trust the builders to bid higher? no we don't, we trust that at least some users send high paying transactions to the mempool or that at least one buillder bids higher. \n\nb) What happens when the builder gets an honest block on chain? well, the attacker has spent some of his money preventing liveness up to that point, but gets to keep the rest or decide if they will continue the attack. \n\nThe situation in the deposit flow attack is even worse for the attacker. They need to upfront their 50K ETH. Now, as blocks stop landing, the price for inclusion continues to rise up, now any builder/local proposer that decides to verify signatures before including transactions can land a block and make all of the money,  The longer the liveness issue the faster the race to include an executable block since the larger the price. \n\na') Do we need to rely on builders being honest? no, we, just as above, rely on them being rational. \n\nb') What happens when the chain recovers liveness? the attacker has lost all of the 50K ETH",
+      "createdAt": "2026-06-11T14:05:31.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I honestly feel that we are going over this issue just because it's an ugly thing to have in the spec, we should have gone with a separate contract since the start, but now we have this and really doing malabarisms just over some theoretical attack that is irrational does not make sense to me.",
+      "createdAt": "2026-06-11T14:06:43.843000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem is that the attack is real and we need real counters to the attacks in our codebases to deter them, and we need to maintain that code, and we need to actually test that code. All of this takes time. Time that we could instead use doing the right thing, which is avoiding having an attackable spec in the first place. The change really is quite small, it just touches several layers: deploying a system contract, calling the contract at the end of block, packing that info into execution requests, passing thru to the CL. But all of those things are wiring.  Wiring that has already been done before in EIP 7251. The tradeoff is obvious here. Just deploy the contract and add wiring. Don't force new caches and introduce new testing and attack surface.",
+      "createdAt": "2026-06-11T16:56:01.439000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I disagree with that being the trade-off, the trade-off is coordination and delay. If everyone is clear on this then I don't mind further delaying this fork",
+      "createdAt": "2026-06-11T20:04:20.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In my opinion, EIP-8282 is a good solution. It's what we should have done originally. It will allow us to further scale the gas limit without repeatedly running benchmarks & improving complex optimizations. I think we should bite the bullet & make this change quickly.",
+      "createdAt": "2026-06-11T20:06:50.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Here's a draft PR on which we can review/discuss things:\nhttps://github.com/ethereum/consensus-specs/pull/5359",
+      "createdAt": "2026-06-11T20:16:11.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "aren't you forcing a cache anyway at the fork boundary?",
+      "createdAt": "2026-06-11T21:18:27.920000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The temporary one for onboarding builders?",
+      "createdAt": "2026-06-11T21:22:04.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The deposit contract has logic to send logs pre genesis, we can probably do the same with the new contract and avoid the fork attack also.",
+      "createdAt": "2026-06-11T21:23:45.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yea, I agree with this.\nTo be fair, the single deposit contract would have worked nicely without the signature validation issue.\nBut given the uncovered problem, EIP-8282 is the cleaner approach.\n\nIt is an expensive attack,  but still possible and effective (with many invalid sigs so lost funds).\nThe question is if we want to accept delaying the fork further or not.\nAdding a new contract with pending audit and review/improvement loops will take some time..",
+      "createdAt": "2026-06-11T21:35:06.934000+00:00",
       "attachments": []
     }
   ]
