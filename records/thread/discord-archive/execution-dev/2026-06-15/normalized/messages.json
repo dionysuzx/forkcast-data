@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "execution-dev",
   "date": "2026-06-15",
-  "messageCount": 2,
-  "sourceHash": "0248801b4e0709809449cbafe327ca3bc570900ccf7f626dd950d08631a826d3",
-  "searchText": "LMK once you clarify the branch situation, I'll then try to add some tests Hi everyone, I have a quick question about the address generation of system contracts. In eip-4788 and all subsequent system contract eips (2935, 7002, 7251) the contract is deployed by a sender address that is chosen so that the contract address looks somewhat special (0s in the beginning, also some 0s and then the eip number in the end). This looks nice but I don't understand this part (present in all of these eips): ``` The sender of the transaction can be calculated as 0x3462413Af4609098e1E27A490f554f260213D685. The address of the first contract deployed from the account is rlp([sender, 0]) which equals 0x0000F90827F1C53a10cb7A02335B175320002935. This is how HISTORY_STORAGE_ADDRESS is determined. Although this style of contract creation is not tied to any specific initcode like create2 is, the synthetic address is cryptographically bound to the input data of the transaction (e.g. the initcode). ``` Maybe I'm just missing something trivial but if the contract address only depends on the sender address and the nonce then how is it cryptographically bound to the initcode?",
+  "messageCount": 28,
+  "sourceHash": "d4ff1b4c502e3189925cda75b8add43ac8a7d65d95311fb4e7a6e1e466afa308",
+  "searchText": "LMK once you clarify the branch situation, I'll then try to add some tests Hi everyone, I have a quick question about the address generation of system contracts. In eip-4788 and all subsequent system contract eips (2935, 7002, 7251) the contract is deployed by a sender address that is chosen so that the contract address looks somewhat special (0s in the beginning, also some 0s and then the eip number in the end). This looks nice but I don't understand this part (present in all of these eips): ``` The sender of the transaction can be calculated as 0x3462413Af4609098e1E27A490f554f260213D685. The address of the first contract deployed from the account is rlp([sender, 0]) which equals 0x0000F90827F1C53a10cb7A02335B175320002935. This is how HISTORY_STORAGE_ADDRESS is determined. Although this style of contract creation is not tied to any specific initcode like create2 is, the synthetic address is cryptographically bound to the input data of the transaction (e.g. the initcode). ``` Maybe I'm just missing something trivial but if the contract address only depends on the sender address and the nonce then how is it cryptographically bound to the initcode? 8282 is pretty easy to implement on the EL side: https://github.com/ethereum/go-ethereum/pull/35175 cc <@755590043632140352> we stayed until right now, we agreed to go with it without any changes and have it ready for next week if it's easy on the EL can we then schedule devnet 6 with it so that we don't delay we seem to be able to implement this quickly <@360491619402776577> <@808969530608451584> can we have a short talk here about the contract? what will it take to also store the timestamp in which the deposit was made? for <@360491619402776577> context: the idea is to remove the awkward logic of onboarding builders at the fork, which is subject to the same kinds of attacks that the EIP aims to removing, and instead of allowing builders to deposit before the fork, allowing them to deposit in the new contract before the fork, in this case, for them to be active at the fork, we need to store the timestamp so that when we dequeue we know those deposits are actually finalized I missed one more thing in the initial idea: The queue contract is designed to prevent any deposit before gloas by requiring a uint256 max fee before the first system calls \"unlocks\" it at the fork boundary. That could be easily changed too, but another change to be aware of. cc <@534934855113506836> (contract dev) yea, the idea is to track when the actual deposit transaction was made instead of using the block where it was dequeued as finalization constraint. It requires to record the enqueue timestamp in the queue record in the system contract, and adding it to the dequeue result. I think it's mainly contract and cl side work, the el clients just pass through what they get from the contract into prefixed execution requests, right? Cayman, that was copied from the original contract? I assume <@543900561460822016> coded that? was that to prevent deposits before the fork or does it make the whole system call easier to implement? Because if it's a requirement that there aren't deposits before the fork then that may be a blocker for the whole idea the main issue you have if you accept requests before the fork is that the fee isn’t updated and so you dont get the exponential increase to stop dos because the fee is updated by the system call I checked the current contract proposal, there are 8 unused bytes in the last slot of each entry, so the enqueue timestamp could nicely fit in there without extending the storage slot requirement oh yea, that's right. but the deposits are gated by a 1ETH min value anyway, so might not be a blocker here ahh crap that kinda runs into a separate DOS then <@808969530608451584> cause then builders can prevent other builders from entering by dossing this contract it's very cheap since they get their 1ETH back, and being the unique builder at the fork surely is worth it hmm, we agreed to unqueue like 256 deposits per slot, right? so blocking the queue for 1 slot costs 256 ETH.. But yea, I see this is getting a race for the first slots then, and the whole point of the timestamp addition is to allow onboading early which might be blocked by 8192 ETH per epoch. you could create a branch of the code for pre-fork where the fee isn’t updated computed on demand or you could make it do that all the time. the reason we rely on the system call to update the fee is just to minimize cost of creating the request but if they put up 1 eth, it’s probably okay to do some more computation right. that would also lead to a fee adjustment per tx, which probably makes sense for builder deposits (not mass actions for staking pools, which was one of the arguments for the static fee per block, so they can do batches with same fee) > so blocking the queue for 1 slot costs 256 ETH. It doesn't cause the money is recovered, with the exponential fee it does cost something is this really an issue tho? Sure we could potentially have dos here but once the fork is live the gas will be adjusted and anything after the first slot will need to be submitted with more gas no? yes the contract was built with a minimal diff to the other contract, the intention being to make the audit as simple and straightforward as possible.",
   "excerpts": [
     {
       "author": "cperezz.eth",
@@ -20,6 +20,214 @@
       "parent": "",
       "content": "Hi everyone, I have a quick question about the address generation of system contracts. In eip-4788 and all subsequent system contract eips (2935, 7002, 7251) the contract is deployed by a sender address that is chosen so that the contract address looks somewhat special (0s in the beginning, also some 0s and then the eip number in the end). This looks nice but I don't understand this part (present in all of these eips):\n```\nThe sender of the transaction can be calculated as 0x3462413Af4609098e1E27A490f554f260213D685. The address of the first contract deployed from the account is rlp([sender, 0]) which equals 0x0000F90827F1C53a10cb7A02335B175320002935. This is how HISTORY_STORAGE_ADDRESS is determined. Although this style of contract creation is not tied to any specific initcode like create2 is, the synthetic address is cryptographically bound to the input data of the transaction (e.g. the initcode).\n```\nMaybe I'm just missing something trivial but if the contract address only depends on the sender address and the nonce then how is it cryptographically bound to the initcode?",
       "createdAt": "2026-06-15T09:06:19.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "general",
+      "parent": "",
+      "content": "8282 is pretty easy to implement on the EL side: https://github.com/ethereum/go-ethereum/pull/35175 cc <@755590043632140352>",
+      "createdAt": "2026-06-15T15:10:31.451000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "we stayed until right now, we agreed to go with it without any changes and have it ready for next week",
+      "createdAt": "2026-06-15T15:59:42.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "if it's easy on the EL can we then schedule devnet 6 with it so that we don't delay",
+      "createdAt": "2026-06-15T15:59:57.479000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "we seem to be able to implement this quickly",
+      "createdAt": "2026-06-15T16:00:05.914000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "<@360491619402776577> <@808969530608451584> can we have a short talk here about the contract? what will it take to also store the timestamp in which the deposit was made?",
+      "createdAt": "2026-06-15T16:20:03.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "for <@360491619402776577> context: the idea is to remove the awkward logic of onboarding builders at the fork, which is subject to the same kinds of attacks that the EIP aims to removing, and instead of allowing builders to deposit before the fork, allowing them to deposit in the new contract before the fork, in this case, for them to be active at the fork, we need to store the timestamp so that when we dequeue we know those deposits are actually finalized",
+      "createdAt": "2026-06-15T16:21:56.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "I missed one more thing in the initial idea:\nThe queue contract is designed to prevent any deposit before gloas by requiring a uint256 max fee before the first system calls \"unlocks\" it at the fork boundary.\nThat could be easily changed too,  but another change to be aware of.",
+      "createdAt": "2026-06-15T16:23:38.968000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "cc <@534934855113506836>  (contract dev)",
+      "createdAt": "2026-06-15T16:24:23.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "yea, the idea is to track when the actual deposit transaction was made instead of using the block where it was dequeued as finalization constraint.\nIt requires to record the enqueue timestamp in the queue record in the system contract, and adding it to the dequeue result. \nI think it's mainly contract and cl side work,  the el clients just pass through what they get from the contract into prefixed execution requests, right?",
+      "createdAt": "2026-06-15T16:31:06.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "Cayman, that was copied from the original contract? I assume <@543900561460822016> coded that? was that to prevent deposits before the fork or does it make the whole system call easier to implement? Because if it's a requirement that there aren't deposits before the fork then that may be a blocker for the whole idea",
+      "createdAt": "2026-06-15T16:32:45.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "the main issue you have if you accept requests before the fork is that the fee isn’t updated and so you dont get the exponential increase to stop dos",
+      "createdAt": "2026-06-15T16:43:55.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "because the fee is updated by the system call",
+      "createdAt": "2026-06-15T16:44:08.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "I checked the current contract proposal, there are 8 unused bytes in  the last slot of each entry,   so the enqueue timestamp could nicely fit in there without extending the storage slot requirement",
+      "createdAt": "2026-06-15T16:44:58.085000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "oh yea, that's right.  but the deposits are gated by a 1ETH min value anyway,  so might not be a blocker here",
+      "createdAt": "2026-06-15T16:47:42.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "ahh crap that kinda runs into a separate DOS then <@808969530608451584> cause then builders can prevent other builders from entering by dossing this contract",
+      "createdAt": "2026-06-15T16:47:43.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "it's very cheap since they get their 1ETH back, and being the unique builder at the fork surely is worth it",
+      "createdAt": "2026-06-15T16:48:06.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "hmm,  we agreed to unqueue like 256 deposits per slot, right?   so blocking the queue for 1 slot costs 256 ETH.. \nBut yea, I see this is getting a race for the first slots then,  and the whole point of the timestamp addition is to allow onboading early which might be blocked by 8192 ETH per epoch.",
+      "createdAt": "2026-06-15T16:51:23.593000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "you could create a branch of the code for pre-fork where the fee isn’t updated computed on demand",
+      "createdAt": "2026-06-15T16:51:34.380000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "or you could make it do that all the time. the reason we rely on the system call to update the fee is just to minimize cost of creating the request",
+      "createdAt": "2026-06-15T16:52:10.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "general",
+      "parent": "",
+      "content": "but if they put up 1 eth, it’s probably okay to do some more computation",
+      "createdAt": "2026-06-15T16:52:29.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "general",
+      "parent": "",
+      "content": "right.  that would also lead to a fee adjustment per tx, which probably makes sense for builder deposits (not mass actions for staking pools, which was one of the arguments for the static fee per block, so they can do batches with same fee)",
+      "createdAt": "2026-06-15T16:54:18.146000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "general",
+      "parent": "",
+      "content": "> so blocking the queue for 1 slot costs 256 ETH.\nIt doesn't cause the money is recovered, with the exponential fee it does cost something",
+      "createdAt": "2026-06-15T16:56:40.098000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "general",
+      "parent": "",
+      "content": "is this really an issue tho?",
+      "createdAt": "2026-06-15T17:31:16.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "general",
+      "parent": "",
+      "content": "Sure we could potentially have dos here but once the fork is live the gas will be adjusted",
+      "createdAt": "2026-06-15T17:31:43.859000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "general",
+      "parent": "",
+      "content": "and anything after the first slot will need to be submitted with more gas no?",
+      "createdAt": "2026-06-15T17:32:04.108000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "general",
+      "parent": "",
+      "content": "yes the contract was built with a minimal diff to the other contract, the intention being to make the audit as simple and straightforward as possible.",
+      "createdAt": "2026-06-15T17:51:14.664000+00:00",
       "attachments": []
     }
   ]
