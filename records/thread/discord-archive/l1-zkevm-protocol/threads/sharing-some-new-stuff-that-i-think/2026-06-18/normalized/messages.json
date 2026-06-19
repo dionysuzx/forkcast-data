@@ -1,0 +1,430 @@
+{
+  "schemaVersion": 1,
+  "channel": "l1-zkevm-protocol/_threads/Sharing some new stuff that I think",
+  "date": "2026-06-18",
+  "messageCount": 51,
+  "sourceHash": "6a403b6d20d6383dc206854d0f15599e4bc306229267cb6141ed6fee36dcc1dd",
+  "searchText": "I haven't dug deep into this. But zevm thinks witness doesn't include history contract storage. ```omerfirmak@Omers-MacBook-Pro ~/zevm (ci-devnet-blocks) [SIGINT]> ./.github/fetch_batches.sh Fetching batch index... skip (exists): 57000-57009.tar.zst skip (exists): 57010-57019.tar.zst skip (exists): 57020-57029.tar.zst skip (exists): 57030-57039.tar.zst skip (exists): 57040-57049.tar.zst skip (exists): 57050-57059.tar.zst skip (exists): 57060-57069.tar.zst skip (exists): 57070-57079.tar.zst skip (exists): 57080-57089.tar.zst skip (exists): 57090-57099.tar.zst chainId = 7095321190 — building native guest... --- 57000-57009.tar.zst block 57000: FAIL -- InvalidWitness: storage slot 0x1ea7 for account 0xf90827f1c53a10cb7a02335b175320002935 block 57001: FAIL -- InvalidWitness: storage slot 0x1ea8 for account 0xf90827f1c53a10cb7a02335b175320002935 block 57002: FAIL -- InvalidWitness: storage slot 0x1ea9 for account 0xf90827f1c53a10cb7a02335b175320002935 block 57003: FAIL -- InvalidWitness: storage slot 0x1eaa for account 0xf90827f1c53a10cb7a02335b175320002935 block 57004: FAIL -- InvalidWitness: storage slot 0x1eab for account 0xf90827f1c53a10cb7a02335b175320002935``` > But zevm thinks witness doesn't include history contract storage. I would have to double check, but I think this would be expected considering that system contract writes previous block hash... and compared to any other storage slot write, it doesn't need to do a read since system contract doesn't have to charge for gas (thus know previous value of storage slot)? Is zevm passing all the existing v0.4.1 tests? Is there any chance devnet is running a non-standard history storage contract? The slot BAL says the parent hash should be written to is different than what zevm is writing to. yes Shoudn't from my perspective. Also if these artifacts are passing the specs stateless block run, if that was the case, it should fail the block validation too So we might discover something interesting here I am bypassing the contract code and writing directly to the contract's storage. I will try to go thru the contract code and see if it fixes it. Cool -- let me know after you dig a bit more, and if you conclude zevm is doing the right thing, I can try debugging that 57000-57009.tar.zst more carefully with the spec and see if there is anything weird. the error is pretty much the same for all blocks, so there is something obviously wrong 😄 Shouldn't be hard to track. Will let you know. 🤦‍♂️ found it, my eip2935 window constant was wrong. Nice! This is awesome -- we got value (bug found in zevm) from this new devnet runs in guest programs pretty fast. I think we still have to think why this wasn't surfaced by normal EEST tests Ah yeah, I think this devnet work is really valuable. probably because EEST tests never create chains longer than 8191 blocks. but 2935 isn't about 8191 but 256 and I think this case was covered, unless i'm not understanding which was the bug on your side and how could have affected it from eip Set the storage value at block.number-1 % HISTORY_SERVE_WINDOW to be calldata[0:32]. HISTORY_SERVE_WINDOW is 8191 my constant was 8192 Ah, I see. Yeah, okay that makes sense. Def EEST can't do this long chain of 8k ish blocks without blowing up python impl. Even the 257 case I remember was challenging to fill Something feels odd here since this is then a blindspot even for normal stateful-ELs, no? Some other existing non-8025 should be covering this Maybe was simply decided it wasn't possible to cover this maybe. but I am surprised python spec can't even do 8k empty blocks. that is all it needs to do to cover this. btw, do you mind reminding me what EL spec release glamsterdam-devnet-5 corresponds to? I am getting 46 legitimate failures out of 100 blocks, I want to make sure I'm on the correct spec version before digging into them. In the zkevm releases like https://github.com/ethereum/execution-specs/releases/tag/tests-zkevm%40v0.4.1 at the top I always put the \"base branch\" that I use, so in this case is (bal@v7.2.0) Got it, thanks. I was wondering it devnet-5 was still on an older spec. So this is the filling of [these two tests](https://github.com/ethereum/execution-specs/blob/02c6c2510916e470f2c1e5191589212ca75d4948/tests/amsterdam/eip8025_optional_proofs/test_witness_headers.py#L353-L360) in parallel. So takes ~20s apparently to do the 256(+1) chain of blocks. So ~8k might be 10min filling only that test which prob won't be acceptable although doable. I guess is also true that if you ever try any EL in a devnet/mainnet, your bug would be immediately observable (which is what actually happened) yeap, exactly. probably why people never bothered covering it in EEST Was your bug also triggering a state root mismatch, no? Since having the wrong modulo means writing to the wrong storage slot; so I'm still not sure I got why you identified this via the witness rather than state root mismatch. Is this because the devnet block did some old read of a 2935 entry? And this isn't really coming from the pre-txs execution injection of prev header blockhash into 2935? hmm, probably because writing to a different tree leaf requires different nodes to be included in the witness. so state root couldn't even be calculated with this bug from state root calculation pov, writes are the same as reads, no? only during EVM execution you get to omit the read. oh, wait I see what happened. During state root calculation, I use BAL to figure out dirty storage locations. I read the latest value of a slot that BAL thinks is dirty from state and write that value to the trie. If that slot was never written to, that read fallsthru to witness, instead of being served by the in-memory dirty state. and witness doesn't include that value, because it doesn't need to. Nice, makes sense! figured out the other issue. https://github.com/omerfirmak/zevm/pull/34/changes/343d289b0d5765a37d66a53c7e126529d9f3c28e I dont know who to ping but this case could be added to EEST. devnet verification is green now https://github.com/omerfirmak/zevm/actions/runs/27781439381/job/82206963741?pr=34 will run it on an interval <@774033563732541451> we already caught and fixed a few bugs after integrating these tests into our ci. so great job! I think i had an intuition of the bug form your signle line there. IIUC is a very obscure one. From my intuition created a test that I think triggers what you fixed. Shared attached. Do you mind trying that fixture with and without that https://github.com/omerfirmak/zevm/pull/34/changes/343d289b0d5765a37d66a53c7e126529d9f3c28e fix on your client and see if this is the right? If this worked I can explain better and upstream the test to `forks/amsterdam` or talk with someone from STEEL.",
+  "excerpts": [
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I haven't dug deep into this. But zevm thinks witness doesn't include history contract storage.\n\n```omerfirmak@Omers-MacBook-Pro ~/zevm (ci-devnet-blocks) [SIGINT]> ./.github/fetch_batches.sh\nFetching batch index...\n  skip (exists): 57000-57009.tar.zst\n  skip (exists): 57010-57019.tar.zst\n  skip (exists): 57020-57029.tar.zst\n  skip (exists): 57030-57039.tar.zst\n  skip (exists): 57040-57049.tar.zst\n  skip (exists): 57050-57059.tar.zst\n  skip (exists): 57060-57069.tar.zst\n  skip (exists): 57070-57079.tar.zst\n  skip (exists): 57080-57089.tar.zst\n  skip (exists): 57090-57099.tar.zst\n\nchainId = 7095321190 — building native guest...\n\n--- 57000-57009.tar.zst\n  block 57000: FAIL -- InvalidWitness: storage slot 0x1ea7 for account 0xf90827f1c53a10cb7a02335b175320002935\n  block 57001: FAIL -- InvalidWitness: storage slot 0x1ea8 for account 0xf90827f1c53a10cb7a02335b175320002935\n  block 57002: FAIL -- InvalidWitness: storage slot 0x1ea9 for account 0xf90827f1c53a10cb7a02335b175320002935\n  block 57003: FAIL -- InvalidWitness: storage slot 0x1eaa for account 0xf90827f1c53a10cb7a02335b175320002935\n  block 57004: FAIL -- InvalidWitness: storage slot 0x1eab for account 0xf90827f1c53a10cb7a02335b175320002935```",
+      "createdAt": "2026-06-18T15:08:58.490000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "> But zevm thinks witness doesn't include history contract storage.\nI would have to double check, but I think this would be expected considering that system contract writes previous block hash... and compared to any other storage slot write, it doesn't need to do a read since system contract doesn't have to charge for gas (thus know previous value of storage slot)?",
+      "createdAt": "2026-06-18T15:33:42.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Is zevm passing all the existing v0.4.1 tests?",
+      "createdAt": "2026-06-18T15:34:12.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Is there any chance devnet is running a non-standard history storage contract?",
+      "createdAt": "2026-06-18T15:34:37.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "The slot BAL says the parent hash should be written to is different than what zevm is writing to.",
+      "createdAt": "2026-06-18T15:34:56.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yes",
+      "createdAt": "2026-06-18T15:35:02.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Shoudn't from my perspective. Also if these artifacts are passing the specs stateless block run, if that was the case, it should fail the block validation too",
+      "createdAt": "2026-06-18T15:35:42.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So we might discover something interesting here",
+      "createdAt": "2026-06-18T15:35:50.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I am bypassing the contract code and writing directly to the contract's storage. I will try to go thru the contract code and see if it fixes it.",
+      "createdAt": "2026-06-18T15:36:52.812000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Cool -- let me know after you dig a bit more, and if you conclude zevm is doing the right thing, I can try debugging that 57000-57009.tar.zst more carefully with the spec and see if there is anything weird.",
+      "createdAt": "2026-06-18T15:37:34.376000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "the error is pretty much the same for all blocks, so there is something obviously wrong 😄 Shouldn't be hard to track.",
+      "createdAt": "2026-06-18T15:38:14.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Will let you know.",
+      "createdAt": "2026-06-18T15:38:26.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "🤦‍♂️ found it, my eip2935 window constant was wrong.",
+      "createdAt": "2026-06-18T15:44:03.716000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nice! This is awesome -- we got value (bug found in zevm) from this new devnet runs in guest programs pretty fast.",
+      "createdAt": "2026-06-18T15:53:00.735000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think we still have to think why this wasn't surfaced by normal EEST tests",
+      "createdAt": "2026-06-18T15:53:57.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah yeah, I think this devnet work is really valuable.",
+      "createdAt": "2026-06-18T15:53:57.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "probably because EEST tests never create chains longer than 8191 blocks.",
+      "createdAt": "2026-06-18T15:54:32.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "but 2935 isn't about 8191 but 256",
+      "createdAt": "2026-06-18T15:55:18.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "and I think this case was covered, unless i'm not understanding which was the bug on your side and how could have affected it",
+      "createdAt": "2026-06-18T15:55:39.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "from eip \n\nSet the storage value at block.number-1 % HISTORY_SERVE_WINDOW to be calldata[0:32].",
+      "createdAt": "2026-06-18T15:55:58.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "HISTORY_SERVE_WINDOW is 8191",
+      "createdAt": "2026-06-18T15:56:02.642000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "my constant was 8192",
+      "createdAt": "2026-06-18T15:56:06.788000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Ah, I see. Yeah, okay that makes sense.",
+      "createdAt": "2026-06-18T15:56:25.999000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Def EEST can't do this long chain of 8k ish blocks without blowing up python impl.",
+      "createdAt": "2026-06-18T15:56:41.319000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Even the 257 case I remember was challenging to fill",
+      "createdAt": "2026-06-18T15:56:50.569000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Something feels odd here since this is then a blindspot even for normal stateful-ELs, no?",
+      "createdAt": "2026-06-18T15:57:37.304000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Some other existing non-8025 should be covering this",
+      "createdAt": "2026-06-18T15:57:44.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Maybe was simply decided it wasn't possible to cover this",
+      "createdAt": "2026-06-18T15:57:56.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "maybe. but I am surprised python spec can't even do 8k empty blocks.",
+      "createdAt": "2026-06-18T15:58:44.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "that is all it needs to do to cover this.",
+      "createdAt": "2026-06-18T15:58:47.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "btw, do you mind reminding me what EL spec release glamsterdam-devnet-5 corresponds to?",
+      "createdAt": "2026-06-18T15:59:26.475000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I am getting 46 legitimate failures out of 100 blocks, I want to make sure I'm on the correct spec version before digging into them.",
+      "createdAt": "2026-06-18T16:00:39.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "In the zkevm releases like https://github.com/ethereum/execution-specs/releases/tag/tests-zkevm%40v0.4.1 at the top I always put the \"base branch\" that I use, so in this case is (bal@v7.2.0)",
+      "createdAt": "2026-06-18T16:02:22.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Got it, thanks. I was wondering it devnet-5 was still on an older spec.",
+      "createdAt": "2026-06-18T16:03:08.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "So this is the filling of [these two tests](https://github.com/ethereum/execution-specs/blob/02c6c2510916e470f2c1e5191589212ca75d4948/tests/amsterdam/eip8025_optional_proofs/test_witness_headers.py#L353-L360) in parallel. So takes ~20s apparently to do the 256(+1) chain of blocks. So ~8k might be 10min filling only that test which prob won't be acceptable although doable.",
+      "createdAt": "2026-06-18T16:06:12.360000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "08e837b16d7e0b3c73802036a1611b3524c2d8437ffe6169b574f89d81e9a8dc"
+        }
+      ]
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I guess is also true that if you ever try any EL in a devnet/mainnet, your bug would be immediately observable (which is what actually happened)",
+      "createdAt": "2026-06-18T16:07:48.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "yeap, exactly. probably why people never bothered covering it in EEST",
+      "createdAt": "2026-06-18T16:08:32.082000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Was your bug also triggering a state root mismatch, no?",
+      "createdAt": "2026-06-18T16:09:23.240000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Since having the wrong modulo means writing to the wrong storage slot; so I'm still not sure I got why you identified this via the witness rather than state root mismatch.",
+      "createdAt": "2026-06-18T16:10:12.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Is this because the devnet block did some old read of a 2935 entry? And this isn't really coming from the pre-txs execution injection of prev header blockhash into 2935?",
+      "createdAt": "2026-06-18T16:11:28.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "hmm, probably because writing to a different tree leaf requires different nodes to be included in the witness.",
+      "createdAt": "2026-06-18T16:12:32.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "so state root couldn't even be calculated with this bug",
+      "createdAt": "2026-06-18T16:12:42.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "from state root calculation pov, writes are the same as reads, no?",
+      "createdAt": "2026-06-18T16:13:17.762000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "only during EVM execution you get to omit the read.",
+      "createdAt": "2026-06-18T16:13:41.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "oh, wait I see what happened.",
+      "createdAt": "2026-06-18T16:16:45.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "During state root calculation, I use BAL to figure out dirty storage locations. I read the latest value of a slot that BAL thinks is dirty from state and write that value to the trie. If that slot was never written to, that read fallsthru to witness, instead of being served by the in-memory dirty state.",
+      "createdAt": "2026-06-18T16:19:15.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "and witness doesn't include that value, because it doesn't need to.",
+      "createdAt": "2026-06-18T16:19:40.522000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "Nice, makes sense!",
+      "createdAt": "2026-06-18T16:20:01.994000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "omerfirmak",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "figured out the other issue. https://github.com/omerfirmak/zevm/pull/34/changes/343d289b0d5765a37d66a53c7e126529d9f3c28e\nI dont know who to ping but this case could be added to EEST.\n\ndevnet verification is green now https://github.com/omerfirmak/zevm/actions/runs/27781439381/job/82206963741?pr=34 will run it on an interval",
+      "createdAt": "2026-06-18T18:44:00.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xrubo",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "<@774033563732541451> we already caught and fixed a few bugs after integrating these tests into our ci. so great job!",
+      "createdAt": "2026-06-18T20:16:09.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Cross-layer",
+      "parent": "l1-zkevm-protocol",
+      "content": "I think i had an intuition of the bug form your signle line there. IIUC is a very obscure one.\nFrom my intuition created a test that I think triggers what you fixed. Shared attached. \n\nDo you mind trying that fixture with and without that https://github.com/omerfirmak/zevm/pull/34/changes/343d289b0d5765a37d66a53c7e126529d9f3c28e fix on your client and see if this is the right?\n\nIf this worked I can explain better and upstream the test to `forks/amsterdam` or talk with someone from STEEL.",
+      "createdAt": "2026-06-18T21:45:25.959000+00:00",
+      "attachments": [
+        {
+          "type": "text/plain; charset=utf-8",
+          "origin_name": "message.txt",
+          "content": "1b2a7e9ee02cf8759137a4d0d4212ac51f8be17eaf4f630ef14eaf013a8d51dc"
+        }
+      ]
+    }
+  ]
+}
