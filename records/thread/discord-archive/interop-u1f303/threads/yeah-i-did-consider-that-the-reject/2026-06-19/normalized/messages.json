@@ -1,0 +1,394 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/yeah i did consider that, the reject",
+  "date": "2026-06-19",
+  "messageCount": 48,
+  "sourceHash": "9b4583db3a6924db38b3586f9a10d3497a1c1e3b5f66743542b83a89dec969a3",
+  "searchText": "<@1467247836117860547> can you investigate if the lodestar builder instance is getting downscored and disconnected by peers due to invalid bids on glamsterdam-devnet-5 i did put a claude agent on it but couldn't arrive to any solid conclusion Update — pulled the devnet-5 evidence and it does **not** back the downscore/fee-reject theory on the nodes I can reach, so I'm walking back my earlier lean. Two Lodestar nodes sampled (lodestar-geth-1, lodestar-nethermind-1, ~10:50–11:00 UTC): • **No downscoring/disconnect.** Peer count stable (~27–30 on geth-1 for 2.5h), every gossipsub peer score positive — zero peers in any negative bucket, `rpc_rcv_not_accepted_total=0`. Lighthouse/Grandine each hold a steady 8 Lodestar peers. • **Zero `PROPOSER_PREFERENCES_FEE_RECIPIENT_MISMATCH` REJECTs** — across **36,552** bids accepted from gossip on nethermind-1. The only bid errors are IGNORE-class: `NO_MATCHING_PROPOSER_PREFERENCES` (prefs just hadn't arrived yet) and `BID_TOO_LOW`. So the bids on the wire are passing the fee check. • **Regular Lodestar nodes don't publish standalone bids** (`api_insert_outcome_total`=0). The self-build bid is embedded *in the block* (infinity sig, `BUILDER_INDEX_SELF_BUILD`) — it rides inside the block, isn't gossiped on `execution_payload_bid`, so it never hits those REJECT cases. The only thing publishing standalone bids is the dedicated builder, `buildoor-lodestar-ethrex-1`. Honest gap: that buildoor node is exactly the one I **can't** reach — SSH key isn't authorized for `buildoor-*`, its metrics aren't externally exposed, and panda's clickhouse/otel cross-client logs are down right now (module disabled). So I can't directly read the builder's published bids or a peer's reject-of-our-bid log. If you've got its Grafana/metrics or can authorize SSH I'll confirm directly in minutes. What I *did* trip over: a clean **Lodestar ↔ Prysm/Teku peering gap** — lodestar-geth-1 shows `peers_by_client{Prysm}=0, {Teku}=0`, and prysm-reth-1 / prysm-nethermind-1 hold 0 Lodestar peers (they peer fine with everyone else). Smells like a v1.43.0 ↔ Prysm v7.1.3-rc.3 discovery/handshake/Gloas-topic incompat, not bid downscoring — downscoring would tank scores across all clients and we see the opposite. If the symptom you saw was the builder *losing peers*, this is the likelier culprit. The code decoupling I flagged is still a real **latent** gap (bid feeRecipient sourced separately from proposer_preferences, <https://github.com/ChainSafe/lodestar/issues/9379>, no post-Gloas strict-fee check) — worth hardening so it can't bite, but it isn't what's firing on devnet-5 today. Want me to chase the Lodestar↔Prysm peering gap, or do you have a way into the buildoor-lodestar node so I can close the bid question directly? i think you should hookup the panda cli skills to lodekeeper but the lodestar buildoor node has been restarted and is working as expected he does have it wired up you should have access to all nodes using `panda`, see you devnet debugging skill ah <@1386598056320831509> I think this is non sense, lodestar wouldn't even publish invalid bids so the submit api would give you an error right away if you publish wrong bids I am not sure thouhg if all clients use the right state to validate bids, although should be a non issue as there are no forks on the network right now yeah this is what i think so too it errors out with when the bid is already seen or the preferences have not been seen etc yeah lets see, its running well now. would be interesting to see if we run into this situation again Investigation complete. Posting the findings to the thread. --- **No — it's not the bids.** Got panda working (datasources were down — cred-file perms regressed to 0600 after the last re-auth, fixed) and pulled the builder's own otel-logs. The downscoring/disconnects are **real**, but the cause is a broken consensus state, not invalid bids. What actually happened to `buildoor-lodestar-ethrex-1` (peerId `16Uiu2HAm…Meh2z`): - It was **stuck and isolated** from ~06-18 15:00 until the 10:03 restart today (~19h): log volume collapsed 6–8k→~700 lines/hr, peers pinned at **0–1**, its own logs spamming `Invalid fork choice state. Reason: ElementNotFound(Finalized)` (459×) and the ethrex EL `No messages from the consensus layer` (2041×). - Peers dropped it for **networking/STATUS reasons**: Prysm `Downscore peer reason=pingInvalid` and `is bad peer … peer status scorer: invalid finalize`; Nimbus ~2530 disconnects. The builder is the clear outlier (11–57× other Lodestar nodes; `pingInvalid` is builder-only). These ran steady ~115/hr across the whole window, **uncorrelated with bid activity**, and dropped to ~0 right after the restart. Why bids are ruled out: Lodestar's `publishExecutionPayloadBid` validates **before** it gossips (`blocks/index.ts:846` precedes the publish at `:855`), so invalid bids (`NO_MATCHING_PROPOSER_PREFERENCES`, `BID_TOO_LOW` — both `IGNORE`) get rejected at the local REST API and **never hit the wire** — no peer can penalize them. It published 530 *valid* bids during the window. The bid failures are a symptom of being isolated (no proposer_preferences while cut off), not the trigger. It's fully recovered now — head_slot 107510, finalized epoch 3357, sync_distance 0, same as lodestar-geth-1 / prysm-nethermind-1. Matches what Bharath saw after the restart. One **separate** thing worth flagging for interop though: **Nimbus rejects `execution_payload_bid` when it hasn't seen the matching proposer preferences yet** (`(Reject, \"preferences have not seen / matching preferences not found\")`, ~3200 in 24h). Per gloas `p2p-interface.md:369` that's an `[IGNORE]` condition (`The matching signed_proposer_preferences has been seen`), not REJECT. Lodestar handles it spec-correctly (IGNORE); Nimbus's REJECT applies unjustified gossipsub penalties to honest builders network-wide. Not what broke this node, but a real downscoring vector under normal operation — probably worth raising with the Nimbus folks. (Also saw Lighthouse reject some bids for `InvalidGasLimit` — separate, on the lighthouse buildoor's side.) > Got panda working (datasources were down — cred-file perms regressed to 0600 after the last re-auth, fixed) and pulled the builder's own otel-logs. The downscoring/disconnects are real, but the cause is a broken consensus state, not invalid bids. does panda work now? > It was stuck and isolated from ~06-18 15:00 until the 10:03 restart today (~19h): log volume collapsed 6–8k→~700 lines/hr, peers pinned at 0–1, its own logs spamming Invalid fork choice state. Reason: ElementNotFound(Finalized) (459×) and the ethrex EL No messages from the consensus layer (2041×). can you share the exact lodestar log for this, it doesn't seem like a lodestar error you are hightlighting here > One separate thing worth flagging for interop though: Nimbus rejects execution_payload_bid when it hasn't seen the matching proposer preferences yet (`(Reject, \"preferences have not can you open an issue for nimbus team the nimbus thing could be a real issue All three handled. Replying to Nico. --- **1) Does panda work now?** Yes — 6 datasources up, queries running fine. The outage was a permissions thing: panda rewrites its credential file as `0600` on every token refresh, but the containerized `panda-server` reads it via group `docker`, so it loses access → datasources go null. I added a self-heal (`chmod 640`) to the devnet-debug preflight, but panda keeps rewriting it 0600, so to be bulletproof it really wants a small periodic heal cron. One caveat I hit: the unattended `panda-reauth` currently lands on an **Apple sign-in page** instead of GitHub — the current token's good for ~another hour, but the auto-reauth may need a look before it lapses. **2) The exact Lodestar log — you're right, I mis-attributed it.** That host runs three log streams (the builder binary, the ethrex EL, and the Lodestar CL). `Invalid fork choice state. Reason: ElementNotFound(Finalized)` and `No messages from the consensus layer` are **ethrex (EL)** lines, not Lodestar — my mistake. The genuine Lodestar (CL) lines are: ``` Jun-19 09:53:42.000[] warn: Low peer count peers=1 Jun-19 09:43:30.006[] info: Searching peers - peers: 2 - slot: 107017 - head: 101375 0x5d56…83e3 - exec-block: valid(69977 0x506c…) - finalized: 0x5142…98 ``` So Lodestar's **own head was stuck at slot 101375 while the clock was at 107017 — ~5,600 slots / ~19h behind, sitting at 0–2 peers**. After the 10:03 restart it recovered: `info: Synced - slot: 107563 - head: 0xaf65…422e - … - peers: 18`. The real Lodestar symptom was a sync/peering stall (head far behind, almost no peers), and the Prysm `invalid finalize` + `pingInvalid` downscores line up with it advertising a ~19h-stale STATUS — still not bid-related. (Minor aside: there's a genuine Lodestar `Error onDiscovered - Cannot read properties of undefined (reading 'includes')` TypeError in `discover.ts`, but it only fired ~12× at the restart, not during the stall — separate nit, not the cause.) **3) Nimbus issue:** filed → <https://github.com/status-im/nimbus-eth2/issues/8631> — `execution_payload_bid` REJECTed when the matching proposer_preferences haven't been seen yet (gloas spec says IGNORE), with the verbatim `reason=\"(Reject, \\\"ExecutionPayloadBid: matching preferences not seen\\\")\"` and the 24h counts (3,239 rejects across the 3 Nimbus nodes). 3) there must be another bug, <@1386598056320831509> you only create bids if buildoor seen the preferences right? > One caveat I hit: the unattended panda-reauth currently lands on an Apple sign-in page instead of GitHub — the current token's good for ~another hour, but the auto-reauth may need a look before it lapse is that a cron or when do you run this? can you please stop using it, panda server should handle the token refresh now actually no, we rely on lodestar to not send those bids lmaoo which lodestar does correctly lodestar doesn't send bids if the preferences are not seen wait but how can you set the gas limit and fee recipient? and yes lodestar wouldn't send them yeah its not correct behaviour to send eitherways we just default the gas limit from the payload attrs I don't even understadn how you can construct the bid lol isn't that 0x000000 ? gas limit shouldn't be 0x0000? no I mean the fee recipieint, gas limit is just parent gas limit I think yup in that case, we just set it to the one from payload attributes which is indeed wrong i ll add logic to avoid sending bid when prefs are not seen shouldn't be too hard we get bailed out by lodestar now yeah lodestar should never send data that get it downscored by peers so that is good, we always run gossip checks before publishing Both threads resolved. Replying to Nico. --- **On \"there must be another bug\" — yes, found it, and it's upstream of the bid layer, in `proposer_preferences` gossip.** **Teku is REJECTing proposer_preferences gossip** — ~3,000 in 90 min, and it's the *only* client doing it: ``` WARN Rejecting gossip … /proposer_preferences/ssz_snappy, reason: Proposer preferences dependent root 0x0222…c7cb is at slot 107648, but must be before checkpoint boundary slot 107648 ``` Spec `get_proposer_dependent_root` = `get_block_root_at_slot(state, start_slot(epoch − MIN_SEED_LOOKAHEAD) − 1)`. For epoch 3365 that's slot **107647** — one *before* the boundary 107648. The published message's dependent_root resolves to **107648** (the boundary itself), i.e. one slot too late. So **Teku rejects correctly per spec — the publisher is emitting an off-by-one `dependent_root`.** (Lighthouse was publishing epoch 3365 at the same millisecond, so it's the likely source, but I haven't pinned the exact client.) To Bharath's point: right — the buildoor only bids after it's seen the preferences (`Received proposer preferences from SSE` → `Creating and submitting bid`), so its bids are legit. The breakage is preferences *gossip propagation*: published preferences carry a bad dependent_root → Teku rejects + P4-pena",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-06-19T10:44:59.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you investigate if the lodestar builder instance is getting downscored and disconnected by peers due to invalid bids on glamsterdam-devnet-5",
+      "createdAt": "2026-06-19T10:45:01.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i did put a claude agent on it but couldn't arrive to any solid conclusion",
+      "createdAt": "2026-06-19T10:45:22.310000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Update — pulled the devnet-5 evidence and it does **not** back the downscore/fee-reject theory on the nodes I can reach, so I'm walking back my earlier lean.\n\nTwo Lodestar nodes sampled (lodestar-geth-1, lodestar-nethermind-1, ~10:50–11:00 UTC):\n• **No downscoring/disconnect.** Peer count stable (~27–30 on geth-1 for 2.5h), every gossipsub peer score positive — zero peers in any negative bucket, `rpc_rcv_not_accepted_total=0`. Lighthouse/Grandine each hold a steady 8 Lodestar peers.\n• **Zero `PROPOSER_PREFERENCES_FEE_RECIPIENT_MISMATCH` REJECTs** — across **36,552** bids accepted from gossip on nethermind-1. The only bid errors are IGNORE-class: `NO_MATCHING_PROPOSER_PREFERENCES` (prefs just hadn't arrived yet) and `BID_TOO_LOW`. So the bids on the wire are passing the fee check.\n• **Regular Lodestar nodes don't publish standalone bids** (`api_insert_outcome_total`=0). The self-build bid is embedded *in the block* (infinity sig, `BUILDER_INDEX_SELF_BUILD`) — it rides inside the block, isn't gossiped on `execution_payload_bid`, so it never hits those REJECT cases. The only thing publishing standalone bids is the dedicated builder, `buildoor-lodestar-ethrex-1`.\n\nHonest gap: that buildoor node is exactly the one I **can't** reach — SSH key isn't authorized for `buildoor-*`, its metrics aren't externally exposed, and panda's clickhouse/otel cross-client logs are down right now (module disabled). So I can't directly read the builder's published bids or a peer's reject-of-our-bid log. If you've got its Grafana/metrics or can authorize SSH I'll confirm directly in minutes.\n\nWhat I *did* trip over: a clean **Lodestar ↔ Prysm/Teku peering gap** — lodestar-geth-1 shows `peers_by_client{Prysm}=0, {Teku}=0`, and prysm-reth-1 / prysm-nethermind-1 hold 0 Lodestar peers (they peer fine with everyone else). Smells like a v1.43.0 ↔ Prysm v7.1.3-rc.3 discovery/handshake/Gloas-topic incompat, not bid downscoring — downscoring would tank scores across all clients and we see the",
+      "createdAt": "2026-06-19T11:02:50.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "opposite. If the symptom you saw was the builder *losing peers*, this is the likelier culprit.\n\nThe code decoupling I flagged is still a real **latent** gap (bid feeRecipient sourced separately from proposer_preferences, <https://github.com/ChainSafe/lodestar/issues/9379>, no post-Gloas strict-fee check) — worth hardening so it can't bite, but it isn't what's firing on devnet-5 today.\n\nWant me to chase the Lodestar↔Prysm peering gap, or do you have a way into the buildoor-lodestar node so I can close the bid question directly?",
+      "createdAt": "2026-06-19T11:02:51.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i think you should hookup the panda cli skills to lodekeeper",
+      "createdAt": "2026-06-19T11:03:41.022000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but the lodestar buildoor node has been restarted and is working as expected",
+      "createdAt": "2026-06-19T11:04:04.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "he does have it wired up",
+      "createdAt": "2026-06-19T11:09:52.283000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you should have access to all nodes using `panda`, see you devnet debugging skill",
+      "createdAt": "2026-06-19T11:10:18.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah <@1386598056320831509> I think this is non sense, lodestar wouldn't even publish invalid bids",
+      "createdAt": "2026-06-19T11:15:47.388000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so the submit api would give you an error right away if you publish wrong bids",
+      "createdAt": "2026-06-19T11:16:04.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am not sure thouhg if all clients use the right state to validate bids, although should be a non issue as there are no forks on the network right now",
+      "createdAt": "2026-06-19T11:18:08.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah this is what i think so too",
+      "createdAt": "2026-06-19T11:19:09.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it errors out with when the bid is already seen or the preferences have not been seen etc",
+      "createdAt": "2026-06-19T11:19:27.831000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah lets see, its running well now. would be interesting to see if we run into this situation again",
+      "createdAt": "2026-06-19T11:19:51.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Investigation complete. Posting the findings to the thread.\n\n---\n\n**No — it's not the bids.** Got panda working (datasources were down — cred-file perms regressed to 0600 after the last re-auth, fixed) and pulled the builder's own otel-logs. The downscoring/disconnects are **real**, but the cause is a broken consensus state, not invalid bids.\n\nWhat actually happened to `buildoor-lodestar-ethrex-1` (peerId `16Uiu2HAm…Meh2z`):\n- It was **stuck and isolated** from ~06-18 15:00 until the 10:03 restart today (~19h): log volume collapsed 6–8k→~700 lines/hr, peers pinned at **0–1**, its own logs spamming `Invalid fork choice state. Reason: ElementNotFound(Finalized)` (459×) and the ethrex EL `No messages from the consensus layer` (2041×).\n- Peers dropped it for **networking/STATUS reasons**: Prysm `Downscore peer reason=pingInvalid` and `is bad peer … peer status scorer: invalid finalize`; Nimbus ~2530 disconnects. The builder is the clear outlier (11–57× other Lodestar nodes; `pingInvalid` is builder-only). These ran steady ~115/hr across the whole window, **uncorrelated with bid activity**, and dropped to ~0 right after the restart.\n\nWhy bids are ruled out: Lodestar's `publishExecutionPayloadBid` validates **before** it gossips (`blocks/index.ts:846` precedes the publish at `:855`), so invalid bids (`NO_MATCHING_PROPOSER_PREFERENCES`, `BID_TOO_LOW` — both `IGNORE`) get rejected at the local REST API and **never hit the wire** — no peer can penalize them. It published 530 *valid* bids during the window. The bid failures are a symptom of being isolated (no proposer_preferences while cut off), not the trigger.\n\nIt's fully recovered now — head_slot 107510, finalized epoch 3357, sync_distance 0, same as lodestar-geth-1 / prysm-nethermind-1. Matches what Bharath saw after the restart.\n\nOne **separate** thing worth flagging for interop though: **Nimbus rejects `execution_payload_bid` when it hasn't seen the matching proposer preferences yet** (`(Reject, \"preferences have not",
+      "createdAt": "2026-06-19T11:24:22.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "seen / matching preferences not found\")`, ~3200 in 24h). Per gloas `p2p-interface.md:369` that's an `[IGNORE]` condition (`The matching signed_proposer_preferences has been seen`), not REJECT. Lodestar handles it spec-correctly (IGNORE); Nimbus's REJECT applies unjustified gossipsub penalties to honest builders network-wide. Not what broke this node, but a real downscoring vector under normal operation — probably worth raising with the Nimbus folks. (Also saw Lighthouse reject some bids for `InvalidGasLimit` — separate, on the lighthouse buildoor's side.)",
+      "createdAt": "2026-06-19T11:24:22.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": ">  Got panda working (datasources were down — cred-file perms regressed to 0600 after the last re-auth, fixed) and pulled the builder's own otel-logs. The downscoring/disconnects are real, but the cause is a broken consensus state, not invalid bids.\ndoes panda work now?\n\n> It was stuck and isolated from ~06-18 15:00 until the 10:03 restart today (~19h): log volume collapsed 6–8k→~700 lines/hr, peers pinned at 0–1, its own logs spamming Invalid fork choice state. Reason: ElementNotFound(Finalized) (459×) and the ethrex EL No messages from the consensus layer (2041×).\ncan you share the exact lodestar log for this, it doesn't seem like a lodestar error you are hightlighting here\n\n> One separate thing worth flagging for interop though: Nimbus rejects execution_payload_bid when it hasn't seen the matching proposer preferences yet (`(Reject, \"preferences have not\ncan you open an issue for nimbus team",
+      "createdAt": "2026-06-19T11:28:58.360000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the nimbus thing could be a real issue",
+      "createdAt": "2026-06-19T11:42:10.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "All three handled. Replying to Nico.\n\n---\n\n**1) Does panda work now?** Yes — 6 datasources up, queries running fine. The outage was a permissions thing: panda rewrites its credential file as `0600` on every token refresh, but the containerized `panda-server` reads it via group `docker`, so it loses access → datasources go null. I added a self-heal (`chmod 640`) to the devnet-debug preflight, but panda keeps rewriting it 0600, so to be bulletproof it really wants a small periodic heal cron. One caveat I hit: the unattended `panda-reauth` currently lands on an **Apple sign-in page** instead of GitHub — the current token's good for ~another hour, but the auto-reauth may need a look before it lapses.\n\n**2) The exact Lodestar log — you're right, I mis-attributed it.** That host runs three log streams (the builder binary, the ethrex EL, and the Lodestar CL). `Invalid fork choice state. Reason: ElementNotFound(Finalized)` and `No messages from the consensus layer` are **ethrex (EL)** lines, not Lodestar — my mistake. The genuine Lodestar (CL) lines are:\n\n```\nJun-19 09:53:42.000[] warn: Low peer count peers=1\nJun-19 09:43:30.006[] info: Searching peers - peers: 2 - slot: 107017 - head: 101375 0x5d56…83e3 - exec-block: valid(69977 0x506c…) - finalized: 0x5142…98\n```\n\nSo Lodestar's **own head was stuck at slot 101375 while the clock was at 107017 — ~5,600 slots / ~19h behind, sitting at 0–2 peers**. After the 10:03 restart it recovered: `info: Synced - slot: 107563 - head: 0xaf65…422e - … - peers: 18`. The real Lodestar symptom was a sync/peering stall (head far behind, almost no peers), and the Prysm `invalid finalize` + `pingInvalid` downscores line up with it advertising a ~19h-stale STATUS — still not bid-related. (Minor aside: there's a genuine Lodestar `Error onDiscovered - Cannot read properties of undefined (reading 'includes')` TypeError in `discover.ts`, but it only fired ~12× at the restart, not during the stall — separate nit, not the cause.)\n\n**3) Nimbus",
+      "createdAt": "2026-06-19T11:43:40.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "issue:** filed → <https://github.com/status-im/nimbus-eth2/issues/8631> — `execution_payload_bid` REJECTed when the matching proposer_preferences haven't been seen yet (gloas spec says IGNORE), with the verbatim `reason=\"(Reject, \\\"ExecutionPayloadBid: matching preferences not seen\\\")\"` and the 24h counts (3,239 rejects across the 3 Nimbus nodes).",
+      "createdAt": "2026-06-19T11:43:40.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "3) there must be another bug, <@1386598056320831509> you only create bids if buildoor seen the preferences right?",
+      "createdAt": "2026-06-19T11:50:41.946000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": ">  One caveat I hit: the unattended panda-reauth currently lands on an Apple sign-in page instead of GitHub — the current token's good for ~another hour, but the auto-reauth may need a look before it lapse\nis that a cron or when do you run this? can you please stop using it, panda server should handle the token refresh now",
+      "createdAt": "2026-06-19T11:51:52.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "actually no, we rely on lodestar to not send those bids lmaoo which lodestar does correctly",
+      "createdAt": "2026-06-19T11:53:53.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lodestar doesn't send bids if the preferences are not seen",
+      "createdAt": "2026-06-19T11:54:08.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "wait but how can you set the gas limit and fee recipient? and yes lodestar wouldn't send them",
+      "createdAt": "2026-06-19T11:54:22.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah its not correct behaviour to send eitherways",
+      "createdAt": "2026-06-19T11:55:16.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we just default the gas limit from the payload attrs",
+      "createdAt": "2026-06-19T11:55:37.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I don't even understadn how you can construct the bid",
+      "createdAt": "2026-06-19T11:55:39.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lol isn't that 0x000000 ?",
+      "createdAt": "2026-06-19T11:55:54.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "gas limit shouldn't be 0x0000?",
+      "createdAt": "2026-06-19T11:56:01.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no I mean the fee recipieint, gas limit is just parent gas limit I think",
+      "createdAt": "2026-06-19T11:56:15.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yup in that case, we just set it to the one from payload attributes which is indeed wrong",
+      "createdAt": "2026-06-19T11:58:06.152000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i ll add logic to avoid sending bid when prefs are not seen",
+      "createdAt": "2026-06-19T11:58:21.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "shouldn't be too hard",
+      "createdAt": "2026-06-19T11:58:24.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bharath.vedartham",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we get bailed out by lodestar now",
+      "createdAt": "2026-06-19T11:58:32.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah lodestar should never send data that get it downscored by peers so that is good, we always run gossip checks before publishing",
+      "createdAt": "2026-06-19T11:59:14.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Both threads resolved. Replying to Nico.\n\n---\n\n**On \"there must be another bug\" — yes, found it, and it's upstream of the bid layer, in `proposer_preferences` gossip.**\n\n**Teku is REJECTing proposer_preferences gossip** — ~3,000 in 90 min, and it's the *only* client doing it:\n```\nWARN Rejecting gossip … /proposer_preferences/ssz_snappy, reason:\n  Proposer preferences dependent root 0x0222…c7cb is at slot 107648,\n  but must be before checkpoint boundary slot 107648\n```\nSpec `get_proposer_dependent_root` = `get_block_root_at_slot(state, start_slot(epoch − MIN_SEED_LOOKAHEAD) − 1)`. For epoch 3365 that's slot **107647** — one *before* the boundary 107648. The published message's dependent_root resolves to **107648** (the boundary itself), i.e. one slot too late. So **Teku rejects correctly per spec — the publisher is emitting an off-by-one `dependent_root`.** (Lighthouse was publishing epoch 3365 at the same millisecond, so it's the likely source, but I haven't pinned the exact client.)\n\nTo Bharath's point: right — the buildoor only bids after it's seen the preferences (`Received proposer preferences from SSE` → `Creating and submitting bid`), so its bids are legit. The breakage is preferences *gossip propagation*: published preferences carry a bad dependent_root → Teku rejects + P4-penalizes forwarders → the network doesn't converge on the preferences → Nimbus then hits \"matching preferences not seen\" and rejects the bid (#8631). I haven't fully traced the propagation path to each Nimbus node, so treat the Teku→Nimbus link as \"strongly related\" rather than proven. This whole area overlaps your specs PRs #5035/#5036, so it could be version skew. Want me to pin which client emits the off-by-one dependent_root and file the publisher-side issue?\n\n**On panda-reauth:** not a cron — the only thing that ran it was the devnet-debug preflight (`ensure-panda-auth.sh`), manually, when the 1h token had lapsed. I've removed that call and updated the skill docs, so it's no longer",
+      "createdAt": "2026-06-19T11:59:51.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "used; panda-server handles refresh now. I kept a one-line `chmod 640` on the cred file in the preflight, since the server reads the host-mounted credential via group `docker` and a refresh can leave it `0600` (that was the original `datasources=null` cause) — happy to drop even that if you'd rather it be fully hands-off.",
+      "createdAt": "2026-06-19T11:59:52.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes please investigate further who is emitting wrong proposer preferences",
+      "createdAt": "2026-06-19T12:11:11.833000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Done. Replying with the definitive answer.\n\n---\n\n**It's Nimbus** — pinned it cold. Teku conveniently logs the full decoded SSZ in its reject, so I pulled `validator_index` out of every rejected message and mapped each to its publishing node via validator-ranges:\n\n- **43 / 43 distinct rejected validators are Nimbus**: nimbus-ethrex-1 (18), nimbus-erigon-1 (15), nimbus-nethermind-1 (10). **Zero** non-Nimbus.\n\n(So scratch my Lighthouse guess from earlier — that was just coincidental publish timing; LH/Lodestar/Prysm/Grandine/Teku preferences aren't rejected.)\n\n**The bug:** Nimbus computes the proposer-preferences `dependent_root` one slot too late. Spec `get_proposer_dependent_root` = block at `start_slot(epoch − MIN_SEED_LOOKAHEAD) − 1`, but Nimbus uses `start_slot(epoch − MIN_SEED_LOOKAHEAD)` — it drops the `− 1` and grabs the epoch-boundary block instead of the last slot of the previous epoch. Tell-tale: every Teku reject reads *\"dependent root is at slot X, must be before checkpoint boundary slot X\"* with the **same** X (the boundary) — exactly the signature of the missing `− 1`. Teku rejects correctly per spec; the lenient clients accept it, which is why only Teku surfaces it.\n\n**The kicker:** Nimbus is the source of *both* problems — it emits the off-by-one preferences here, **and** it's the client rejecting bids for \"preferences not seen\" (#8631). So Nimbus poisons its own preferences propagation and then penalizes the resulting bids.\n\nWant me to file this as a second Nimbus issue (proposer-preferences `dependent_root` off-by-one), or fold it into #8631?",
+      "createdAt": "2026-06-19T12:19:46.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@654267572107083777>",
+      "createdAt": "2026-06-19T12:20:13.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Nico's looped in tersec (Nimbus core dev). The most useful thing now is to hand the Nimbus dev a tight, actionable summary of both findings with the exact mechanism and evidence, so they're not parsing the whole thread. I have everything I need — no further digging required (the spec math is solid: dependent slot = `start_slot(epoch − MIN_SEED_LOOKAHEAD) − 1`, Nimbus emits the boundary slot, off by exactly the `−1`).\n\n---\n\n@tersec — quick tl;dr so you don't have to read the whole thread. Two separate Nimbus things on `glamsterdam-devnet-5` (image `ethpandaops/nimbus-eth2:glamsterdam-devnet-5`), and they compound:\n\n**1. proposer_preferences `dependent_root` off-by-one (Nimbus as publisher).** Nimbus broadcasts `proposer_preferences` whose `dependent_root` resolves to the block at `start_slot(epoch − MIN_SEED_LOOKAHEAD)` — the epoch-boundary slot — instead of `… − 1`. Spec `get_proposer_dependent_root` (gloas `p2p-interface.md`) is `get_block_root_at_slot(state, start_slot(epoch − MIN_SEED_LOOKAHEAD) − 1)`, so it should be the last slot of the previous epoch. Teku is the only client strict enough to reject it (gossip P4): *\"dependent root is at slot X, must be before checkpoint boundary slot X\"* — same X in both halves, i.e. exactly the missing `−1`. I decoded `validator_index` out of every Teku reject over 60 min and mapped via validator-ranges: **43/43 distinct rejected validators are Nimbus** (nimbus-ethrex-1, -erigon-1, -nethermind-1); zero non-Nimbus.\n\n**2. bid REJECT-vs-IGNORE (Nimbus as receiver)** — already filed: <https://github.com/status-im/nimbus-eth2/issues/8631>. Nimbus REJECTs `execution_payload_bid` when it hasn't seen the matching proposer_preferences; spec marks that `[IGNORE]` (*\"The matching signed_proposer_preferences has been seen\"*), so the REJECT P4-penalizes honest builders.\n\nThey reinforce each other: (1) means Nimbus's own preferences get dropped by spec-strict peers, and (2) means Nimbus then penalizes the bids that depend on preferences",
+      "createdAt": "2026-06-19T12:21:32.931000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the network never converged on.\n\nI can open a separate issue for #1 (or you can fold it into #8631 — your call). Happy to share the raw decoded reject messages and per-validator counts if useful.",
+      "createdAt": "2026-06-19T12:21:33.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes, seen the one-epoch-off",
+      "createdAt": "2026-06-19T12:21:57.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "(2) doesn't practically matter currently because Nimbus hasn't set up its libp2p topic parameters to make a difference, but sure",
+      "createdAt": "2026-06-19T12:23:25.568000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no penalization actually happens",
+      "createdAt": "2026-06-19T12:23:58.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we're already tracking the sending side of this, and mixing this with 8631 isn't helpful, they're separate things",
+      "createdAt": "2026-06-19T12:25:24.875000+00:00",
+      "attachments": []
+    }
+  ]
+}
