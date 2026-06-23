@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-06-22",
-  "messageCount": 1,
-  "sourceHash": "631f39d6cb3546874f878572128a4da7ed33427b47acaa456813a7d41c7e0a80",
-  "searchText": "<@&595685821026271242>",
+  "messageCount": 52,
+  "sourceHash": "b7ec6ccb033bf8d12a4be4870334c77e99076d96b810e816ac419a59b432ffb2",
+  "searchText": "<@&595685821026271242> Is it worth an increased client complexity to send ptc votes on non-canonical branches? Honest proposer will keep building on full blocks so the liveness of a side chain with lack of PTC votes won't degrade completely, what we seem to loose is builder protection which looks fine given the network conditions that have led to a fork starting beyond `dependent_root` The way I see it is that we need the protocol to be rational for all players when possible and specially when there's money involved. Without this, it's rational for the proposer to reorg payloads. It also seems to me to be a good rework that I wanted to do in the VC anyway: I believe that's the right design for duties: beacon driven instead of vc driven: the VC calls the beacon to register some keys and then regularly calls the beacon with \"do I have anything to do now?\" But yes, I believe we should not be touching this now. At least we aren't changing this at all for a while I feel like we should at least make the api change sooner than later though. If not we’d have to introduce a v2 endpoint if we don’t get to this in time for the Gloas fork. Having to maintain the current + new PTC duty flows would be pretty bad imo > The way I see it is that we need the protocol to be rational for all players when possible and specially when there's money involved. I believe there can be other concerns in the case when you have to ptc-vote on a different branch. I haven't done a rigor analysis but i believe a competing branch of two-epochs length cannot emerge in a healthy network. It indicates either a presence of a large adversary or asynchrony or the the mix of the two. In general, are ePBS guarantees and properties hold under asynchrony and large adversary? If not, it might not worth preserving that bit of security as there is already a breach in another place These forks exist on every single devnet when there's a bug. I'm not that concerned with attackers cause any attacker that can cause such a long running fork without bugs can do much more damage other ways there must be participation rate drop in these situations which weakens other guarantees including LMD-GHOST, and if that other branch attracting a non-negligible support i would suppose the drop should be significant. i am not saying honest vals should not ptc-vote on competing branches, trying to evaluate the comlexity of this from the protocol perspective The protocol complexity is zero here afaict yes, the engineering and data complexity could be an issue as the competing branch can be quite long and you'd have to compute shuffling all the time you see a block from that branch yeah this can be a significant expense I disagree. This is why I say that you should attest only if you're already following that branch. Which makes sense since for you to have processed the Payload that you need to attest to, you Must have had the CL state available, thus, attesting to \"available and timely\" should be free for the beacon. Attesting for not timely is not even necessary in this situation What of course doesn't make sense (and it's impossible) is to attest to all possible situations since that involves processing every single noon finalized slot up to head what information would be enough to keep around for each branch to make it possible to serve ptc duties? Nothing, if you sync a payload for the current slot you have all the info you need but BN should somehow know that one or several of its vals are part of PTC committee The beacon node needs to know which validators it's tracking. I don't know what other clients do but we have this already on Prysm and I suspect all clients do in this it is at most N validator indices across M branches for 2 epochs (current and next one), shouldn't be that bad What do you mean epochs? This is not the way to implement this. You just need to track which blocks you're syncing right now for the current slot. You only serve PTC attestations for the current slot and if you've synced a block then you already have everything you need oh, i see what you mean; yeah, that's even less complicated if BN knows which validator it serves yes, I can see how clients that are designed to be VC driven would have trouble here, but for us this should be absolutely trivial to implement since we already track which validators we serve I'll admit I haven't read this too closely (will backfill), but the main distinction for can-be-tricky-but-reasonable and can be become pathologically infeasible for Nimbus is basically in how many state shufflings it has to hold. Yes, we have some caches, some acceleration mechanisms, etc, but at some point mechanisms which require access to arbitrary states are a challenge implementation wise we'd only broadcast payload attestations for states that we can \"easily\" access. i dont think we'd able to cover every possible side chain ever and we definitely dont want to DoS ourselves. but a best effort approach seems easy enough to implement and should cover most of the situations we care about And in particular, this is hazardous. Anything which scales across number of sidechains fails exactly when it matters when nimbus VC requests for its duties? does this happens once per epoch or every slot? you do not need to hold anything that you aren't holding right now, this is all my point. If you do sync a block you already have everything you need. If you do not sync the block then there's no duty to serve ok, then sure at least it's not opposition on that basis There's no need to access states, the simple way to implement this is to build the payload attestation as soon as the payload is processed. and ignore votes for \"late\" on branches that aren't canonical every client has this for fulu already to track custody but I would probably still send all indices as part of the request to get the payload attestation data yes that's trivial, but only if you send them at the deadline, we might still wanna do it eagerly though, but can be handled as mentioned above, or we just do them eagerly for the canonical branch I guess that's fine for the beacon API, I do not care much about that since we don't use it, but it's 8KB per call for a node that serves 1K keys. I think you can **only** do this eagerly for the canonical branch as per this message below, thus that branch can keep the same paths as today this message why couldnt you do it eagerly for any branch? if for example you listen in on payload available sse event, every time that fires you know theres a new payload attestation you can broadcast I think you can do it eagerly for other branches as per that message above **only** if you are in a single committee and the way to do this is to always call the beacon node on payload events ah right if youre in two committees you cant every single slot cc <@504202741933932544> <@425572898787426305> <@755590043632140352> that's one idea I had what do you mean by using a local view in this case? whether the node itself saw the payload timely/available i see i dont understand how this solves the dishonest re-org issues. wouldnt validators still have free-reign to re-org whatever they want? you mean proposers? attesters would vote for FULL if they've seen the payload timely/available yeah proposers it seems to me we should always try to reach ptc quorum you can't if half of the network is offline yeah forsure, thats unavoidable. i just meant in the case of non-canonical branches i thought you were just talking about the forky network case. yeah if quorum cant be met reverting to the local view makes sense to me any case where the total count of observed ptc votes is less or equal to 256",
   "excerpts": [
     {
       "author": "tersec",
@@ -12,6 +12,414 @@
       "parent": "",
       "content": "<@&595685821026271242>",
       "createdAt": "2026-06-22T00:25:46.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Is it worth an increased client complexity to send ptc votes on non-canonical branches? Honest proposer will keep building on full blocks so the liveness of a side chain with lack of PTC votes won't degrade completely, what we seem to loose is builder protection which looks fine given the network conditions that have led to a fork starting beyond `dependent_root`",
+      "createdAt": "2026-06-22T06:16:48.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The way I see it is that we need the protocol to be rational for all players when possible and specially when there's money involved. Without this, it's rational for the proposer to reorg payloads. It also seems to me to be a good rework that I wanted to do in the VC anyway: I believe that's the right design for duties: beacon driven instead of vc driven: the VC calls the beacon to register some keys and then regularly calls the beacon with \"do I have anything to do now?\" \n\nBut yes, I believe we should not be touching this now. At least we aren't changing this at all for a while",
+      "createdAt": "2026-06-22T11:15:52.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I feel like we should at least make the api change sooner than later though. If not we’d have to introduce a v2 endpoint if we don’t get to this in time for the Gloas fork. Having to maintain the current + new PTC duty flows would be pretty bad imo",
+      "createdAt": "2026-06-22T11:24:54.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> The way I see it is that we need the protocol to be rational for all players when possible and specially when there's money involved.\n\nI believe there can be other concerns in the case when you have to ptc-vote on a different branch. I haven't done a rigor analysis but i believe a competing branch of two-epochs length cannot emerge in a healthy network. It indicates either a presence of a large adversary or asynchrony or the the mix of the two. In general, are ePBS guarantees and properties hold under asynchrony and large adversary? If not, it might not worth preserving that bit of security as there is already a breach in another place",
+      "createdAt": "2026-06-22T11:28:52.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "These forks exist on every single devnet when there's a bug. I'm not that concerned with attackers cause any attacker that can cause such a long running fork without bugs can do much more damage other ways",
+      "createdAt": "2026-06-22T11:30:50.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there must be participation rate drop in these situations which weakens other guarantees including LMD-GHOST, and if that other branch attracting a non-negligible support i would suppose the drop should be significant. i am not saying honest vals should not ptc-vote on competing branches, trying to evaluate the comlexity of this from the protocol perspective",
+      "createdAt": "2026-06-22T11:33:50.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The protocol complexity is zero here afaict",
+      "createdAt": "2026-06-22T11:53:43.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, the engineering and data complexity could be an issue as the competing branch can be quite long and you'd have to compute shuffling all the time you see a block from that branch",
+      "createdAt": "2026-06-22T11:55:10.448000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah this can be a significant expense",
+      "createdAt": "2026-06-22T12:02:27.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I disagree. This is why I say that you should attest only if you're already following that branch. Which makes sense since for you to have processed the Payload that you need to attest to, you Must have had the CL state available, thus, attesting to \"available and timely\" should be free for the beacon. \n\nAttesting for not timely is not even necessary in this situation",
+      "createdAt": "2026-06-22T12:17:20.665000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What of course doesn't make sense (and it's impossible) is to attest to all possible situations since that involves processing every single noon finalized slot up to head",
+      "createdAt": "2026-06-22T12:18:31.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what information would be enough to keep around for each branch to make it possible to serve ptc duties?",
+      "createdAt": "2026-06-22T12:18:48.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Nothing, if you sync a payload for the current slot you have all the info you need",
+      "createdAt": "2026-06-22T12:19:15.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but BN should somehow know that one or several of its vals are part of PTC committee",
+      "createdAt": "2026-06-22T12:20:37.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The beacon node needs to know which validators it's tracking. I don't know what other clients do but we have this already on Prysm and I suspect all clients do",
+      "createdAt": "2026-06-22T12:21:53.373000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "in this it is at most N validator indices across M branches for 2 epochs (current and next one), shouldn't be that bad",
+      "createdAt": "2026-06-22T12:30:02.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What do you mean epochs? This is not the way to implement this. You just need to track which blocks you're syncing right now for the current slot. You only serve PTC attestations for the current slot and if you've synced a block then you already have everything you need",
+      "createdAt": "2026-06-22T12:33:49.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh, i see what you mean; yeah, that's even less complicated if BN knows which validator it serves",
+      "createdAt": "2026-06-22T12:53:19.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, I can see how clients that are designed to be VC driven would have trouble here, but for us this should be absolutely trivial to implement since we already track which validators we serve",
+      "createdAt": "2026-06-22T12:54:59.131000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'll admit I haven't read this too closely (will backfill), but the main distinction for can-be-tricky-but-reasonable and can be become pathologically infeasible for Nimbus is basically in how many state shufflings it has to hold. Yes, we have some caches, some acceleration mechanisms, etc, but at some point mechanisms which require access to arbitrary states are a challenge",
+      "createdAt": "2026-06-22T12:56:23.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "implementation wise we'd only broadcast payload attestations for states that we can \"easily\" access. i dont think we'd able to cover every possible side chain ever and we definitely dont want to DoS ourselves. but a best effort approach seems easy enough to implement and should cover most of the situations we care about",
+      "createdAt": "2026-06-22T13:10:51.659000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And in particular, this is hazardous. Anything which scales across number of sidechains fails exactly when it matters",
+      "createdAt": "2026-06-22T13:12:09.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "when nimbus VC requests for its duties? does this happens once per epoch or every slot?",
+      "createdAt": "2026-06-22T13:13:51.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you do not need to hold anything that you aren't holding right now, this is all my point. If you do sync a block you already have everything you need. If you do not sync the block then there's no duty to serve",
+      "createdAt": "2026-06-22T13:15:10.011000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, then sure",
+      "createdAt": "2026-06-22T13:15:30.462000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "at least it's not opposition on that basis",
+      "createdAt": "2026-06-22T13:15:40.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "There's no need to access states, the simple way to implement this is to build the payload attestation as soon as the payload is processed.",
+      "createdAt": "2026-06-22T13:16:21.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and ignore votes for \"late\" on branches that aren't canonical",
+      "createdAt": "2026-06-22T13:16:40.270000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "every client has this for fulu already to track custody but I would probably still send all indices as part of the request to get the payload attestation data",
+      "createdAt": "2026-06-22T13:36:10.456000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes that's trivial, but only if you send them at the deadline, we might still wanna do it eagerly though, but can be handled as mentioned above, or we just do them eagerly for the canonical branch",
+      "createdAt": "2026-06-22T13:37:22.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I guess that's fine for the beacon API, I do not care much about that since we don't use it, but it's 8KB per call for a node that serves 1K keys.",
+      "createdAt": "2026-06-22T13:47:07.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think you can **only** do this eagerly for the canonical branch as per this message below, thus that branch can keep the same paths as today",
+      "createdAt": "2026-06-22T13:47:44.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this message",
+      "createdAt": "2026-06-22T13:47:57.926000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "why couldnt you do it eagerly for any branch? if for example you listen in on payload available sse event, every time that fires you know theres a new payload attestation you can broadcast",
+      "createdAt": "2026-06-22T13:49:24.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think you can do it eagerly for other branches as per that message above **only** if you are in a single committee",
+      "createdAt": "2026-06-22T13:50:16.498000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and the way to do this is to always call the beacon node on payload events",
+      "createdAt": "2026-06-22T13:50:41.701000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ah right if youre in two committees you cant",
+      "createdAt": "2026-06-22T13:50:42.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "every single slot",
+      "createdAt": "2026-06-22T13:50:46.211000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cc <@504202741933932544> <@425572898787426305> <@755590043632140352> that's one idea I had",
+      "createdAt": "2026-06-22T14:30:08.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what do you mean by using a local view in this case?",
+      "createdAt": "2026-06-22T14:31:26.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "whether the node itself saw the payload timely/available",
+      "createdAt": "2026-06-22T14:31:46.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i see",
+      "createdAt": "2026-06-22T14:32:39.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i dont understand how this solves the dishonest re-org issues. wouldnt validators still have free-reign to re-org whatever they want?",
+      "createdAt": "2026-06-22T20:19:05.853000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean proposers?",
+      "createdAt": "2026-06-22T20:20:27.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "attesters would vote for FULL if they've seen the payload timely/available",
+      "createdAt": "2026-06-22T20:21:06.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah proposers",
+      "createdAt": "2026-06-22T20:21:37.597000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it seems to me we should always try to reach ptc quorum",
+      "createdAt": "2026-06-22T20:24:36.154000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can't if half of the network is offline",
+      "createdAt": "2026-06-22T20:24:59.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah forsure, thats unavoidable. i just meant in the case of non-canonical branches",
+      "createdAt": "2026-06-22T20:25:46.119000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i thought you were just talking about the forky network case. yeah if quorum cant be met reverting to the local view makes sense to me",
+      "createdAt": "2026-06-22T20:27:33.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "any case where the total count of observed ptc votes is less or equal to 256",
+      "createdAt": "2026-06-22T20:29:44.029000+00:00",
       "attachments": []
     }
   ]
