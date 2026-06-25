@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "channel": "post-quantum",
+  "date": "2026-06-24",
+  "messageCount": 35,
+  "sourceHash": "a39436f256e5924495b200e45297bec33dcfd29032ccb23f0f5226891317ddd0",
+  "searchText": "<potuz0> What's the size of the aggregated attestations for 1M validators divided by 32? <potuz0> PQ I mean <GottfriedHerold> 32 bits or 32 bytes? <emile17> re: **@potuz0** > What's the size of the aggregated attestations for 1M validators divided by 32? The stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (https://github.com/leanEthereum/leanVM/blob/main/misc/images/fancy-aggregation.png) (last column). <Benewagner> re: **@emile17** > The stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (last column). That’s the size of an aggregate. If you want to divide that by 32 you get 8 KiB or 4 KiB respectively <potuz0> re: **@GottfriedHerold** > 32 bits or 32 bytes? 1M/32 meaning approx 31K keys. Didn't want to do the division :) <potuz0> re: **@emile17** > The stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (last column). Thanks! So if I keep parameters as today and take about 8 different aggregates per block I'd expect 2MB blocks? Or is it guaranteed that we would have an overlapping system that will guarantee a single aggregate is enough? <potuz0> Nvm, I guess 2Mb is realistic <emile17> you can always further aggregate your 8 previously aggregated signatures, with or without overlap. <potuz0> re: **@emile17** > you can always further aggregate your 8 previously aggregated signatures, with or without overlap. Not if they are for different heada <emile17> You can still do it ;) <emile17> See for instance here (https://github.com/leanEthereum/leanVM/blob/3ed1241b5e9c10d88764c2f4f453b0d5e5e4d4f4/tests/test_multisignatures.rs#L121): `single_message_a` and `single_message_b`, two previously aggregated signatures, on different messages (i.e. different heads) are aggregated together <potuz0> Ok, so just to be clear, you're telling me that the aggregation scheme is such that the proposer will be able to pack 31K attestations, evenly split among 8 different heads, with the proof to verify them in 256KBytes, is this the expectation? <emile17> Yes <potuz0> Thanks <potuz0> Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. 1. Attester has on-chain a PQ safe pubkey. 2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. 3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. 4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. 5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. 6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. 7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. 8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. 9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both proposers including <clipped message> <mratsim> re: **@potuz0** > Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. 1. Attester has on-chain a PQ safe pubkey. 2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. 3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. 4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. 5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. 6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. 7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. 8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. 9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both p <clipped message> <potuz0> re: **@mratsim** > Is the PQ safe pubkey coming from EIP-2333? I don't undersand, the PQ safe pubkey has to be an actual PQ-safe signing scheme <potuz0> whatever you have now in mind using Hash based systems, lattice, whatever you want to use, but I want to take the PQ-signing out of the hot path <potuz0> One of the biggest flaws of the above design is about slashing: an attacker can break the BLS key after the fact and submit a slashable offense, however, I believe this to be pretty contained given the anchor root and slot being already set, so no double signing on different shufflings for example <emile17> re: **@potuz0** > Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. 1. Attester has on-chain a PQ safe pubkey. 2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. 3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. 4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. 5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. 6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. 7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. 8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. 9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both p <clipped message> <potuz0> re: **@emile17** > Iiuc, at every epoch, a validator would have to download in total 1M (total number of validators) * 128 KiB (size of a zk-stark) = 128 GiB, what do I miss ? yeah if the minimum size to prove correct generation is 128KB then that's a killer immediately <potuz0> or even proof correct signing is 128KB <potuz0> But then an aggregator in the current scheme would have such requirements as well isn't it? <potuz0> at least divided by the committee <emile17> re: **@potuz0** > yeah if the minimum size to prove correct generation is 128KB then that's a killer immediately We can improve. I recall a zk-stark developped by starkware: ziggy (https://x.com/EliBenSasson/status/1332057814131494917?s=20), to create a signature where the private key is a hash-preimage, that was arround 10 KiB (likely with conjectures). But it would still be 10 GiB of download, per epoch, per validator. <emile17> re: **@potuz0** > But then an aggregator in the current scheme would have such requirements as well isn't it? I don't think so, because in the current scheme, as an aggregator, you see either raw XMSS signatures (on the order of the kilobyte), or previously aggregated signatures (a few hundreds bytes per attestation, potentially even less, thanks to zk-stark compression). <potuz0> Thanks a lot this has been quite instructive. So If instead of sending a zk proof of correct derivation I send just the signature, then I can count with 1KB, but then I need to deal with equivocations somehow <mratsim> re: **@potuz0** > I don't undersand, the PQ safe pubkey has to be an actual PQ-safe signing scheme EIP-2333 generates a PQ safe secret key. Then deriving a PQ safe keypair from it is just deriving a pubkey from a seckey <mratsim> This allows validators to reuse their seed phrase <potuz0> re: **@mratsim** > EIP-2333 generates a PQ safe secret key. Then deriving a PQ safe keypair from it is just deriving a pubkey from a seckey But that BLS key can only be used once right? In that case yes you could envision systems with ephemeral BLS keys that keep rotating on chain. But the fundamental problem I think I have is dealing with the equivocation on the message: \"I'm going to be attesting with this next BLS key\" . I believe if we solve this problem all others are minor. But @emile17 seems to be hinting (well more than hinting, stating) that zk proofs are no solution to this. And yeah this seems to be fundamental <emile17> re: **@potuz0** > But that BLS key can only be used once right? In that case yes you could envision systems with ephemeral BLS keys that keep rotating on chain. But the fundamental problem I think I have is dealing with the equivocation on the mes",
+  "excerpts": [
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> What's the size of the aggregated attestations for 1M validators divided by 32?",
+      "createdAt": "2026-06-24T16:19:10.295000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> PQ I mean",
+      "createdAt": "2026-06-24T16:19:20.491000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<GottfriedHerold> 32 bits or 32 bytes?",
+      "createdAt": "2026-06-24T16:33:38.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> re: **@potuz0**\n> What's the size of the aggregated attestations for 1M validators divided by 32?\nThe stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (https://github.com/leanEthereum/leanVM/blob/main/misc/images/fancy-aggregation.png) (last column).",
+      "createdAt": "2026-06-24T16:33:59.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<Benewagner> re: **@emile17**\n> The stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (last column).\nThat’s the size of an aggregate. If you want to divide that by 32 you get 8 KiB or 4 KiB respectively",
+      "createdAt": "2026-06-24T16:34:57.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@GottfriedHerold**\n> 32 bits or 32 bytes?\n1M/32 meaning approx 31K keys. Didn't want to do the division :)",
+      "createdAt": "2026-06-24T16:36:40.985000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@emile17**\n> The stark size doesn't grow that much with the number of aggregated signatures: O(log(n).log(log(n))). What matters is really the rate of the Reed Solomon code. As a general answer I would say ≈ 256 KiB. If you are fine waiting a bit (300ms) more in the final recursive aggregation, you can even get to 128 KiB. Details can be found here (last column).\nThanks! So if I keep parameters as today and take about 8 different aggregates per block I'd expect 2MB blocks? Or is it guaranteed that we would have an overlapping system that will guarantee a single aggregate is enough?",
+      "createdAt": "2026-06-24T16:39:11.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Nvm, I guess 2Mb is realistic",
+      "createdAt": "2026-06-24T16:40:01.821000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> you can always further aggregate your 8 previously aggregated signatures, with or without overlap.",
+      "createdAt": "2026-06-24T16:40:03.047000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@emile17**\n> you can always further aggregate your 8 previously aggregated signatures, with or without overlap.\nNot if they are for different heada",
+      "createdAt": "2026-06-24T16:40:23.709000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> You can still do it ;)",
+      "createdAt": "2026-06-24T16:40:37.065000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> See for instance here (https://github.com/leanEthereum/leanVM/blob/3ed1241b5e9c10d88764c2f4f453b0d5e5e4d4f4/tests/test_multisignatures.rs#L121): `single_message_a` and `single_message_b`, two previously aggregated signatures, on different messages (i.e. different heads) are aggregated together",
+      "createdAt": "2026-06-24T16:43:28.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Ok, so just to be clear, you're telling me that the aggregation scheme is such that the proposer will be able to pack 31K attestations, evenly split among 8 different heads, with the proof to verify them in 256KBytes, is this the expectation?",
+      "createdAt": "2026-06-24T16:44:31.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> Yes",
+      "createdAt": "2026-06-24T16:45:01.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Thanks",
+      "createdAt": "2026-06-24T16:45:08.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. \n\n1. Attester has on-chain a PQ safe pubkey. \n2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. \n3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. \n4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. \n5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. \n6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. \n7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. \n8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. \n9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both proposers including <clipped message>",
+      "createdAt": "2026-06-24T16:59:48.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mratsim> re: **@potuz0**\n> Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. \n\n1. Attester has on-chain a PQ safe pubkey. \n2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. \n3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. \n4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. \n5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. \n6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. \n7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. \n8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. \n9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both p <clipped message>",
+      "createdAt": "2026-06-24T17:04:03.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@mratsim**\n> Is the PQ safe pubkey coming from EIP-2333?\nI don't undersand, the PQ safe pubkey has to be an actual PQ-safe signing scheme",
+      "createdAt": "2026-06-24T17:05:12.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> whatever you have now in mind using Hash based systems, lattice, whatever you want to use, but I want to take the PQ-signing out of the hot path",
+      "createdAt": "2026-06-24T17:05:43.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> One of the biggest flaws of the above design is about slashing: an attacker can break the BLS key after the fact and submit a slashable offense, however, I believe this to be pretty contained given the anchor root and slot being already set, so no double signing on different shufflings for example",
+      "createdAt": "2026-06-24T17:07:09.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> re: **@potuz0**\n> Reason I ask is because I am trying unsuccesfully to get some feedback/immediate blocker as to why not go with the following. \n\n1. Attester has on-chain a PQ safe pubkey. \n2. Every epoch it generates a BLS keypair, this generation is deterministic, it takes as seed the PQ secret, an anchor root and a slot when it's going to attest. \n3. During the epoch they broadcast a message signed with the PQ key with the BLS pubkey (or a variant in which they only send the hash instead if you're worried that it can be cracked in minutes) and a ZK proof of correct derivation. The attester has minutes to generate this proof. The purpose of the proof is to ensure that the attester cannot equivocate on this message. \n4. At attestation time the attester simply signs with the provided BLS pair and anyone can aggregate. In the variant where it sent a hash it also needs to provide an opening, point being that anyone forging this attestation has to crack it in milliseconds, not seconds, not minutes. \n5. Anyone can aggregate these attestations and we do not need to rely on centralized aggregators or a new role for aggregators. \n6. Only people that have seen the broadcast in 3 can verify such aggregates. But anyone that has seen the messages can verify if the aggregate is invalid. \n7. Proposer only includes aggregations that it can verify. Because of the non-equivocation property of 3, only malicious proposers can include invalid aggregates. \n8. Attesters that have seen the message 3 can verify the aggregate/block and will only attest to blocks they can verify. Blocks with invalid aggregates can be made canonical, aggregation verification is not part of the STF. But because of the non-equivocating nature, only malicious attesters can vote for invalid aggregates. \n9. Anyone can prove that an attester/proposer is malicious by providing the original PQ signed message that had deterministic BLS key. So both p <clipped message>",
+      "createdAt": "2026-06-24T17:08:14.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@emile17**\n> Iiuc, at every epoch, a validator would have to download in total 1M (total number of validators) * 128 KiB (size of a zk-stark) = 128 GiB, what do I miss ?\nyeah if the minimum size to prove correct generation is 128KB then that's a killer immediately",
+      "createdAt": "2026-06-24T17:12:56.165000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> or even proof correct signing is 128KB",
+      "createdAt": "2026-06-24T17:13:10.900000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> But then an aggregator in the current scheme would have such requirements as well isn't it?",
+      "createdAt": "2026-06-24T17:14:20.630000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> at least divided by the committee",
+      "createdAt": "2026-06-24T17:14:35.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> re: **@potuz0**\n> yeah if the minimum size to prove correct generation is 128KB then that's a killer immediately\nWe can improve. I recall a zk-stark developped by starkware: ziggy (https://x.com/EliBenSasson/status/1332057814131494917?s=20), to create a signature where the private key is a hash-preimage, that was arround 10 KiB (likely with conjectures). But it would still be 10 GiB of download, per epoch, per validator.",
+      "createdAt": "2026-06-24T17:18:50.339000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> re: **@potuz0**\n> But then an aggregator in the current scheme would have such requirements as well isn't it?\nI don't think so, because in the current scheme, as an aggregator, you see either raw XMSS signatures (on the order of the kilobyte), or previously aggregated signatures (a few hundreds bytes per attestation, potentially even less, thanks to zk-stark compression).",
+      "createdAt": "2026-06-24T17:25:04.662000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> Thanks a lot this has been quite instructive. So If instead of sending a zk proof of correct derivation I send just the signature, then I can count with 1KB, but then I need to deal with equivocations somehow",
+      "createdAt": "2026-06-24T17:31:42.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mratsim> re: **@potuz0**\n> I don't undersand, the PQ safe pubkey has to be an actual PQ-safe signing scheme\nEIP-2333 generates a PQ safe secret key. Then deriving a PQ safe keypair from it is just deriving a pubkey from a seckey",
+      "createdAt": "2026-06-24T17:33:44.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<mratsim> This allows validators to reuse their seed phrase",
+      "createdAt": "2026-06-24T17:35:03.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@mratsim**\n> EIP-2333 generates a PQ safe secret key. Then deriving a PQ safe keypair from it is just deriving a pubkey from a seckey\nBut that BLS key can only be used once right? In that case yes you could envision systems with ephemeral BLS keys that keep rotating on chain. But the fundamental problem I think I have is dealing with the equivocation on the message: \"I'm going to be attesting with this next BLS key\" . I believe if we solve this problem all others are minor. But @emile17 seems to be hinting (well more than hinting, stating) that zk proofs are no solution to this. And yeah this seems to be fundamental",
+      "createdAt": "2026-06-24T18:00:35.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<emile17> re: **@potuz0**\n> But that BLS key can only be used once right? In that case yes you could envision systems with ephemeral BLS keys that keep rotating on chain. But the fundamental problem I think I have is dealing with the equivocation on the message: \"I'm going to be attesting with this next BLS key\" . I believe if we solve this problem all others are minor. But @emile17 seems to be hinting (well more than hinting, stating) that zk proofs are no solution to this. And yeah this seems to be fundamental\nOne solution to reduce bandwidth usage could be to aggregate (via recursion) the ZK-STARKs attesting correct derivation of the BLS pubkey.",
+      "createdAt": "2026-06-24T18:05:53.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@emile17**\n> One solution to reduce bandwidth usage could be to aggregate (via recursion) the ZK-STARKs attesting correct derivation of the BLS pubkey.\nThat brings me back to the problem I want to solve which is to avoid the need of aggregators. Although it's already a good improvement in that aggregation is off the hot path",
+      "createdAt": "2026-06-24T18:10:55.836000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<TomasGruner> re: **@potuz0**\n> That brings me back to the problem I want to solve which is to avoid the need of aggregators. Although it's already a good improvement in that aggregation is off the hot path\n@potuz0 About moving aggregation off the hot-path, one solution is having Goldfish as fork-choice, with a \"heartbeat committee\" of ~256 validators driving the non-finalized chain. Since there's a small number of signatures, we can skip aggregation for them (2Kb x 256 = ~0.5Mb, there are ways to further reduce this), leaving the need of aggregation for finality votes only, which can be aggregated in the background over multiple slots.",
+      "createdAt": "2026-06-24T18:20:31.143000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "bridge-bot",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<potuz0> re: **@TomasGruner**\n> @potuz0 About moving aggregation off the hot-path, one solution is having Goldfish as fork-choice, with a \"heartbeat committee\" of ~256 validators driving the non-finalized chain. Since there's a small number of signatures, we can skip aggregation for them (2Kb x 256 = ~0.5Mb, there are ways to further reduce this), leaving the need of aggregation for finality votes only, which can be aggregated in the background over multiple slots.\nYeah, I'm aware of this being the plan, but I'm very skeptical of a system in which the whole finality gadget is gatekeeped by a smaller set of aggregators. Perhaps the idea of using ephemeral keys is useless but I suspect that if equivocation on the ephemereal key can be ruled out, all the other problems are minor, and we can get rid of the aggregators",
+      "createdAt": "2026-06-24T18:56:33.794000+00:00",
+      "attachments": []
+    }
+  ]
+}
