@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "interop-🌃",
   "date": "2026-06-30",
-  "messageCount": 18,
-  "sourceHash": "177cbedcc4ad4532654c8b1a6c44b175d2bdc06bab9479fb69d6c28d6be7a0fb",
-  "searchText": "Yes, I think we can look into it i think prysm-ethrex-1 is stuck due to prysm not syncing: ``` [2026-06-30 06:21:43.82] WARN initial-sync: Execution payload envelope processing failure error=beacon block root 0x9a1c0711f0bf41b8367047a8aa12619f0d162136081ea3c747d5ad392315a7a4 not found in forkchoice firstSlot=32248 [2026-06-30 06:21:48.42] DEBUG initial-sync: Could not process batch blocks due to missing parent firstSlot=32312 lastSlot=32312 missingParent=0x17f81ca6ba5dd036691768e8b062032ae23bacd7316dd840145871eaf64a5462 root=0x81024cffe15e4e5d473d1871270cd66edb83eeda5dd4e88a2ca8c1735b76dbaf [2026-06-30 06:10:36.48] DEBUG initial-sync: Downscore peer newScore=5 peerID=16Uiu2HAkzk5katzgiR46xXSfCE38DguUuJW27cp2SJRVVeKgMvSK reason=block with root 0x941390faf3412d8e06e87197ec15044c8641b8dbd864a6d55f8810de579523ac does not build on top of the empty block: invalid data returned from peer ``` however buildoor prysm ethrex seems fine Thanks, will look when I wake up. Will need to figure out why we go into init sync to start with. did you guys restart the execution node? I'd like to get the logs around epoch 980 to see what caused the split not that i know, maybe a watchtower push made it restart panda cli can fetch them ok, anyway I did find a stupid lack of optimization on our part: We submit a block and our peers start immediately sending us our own data column sidecars and we ignore them cause we haven't imported our own block yet and we then fail to build the next block correctly This shouldn't break the chain though and it seems that ethrex fails to construct the next block in 31388, we get this message ``` [2026-06-29 20:07:48.39] DEBUG rpc/validator: Received execution payload from local engine value=&{neg:false abs:[195389954000000000]} ``` Yeah <@1443132403001589771> I'm pretty sure ethrex had a problem to sync the payload envelope for 31388 which would have caused a reorg on ethrex and that breaks Prysm there, we had a bug that made us attempt to reorg that payload (because we never synced it) but ethrex never recovers from that I'll fix our issue, but the stall seems to come from ethrex not recovering from that slot We declare that payload unavailable cause we can't get the columns and then we're stuck forever I'll restart that node cause it'll catch up to head now, that I have the diagnosis, but you guys should look into what happened at that slot, will fix our broadcasting issue as well just installed the panda cli to check ethrex logs for that window show that it didn't fail to build or reorg at 31388 ( 2026-06-29): 20:07:31 FCU V4 (payload attrs) -> building slot=31388 20:07:43 BLOCK 22927 0x0e5fb318… executed, valid (canonical 31388) 20:07:48 FCU V4 (payload attrs) -> building slot=31389 20:07:48 BLOCK 22927 0x76eccfbc… executed, valid (the 31389 that got orphaned) 20:18:51 FCU V4 (payload attrs) -> building slot=31445 (resumes as soon as the CL calls again) It built payloads for both 31388 and 31389, executed both fork candidates without an error, and there are zero error/warn/reorg lines on the EL from 20:00 (06-29) until a watchtower image update restarted it at 12:02 (06-30). The EL only goes idle in the spans where it receives no FCU/newPayload from the beacon i can't see anything odd from the logs That's very weird, we never get to sync the payload for 31388, but in fact it's not your payload, we ditched your payload and took Buildoors, so it wasn't our columns that we didn't sync, it was buildoors may be the same thing as always, we get data columns before the block and we do not sync them What do other clients do here? do you guys put the columns in a pending queue? isn't this a brutal DOS?",
+  "messageCount": 26,
+  "sourceHash": "f0b99fd75b55dec8b7cc3c28bbf520d0ce9f8d5276f68418a69b8e89d3900dc4",
+  "searchText": "Yes, I think we can look into it i think prysm-ethrex-1 is stuck due to prysm not syncing: ``` [2026-06-30 06:21:43.82] WARN initial-sync: Execution payload envelope processing failure error=beacon block root 0x9a1c0711f0bf41b8367047a8aa12619f0d162136081ea3c747d5ad392315a7a4 not found in forkchoice firstSlot=32248 [2026-06-30 06:21:48.42] DEBUG initial-sync: Could not process batch blocks due to missing parent firstSlot=32312 lastSlot=32312 missingParent=0x17f81ca6ba5dd036691768e8b062032ae23bacd7316dd840145871eaf64a5462 root=0x81024cffe15e4e5d473d1871270cd66edb83eeda5dd4e88a2ca8c1735b76dbaf [2026-06-30 06:10:36.48] DEBUG initial-sync: Downscore peer newScore=5 peerID=16Uiu2HAkzk5katzgiR46xXSfCE38DguUuJW27cp2SJRVVeKgMvSK reason=block with root 0x941390faf3412d8e06e87197ec15044c8641b8dbd864a6d55f8810de579523ac does not build on top of the empty block: invalid data returned from peer ``` however buildoor prysm ethrex seems fine Thanks, will look when I wake up. Will need to figure out why we go into init sync to start with. did you guys restart the execution node? I'd like to get the logs around epoch 980 to see what caused the split not that i know, maybe a watchtower push made it restart panda cli can fetch them ok, anyway I did find a stupid lack of optimization on our part: We submit a block and our peers start immediately sending us our own data column sidecars and we ignore them cause we haven't imported our own block yet and we then fail to build the next block correctly This shouldn't break the chain though and it seems that ethrex fails to construct the next block in 31388, we get this message ``` [2026-06-29 20:07:48.39] DEBUG rpc/validator: Received execution payload from local engine value=&{neg:false abs:[195389954000000000]} ``` Yeah <@1443132403001589771> I'm pretty sure ethrex had a problem to sync the payload envelope for 31388 which would have caused a reorg on ethrex and that breaks Prysm there, we had a bug that made us attempt to reorg that payload (because we never synced it) but ethrex never recovers from that I'll fix our issue, but the stall seems to come from ethrex not recovering from that slot We declare that payload unavailable cause we can't get the columns and then we're stuck forever I'll restart that node cause it'll catch up to head now, that I have the diagnosis, but you guys should look into what happened at that slot, will fix our broadcasting issue as well just installed the panda cli to check ethrex logs for that window show that it didn't fail to build or reorg at 31388 ( 2026-06-29): 20:07:31 FCU V4 (payload attrs) -> building slot=31388 20:07:43 BLOCK 22927 0x0e5fb318… executed, valid (canonical 31388) 20:07:48 FCU V4 (payload attrs) -> building slot=31389 20:07:48 BLOCK 22927 0x76eccfbc… executed, valid (the 31389 that got orphaned) 20:18:51 FCU V4 (payload attrs) -> building slot=31445 (resumes as soon as the CL calls again) It built payloads for both 31388 and 31389, executed both fork candidates without an error, and there are zero error/warn/reorg lines on the EL from 20:00 (06-29) until a watchtower image update restarted it at 12:02 (06-30). The EL only goes idle in the spans where it receives no FCU/newPayload from the beacon i can't see anything odd from the logs That's very weird, we never get to sync the payload for 31388, but in fact it's not your payload, we ditched your payload and took Buildoors, so it wasn't our columns that we didn't sync, it was buildoors may be the same thing as always, we get data columns before the block and we do not sync them What do other clients do here? do you guys put the columns in a pending queue? isn't this a brutal DOS? i checked buildoor-prysm-ethrex-1, ethrex was in a crash loop the whole window `Error: Unknown state found in DB. Please run ethrex removedb` from 10:47 to 21:53 (06-29), this is a bug we fixed yesterday. So buildoor's EL was offline during 31388, which maybe explains the missing/bad buildoor payload/columns panda cli can also create charts Ok, found the culprit, we do deal with pending queues for these devnets scenarios, but they cover all blocks except the ones we propose, will push a fix and hope that this doesn't trigger again It's super crazy though, I wonder how other teams didn't hit this issue: we propose a block, and the builder's sidecars reach us before we even synced our own block! so we ignored them and then can't sync the payload I don't know why later we didn't get the sidecars, will need to dig that further was this then the root cause for the entire failure? Compliance tests PR status: ✅ Teku ❓ Closed in favour of own PR: Lighthouse ❓ WIP: Prysm (Review pending?) ❓ Closed in favour of own PR: Lodestar ❓ Closed in favour of own PR: Nimbus ❓Grandine",
   "excerpts": [
     {
       "author": "matkt0",
@@ -154,6 +154,76 @@
       "parent": "",
       "content": "What do other clients do here? do you guys put the columns in a pending queue? isn't this a brutal DOS?",
       "createdAt": "2026-06-30T13:02:49.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "",
+      "content": "i checked buildoor-prysm-ethrex-1, ethrex was in a crash loop the whole window `Error: Unknown state found in DB. Please run ethrex removedb` from 10:47 to 21:53 (06-29), this is a bug we fixed yesterday. So buildoor's EL was offline during 31388, which maybe explains the missing/bad buildoor payload/columns",
+      "createdAt": "2026-06-30T13:11:30.678000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Testing",
+      "parent": "",
+      "content": "panda cli can also create charts",
+      "createdAt": "2026-06-30T13:12:42.529000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "prysm_ethrex_gap.png",
+          "content": "08d7e998726a5734b1458d95ac49da85d8b2e66a618cd38dfd768c48821deb97"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ok, found the culprit, we do deal with pending queues for these devnets scenarios, but they cover all blocks except the ones we propose, will push a fix and hope that this doesn't trigger again",
+      "createdAt": "2026-06-30T13:48:54.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It's super crazy though, I wonder how other teams didn't hit this issue: we propose a block, and the builder's sidecars reach us before we even synced our own block!",
+      "createdAt": "2026-06-30T15:03:28.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "so we ignored them and then can't sync the payload",
+      "createdAt": "2026-06-30T15:03:40.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't know why later we didn't get the sidecars, will need to dig that further",
+      "createdAt": "2026-06-30T15:04:03.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "was this then the root cause for the entire failure?",
+      "createdAt": "2026-06-30T15:49:55.979000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "",
+      "content": "Compliance tests PR status:\n✅ Teku\n❓ Closed in favour of own PR: Lighthouse\n❓ WIP: Prysm (Review pending?)\n❓ Closed in favour of own PR: Lodestar\n❓ Closed in favour of own PR: Nimbus\n❓Grandine",
+      "createdAt": "2026-06-30T16:16:57.936000+00:00",
       "attachments": []
     }
   ]
