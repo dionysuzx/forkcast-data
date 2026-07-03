@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-07-03",
+  "messageCount": 12,
+  "sourceHash": "77d9194b8c24aef77d4b30264be9e003338fd7f3e502a93fe98d5c94d1288868",
+  "searchText": "Hello <@755590043632140352> <@586161934425128960>. There was a finding that came in the bug bounty program a couple of months ago, but The PoC given was \"gibberish\", and super hard to read, mostly AI slop. so we ended up dropping it and the researcher never came back pushing for it. Recently one of our swarms though came back with a very similar bug, and has made it much more concise and included a consensus spec test. I was wondering if you could take a look, I know sometimes we can create stuff from an \"impossible state\" and it still passes. https://gist.github.com/0xMushow/064e2d89a517f9ebe6285ce9d09cfabc This is flawed: > However, if the payment met quorum before eviction, epoch processing already appended payment.withdrawal to state.builder_pending_withdrawals. There is no possibility of achieving quorum if there hasn't been any blocks from the parent until this block. Quorum is on-chain and no attestations could have been processed I stopped reading here, but I assume you can get an AI to vet that the PoC starts with a flawed state in which the quorum is applied before the epoch transition, which I claim it's impossible also notice that in general, quorum is irrelevant for a payload that **has been included**, the payment processed in this function is for payloads that have been included and thus we just charge the builder concluded the same, the poc tests the reporter added does `_attest_parent_bid_to_quorum` which calls `process_attestation` but not actually processes a block thanks for the quick analysis. it's so easy to build a test that passes but has invalid state Yeah that's why fuzzing STF is hard I just asked claude opus 4.8 whether the report is valid or not and it found the flaw ``` Why it can't actually happen The double payment requires a single state where payment[P] both (a) reached quorum (so epoch settlement paid it) and (b) has P as the immediate parent that is ≥2 epochs stale (so the direct-append branch fires). Those two are mutually exclusive on any one chain history: - latest_execution_payload_bid is written in exactly one place — process_execution_payload_bid (beacon-chain.md:1590), once per block, to that block's own bid. So parent_bid.slot is always the slot of the immediately preceding canonical block. For the elif to fire, that preceding block must be P and must be 2+ epochs old ⇒ a 2+ epoch gap of empty slots between P and the current block. - Weight on payment[P] only comes from same-slot attestations for slot P, which are added by process_attestation — and that only runs inside process_block. Those attestations must be included in blocks built on top of P, during epochs E/E+1 (process_attestation rejects target.epoch older than previous: beacon-chain.md:1751). The clean way to see the contradiction: a block built directly on P inherits P's post-state, in which payment[P] has weight = 0 (attestations for P are only ever added by later blocks, which would then be the parent instead of P). So whenever the elif parent_bid.value > 0 branch fires, the evicted entry provably had weight 0 → epoch settlement never paid it → the direct append is the sole payment. Conversely, any block that gave payment[P] quorum weight becomes the new parent, so P is never the stale immediate parent. The two branches partition cleanly; no entry is paid twice. ``` Also quick question but what's the rationale behind the 256 here? [Here](https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/beacon-chain.md?plain=1#L218) : `MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD uint64(2**8) (= 256)` In the EL [EIP 8282](https://eips.ethereum.org/EIPS/eip-8282) the deposit cap seems to be `MAX_DEPOSIT_REQUESTS_PER_BLOCK = 64`, and the builder exit constant on the CL side (`MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 16`) matches its EIP counterpart (`MAX_EXIT_REQUESTS_PER_BLOCK = 16`) So the deposit side is the odd one out at 4x the EIP value? The EL EIP also gives a security rationale for that cap, *see screenshot below.* So is the CL's `256` intentionally a looser wire-format ceiling (relying on the EL to enforce the `64` drain cap, so a valid payload never actually exceeds `64`), or should it track `64` to match the per-block verification bound the EIP describes? Just want to understand the reasoning. no, we just haven't updated the CL spec yet, we merged https://github.com/ethereum/sys-asm/pull/50 yesterday https://github.com/ethereum/EIPs/pull/11859 also, fixes some stuff in the EIP https://github.com/ethereum/consensus-specs/pull/5420",
+  "excerpts": [
+    {
+      "author": "mushow0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hello <@755590043632140352> <@586161934425128960>. \nThere was a finding that came in the bug bounty program a couple of months ago, but The PoC given was \"gibberish\", and super hard to read, mostly AI slop. so we ended up dropping it and the researcher never came back pushing for it. \n\nRecently one of our swarms though came back with a very similar bug, and has made it much more concise and included a consensus spec test. \n\nI was wondering if you could take a look, I know sometimes we can create stuff from an \"impossible state\" and it still passes. \n\nhttps://gist.github.com/0xMushow/064e2d89a517f9ebe6285ce9d09cfabc",
+      "createdAt": "2026-07-03T11:30:51.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is flawed:\n> However, if the payment met quorum before eviction, epoch processing already appended payment.withdrawal to state.builder_pending_withdrawals.\nThere is no possibility of achieving quorum if there hasn't been any blocks from the parent until this block. Quorum is on-chain and no attestations could have been processed",
+      "createdAt": "2026-07-03T11:42:26.393000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I stopped reading here, but I assume you can get an AI to vet that the PoC starts with a flawed state in which the quorum is applied before the epoch transition, which I claim it's impossible",
+      "createdAt": "2026-07-03T11:43:13.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "also notice that in general, quorum is irrelevant for a payload that **has been included**, the payment processed in this function is for payloads that have been included and thus we just charge   the builder",
+      "createdAt": "2026-07-03T11:46:00.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "concluded the same, the poc tests the reporter added does `_attest_parent_bid_to_quorum` which calls `process_attestation` but not actually processes a block",
+      "createdAt": "2026-07-03T11:49:15.866000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mushow0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "thanks for the quick analysis. it's so easy to build a test that passes but has invalid state",
+      "createdAt": "2026-07-03T11:51:20.312000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah that's why fuzzing STF is hard",
+      "createdAt": "2026-07-03T11:52:12.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I just asked claude opus 4.8 whether the report is valid or not and it found the flaw\n```\n  Why it can't actually happen\n\n  The double payment requires a single state where payment[P] both (a) reached quorum (so epoch settlement paid it) and (b) has P as the immediate parent that is ≥2 epochs stale (so the\n  direct-append branch fires). Those two are mutually exclusive on any one chain history:\n\n  - latest_execution_payload_bid is written in exactly one place — process_execution_payload_bid (beacon-chain.md:1590), once per block, to that block's own bid. So parent_bid.slot is always\n  the slot of the immediately preceding canonical block. For the elif to fire, that preceding block must be P and must be 2+ epochs old ⇒ a 2+ epoch gap of empty slots between P and the\n  current block.\n  - Weight on payment[P] only comes from same-slot attestations for slot P, which are added by process_attestation — and that only runs inside process_block. Those attestations must be\n  included in blocks built on top of P, during epochs E/E+1 (process_attestation rejects target.epoch older than previous: beacon-chain.md:1751).\n\n  The clean way to see the contradiction: a block built directly on P inherits P's post-state, in which payment[P] has weight = 0 (attestations for P are only ever added by later blocks,\n  which would then be the parent instead of P). So whenever the elif parent_bid.value > 0 branch fires, the evicted entry provably had weight 0 → epoch settlement never paid it → the direct\n  append is the sole payment. Conversely, any block that gave payment[P] quorum weight becomes the new parent, so P is never the stale immediate parent. The two branches partition cleanly;\n  no entry is paid twice.\n\n```",
+      "createdAt": "2026-07-03T12:24:46.546000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mushow0x",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Also quick question but what's the rationale behind the 256 here? \n\n[Here](https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/beacon-chain.md?plain=1#L218) : `MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD    uint64(2**8) (= 256)`\n\nIn the EL [EIP 8282](https://eips.ethereum.org/EIPS/eip-8282) the deposit cap seems to be `MAX_DEPOSIT_REQUESTS_PER_BLOCK = 64`, and the builder exit constant on the CL side (`MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 16`) matches its EIP counterpart (`MAX_EXIT_REQUESTS_PER_BLOCK = 16`)\nSo the deposit side is the odd one out at 4x the EIP value?\n\n The EL EIP also gives a security rationale for that cap, *see screenshot below.*\n\nSo is the CL's `256` intentionally a looser wire-format ceiling (relying on the EL to enforce the `64` drain cap, so a valid payload never actually exceeds `64`), or should it track `64` to match the per-block verification bound the EIP describes? \nJust want to understand the reasoning.",
+      "createdAt": "2026-07-03T12:27:41.522000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Capture_decran_2026-07-03_a_16.22.13.png",
+          "content": "9b63038d3c35858f644cc1c2f58be109fcb39bb95a89c869f3269a41ab045afb"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, we just haven't updated the CL spec yet, we merged https://github.com/ethereum/sys-asm/pull/50 yesterday",
+      "createdAt": "2026-07-03T12:29:16.042000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/EIPs/pull/11859 also, fixes some stuff in the EIP",
+      "createdAt": "2026-07-03T12:30:16.963000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://github.com/ethereum/consensus-specs/pull/5420",
+      "createdAt": "2026-07-03T13:16:32.142000+00:00",
+      "attachments": []
+    }
+  ]
+}

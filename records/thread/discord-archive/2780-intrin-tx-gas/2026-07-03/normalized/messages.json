@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "2780-intrin-tx-gas",
   "date": "2026-07-03",
-  "messageCount": 1,
-  "sourceHash": "6baa0cfc87e673433e29ed3824ab8aab8f1f86c76b79228d54d0b5daacfb9fee",
-  "searchText": "I noticed that transferring ether in intrinsic tx has a `TX_VALUE_COST = 4,244`, while transferring ether internally has an `ACCOUNT_WRITE = 8000`. This means the price for transferring ether is inconsistent, which seems illogical.",
+  "messageCount": 22,
+  "sourceHash": "ad98b926703d8ba4ba5c6f2928570c855433df9fc18413dc99d463db94caa08c",
+  "searchText": "I noticed that transferring ether in intrinsic tx has a `TX_VALUE_COST = 4,244`, while transferring ether internally has an `ACCOUNT_WRITE = 8000`. This means the price for transferring ether is inconsistent, which seems illogical. Based on our benchmarks, to have an execution performance of 100Mgas/s, a eth transfer with value should be 21k and a eth transfer without value should be 15k. The diff (6k) is the added cost of sending value. I am not sure why is lower than the difference between a CALL with value and without value (which atm is 8k), but this is what we observe in benchmarks One possible reason for this is that given that eth transfers do other stuff besides IO (and their total cost is higher), we cannot fit as many IO operations as when we do this with CALLs. So the diff could come from the IO bottlenecks it's the sum of the regular-gas primitives. Checkout Interactions with other EIPs section in 2780 I like this proposal. I am prototyping dragan's proposal today, semantically it's more correct to charge the warm in intrinsic and apply surcharge in runtime, but it comes up with these complexities: - when process the authorizations, we must explicitly check if the remaining gas is sufficient for an authority access, if not, the authority access should be avoid for minimizing the BAL size - when process the authorizations, we should still surcharge the cold access after loading the authority even if the auth is invalid (nonce mismatch), EIP change doesn't mention that - when process the call recipient, we must explicitly check the gas affordability before accessing it (for account-creation) With overcharge cold access, these complexities can be avoided I noted on the [PR](https://github.com/ethereum/EIPs/pull/11844) that I think we should simply do the cold charge. The use cases where we have overcharge are not big enough to compensate the complexity in my opinion And can i have a quick clarification, **current 2780 EIP says**: > If a contract-creation transaction’s initcode reverts, the transaction remains valid. In that case STATE_BYTES_PER_NEW_ACCOUNT × CPSB is not charged and is refilled to the state_gas_reservoir It sounds weird to me. After executing the create-frame, we already split the regular/state and shouldn't we use the LIFO for refund? I think this is a good point. We can use LIFO here It looks like other clients didnt give oppinion on this so they are probably fine. Will change PR to address this and include cold charge in intrinsic, this is supported by Maria, Gary, Guru and i see spencer put 100 emoji 🙂 <@968526635735326741> <@429719902363058177> <@1126229231572094976> for authorization processing in new EIP-2780 With new 2780, we process all the authorizations in runtime, it's still possible to cancel the previous delegation, e.g., delegate from 0->a->0. The net state change will be zero and nothing should be charged for state growth. We have a few options here: - process authorizations one by one and charge the gas accordingly, for 0->a, we charge the state cost (and the regular), for a->0, we refund the state cost and charge the regular. In this way, we can minimize the BAL size just in case the remaining gas is insufficient to cover all auths (prevent authority access for following auths) - we calculate the gas for the entire authorizations and then charge them in one shot. As we will pay the cold access in IntrinsicCost, so it's fine to blindly access all the authorities. The good side is we can get rid of the charge-and-refund mechanism, the downside is we may include some extra authorities in BAL which can be prevent by checking the gas step by step Would be appreciated to get some insights! Isn't nonce bumped in account? Yes, i think charging gas step by step is semantically more correct, but we still need the refund mechanism there (for delegation indicator) refund about what, account gets changed right? Can you be more precise what item goes from 0->a->0 For the delegation marker. `STATE_BYTES_PER_AUTH_BASE × CPSB` I see Imo if we want with simplification on cold load gas, i would just ignore this case, if user added three authorization that does nothing, let him pay and not complicate things. In both approaches i proposed, user will all pay nothing for state cost (it's correct). The main difference is for (1) we charge the gas step by step, and if gas is insufficient, we can abort this process earlier and minimize the BAL size, for (2), the only good side is we can simplify the implementation by getting rid of the auth-charge-then-refund, but we may do more work than the gas supplied. I think (1) is better in general We should think of the edge cases as well. For (1), we need to strictly specify the order of gas cost deductions are handled with the newly introduced gas costs. Especially EIP-7702 is tricky here. The test set would be something like EIP-7702 transactions with up to N authorizations (which could for instance set delegation, remove delegation, set delegation on same account) where we test for an exact range of tx gasLimit (which is exactly on the boundary where something \"else\" happens, e.g. a BAL item inserted or changed) Note that the pre-execution gas costs deduction is a new concept. This is especially weird in the EIP-7702 context: currently, the gas cost to do any operation is always there by definition (part of intrinsic gas cost). If the execution part fails/OOGs, then all the state changes in the execution part are rolled back, but the authorizations stay. Current EIP draft changes this, where if the pre-exec gas cost deduction fails, it rolls back authorizations (?). Why are we not raising the intrinsic gas cost of EIP-7702 such that this state creation gas is covered? Then we don't have to change anything regarding this logic. Has this been considered? > For (1), we need to strictly specify the order of gas cost deductions are handled with the newly introduced gas costs. Yes true. > Current EIP draft changes this, where if the pre-exec gas cost deduction fails, it rolls back authorizations (?). I think the authorizations will also be reverted",
   "excerpts": [
     {
       "author": "gaxanh",
@@ -12,6 +12,174 @@
       "parent": "",
       "content": "I noticed that transferring ether in intrinsic tx has a `TX_VALUE_COST = 4,244`, while transferring ether internally has an `ACCOUNT_WRITE = 8000`. This means the price for transferring ether is inconsistent, which seems illogical.",
       "createdAt": "2026-07-03T02:16:08.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Based on our benchmarks, to have an execution performance of 100Mgas/s, a eth transfer with value should be 21k and a eth transfer without value should be 15k. The diff (6k) is the added cost of sending value. I am not sure why is lower than the difference between a CALL with value and without value (which atm is 8k), but this is what we observe in benchmarks",
+      "createdAt": "2026-07-03T07:51:02.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "One possible reason for this is that given that eth transfers do other stuff besides IO (and their total cost is higher), we cannot fit as many IO operations as when we do this with CALLs. So the diff could come from the IO bottlenecks",
+      "createdAt": "2026-07-03T07:54:51.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "it's the sum of the regular-gas primitives. Checkout  Interactions with other EIPs section in 2780",
+      "createdAt": "2026-07-03T07:56:40.431000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I like this proposal. I am prototyping dragan's proposal today, semantically it's more correct to charge the warm in intrinsic and apply surcharge in runtime, but it comes up with these complexities:\n\n- when process the authorizations, we must explicitly check if the remaining gas is sufficient for an authority access, if not, the authority access should be avoid for minimizing the BAL size\n- when process the authorizations, we should still surcharge the cold access after loading the authority even if the auth is invalid (nonce mismatch), EIP change doesn't mention that\n- when process the call recipient, we must explicitly check the gas affordability before accessing it (for account-creation)\n\nWith overcharge cold access, these complexities can be avoided",
+      "createdAt": "2026-07-03T08:03:32.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I noted on the [PR](https://github.com/ethereum/EIPs/pull/11844) that I think we should simply do the cold charge. The use cases where we have overcharge are not big enough to compensate the complexity in my opinion",
+      "createdAt": "2026-07-03T08:04:42.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "And can i have a quick clarification, **current 2780 EIP says**: \n\n> If a contract-creation transaction’s initcode reverts, the transaction remains valid. In that case STATE_BYTES_PER_NEW_ACCOUNT × CPSB is not charged and is refilled to the state_gas_reservoir\nIt sounds weird to me. After executing the create-frame, we already split the regular/state and shouldn't we use the LIFO for refund?",
+      "createdAt": "2026-07-03T08:06:44.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "misilva73",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I think this is a good point. We can use LIFO here",
+      "createdAt": "2026-07-03T08:41:58.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "It looks like other clients didnt give oppinion on this so they are probably fine.",
+      "createdAt": "2026-07-03T09:57:54.746000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Will change PR to address this and include cold charge in intrinsic, this is supported by Maria, Gary, Guru and i see spencer put 100 emoji 🙂",
+      "createdAt": "2026-07-03T09:59:07.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "<@968526635735326741> <@429719902363058177> <@1126229231572094976> for authorization processing in new EIP-2780\n\nWith new 2780, we process all the authorizations in runtime, it's still possible to cancel the previous delegation, e.g., delegate from 0->a->0. The net state change will be zero and nothing should be charged for state growth.\n\nWe have a few options here:\n- process authorizations one by one and charge the gas accordingly, for 0->a, we charge the state cost (and the regular), for a->0, we refund the state cost and charge the regular. In this way, we can minimize the BAL size just in case the remaining gas is insufficient to cover all auths (prevent authority access for following auths)\n- we calculate the gas for the entire authorizations and then charge them in one shot. As we will pay the cold access in IntrinsicCost, so it's fine to blindly access all the authorities. The good side is we can get rid of the charge-and-refund mechanism, the downside is we may include some extra authorities in BAL which can be prevent by checking the gas step by step\n\nWould be appreciated to get some insights!",
+      "createdAt": "2026-07-03T12:16:00.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Isn't nonce bumped in account?",
+      "createdAt": "2026-07-03T12:18:42.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Yes, i think charging gas step by step is semantically more correct, but we still need the refund mechanism there (for delegation indicator)",
+      "createdAt": "2026-07-03T12:20:11.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "refund about what, account gets changed right?",
+      "createdAt": "2026-07-03T12:21:27.820000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Can you be more precise what item goes from 0->a->0",
+      "createdAt": "2026-07-03T12:21:49.009000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "For the delegation marker.",
+      "createdAt": "2026-07-03T12:22:42.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "`STATE_BYTES_PER_AUTH_BASE × CPSB`",
+      "createdAt": "2026-07-03T12:23:06.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "I see",
+      "createdAt": "2026-07-03T12:26:24.559000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "draganrakita",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "Imo if we want with simplification on cold load gas, i would just ignore this case, if user added three authorization that does nothing, let him pay and not complicate things.",
+      "createdAt": "2026-07-03T12:26:56.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "In both approaches i proposed, user will all pay nothing for state cost (it's correct). \n\nThe main difference is for (1) we charge the gas step by step, and if gas is insufficient, we can abort this process earlier and minimize the BAL size, for (2), the only good side is we can simplify the implementation by getting rid of the auth-charge-then-refund, but we may do more work than the gas supplied.\n\nI think (1) is better in general",
+      "createdAt": "2026-07-03T12:38:49.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jochembrouwer",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "We should think of the edge cases as well. For (1), we need to strictly specify the order of gas cost deductions are handled with the newly introduced gas costs. Especially EIP-7702 is tricky here. The test set would be something like EIP-7702 transactions with up to N authorizations (which could for instance set delegation, remove delegation, set delegation on same account) where we test for an exact range of tx gasLimit (which is exactly on the boundary where something \"else\" happens, e.g. a BAL item inserted or changed)\n\nNote that the pre-execution gas costs deduction is a new concept. This is especially weird in the EIP-7702 context: currently, the gas cost to do any operation is always there by definition (part of intrinsic gas cost). If the execution part fails/OOGs, then all the state changes in the execution part are rolled back, but the authorizations stay. Current EIP draft changes this, where if the pre-exec gas cost deduction fails, it rolls back authorizations (?).\n\nWhy are we not raising the intrinsic gas cost of EIP-7702 such that this state creation gas is covered? Then we don't have to change anything regarding this logic. Has this been considered?",
+      "createdAt": "2026-07-03T12:49:25.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "garyrong",
+      "category": "EIP-development",
+      "parent": "",
+      "content": "> For (1), we need to strictly specify the order of gas cost deductions are handled with the newly introduced gas costs.\nYes true.\n\n> Current EIP draft changes this, where if the pre-exec gas cost deduction fails, it rolls back authorizations (?).\nI think the authorizations will also be reverted",
+      "createdAt": "2026-07-03T12:54:31.622000+00:00",
       "attachments": []
     }
   ]
