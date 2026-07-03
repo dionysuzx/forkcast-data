@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-07-02",
-  "messageCount": 3,
-  "sourceHash": "b4f1224aefa0c4ef8315cc472272d036f423c3be8cb81ae56e06275a7c09e1ca",
-  "searchText": "We are considering how best to handle direct-connected builders in Lighthouse, and hit a small snag in how `SignedRequestAuthV1` needs to be managed. This is the auth that is sent in the body when requesting a bid: https://ethereum.github.io/builder-specs/?urls.primaryName=dev#/Builder/getExecutionPayloadBid The problem is, the `produce_block_v4` API is a _GET_ API, and this is where you would naturally want to send the `SignedRequestAuthV1`. Yes, you probably also want to send it ahead of time via the `builder_preferences` endpoint, but you probably also want to send it with the bid request. We are thinking of relying on caching in the BN so that the flow is something like: 1. VC send a `SignedRequestAuthV1` when it has a proposal coming up 2. BN posts that `SignedRequestAuthV1` to the builder and caches it in memory 3. VC requests a block via `produce_block_v4` (GET) 4. BN makes bid requests to all builders that it has configured for the proposer, _and_ which it has `SignedRequestAuthV1` cached in memory. 5. BN selects best bid and includes it in the block for the VC to sign. The problem is the potential failure case at step (4). Should we avoid sending the request if the auth isn't cached? Should we sent a request with no auth and hope for the best? Does this imply we need to persist these auth objects to _disk_ in the BN, so that a restart doesn't remove them? <@554799849288105986> is the main one working on this from our side. He mentioned that <@363800010518822915> had solved this in Prysm by including the auth in their gRPC block request (basically like using a POST for produce_block_v4?) This is very similar to how it's handled in Prysm, and yes, eventually it'd be nice to get this speced out in produce_block_v4. See my open issue in https://github.com/ethereum/beacon-APIs/issues/620. I believe the best way to handle this is to add this `BuilderPreferences` object in the call to `produce_block_v4` and the builder preferences is a map per-builder, which includes the signed auth as an optional parameter. so it doesn't rely on caching in step 4 <@602753420033785856>",
+  "messageCount": 14,
+  "sourceHash": "5c405d60726f26695ab5ac87324df24a9c4bbf7fd47a7e258085999cb59722d6",
+  "searchText": "We are considering how best to handle direct-connected builders in Lighthouse, and hit a small snag in how `SignedRequestAuthV1` needs to be managed. This is the auth that is sent in the body when requesting a bid: https://ethereum.github.io/builder-specs/?urls.primaryName=dev#/Builder/getExecutionPayloadBid The problem is, the `produce_block_v4` API is a _GET_ API, and this is where you would naturally want to send the `SignedRequestAuthV1`. Yes, you probably also want to send it ahead of time via the `builder_preferences` endpoint, but you probably also want to send it with the bid request. We are thinking of relying on caching in the BN so that the flow is something like: 1. VC send a `SignedRequestAuthV1` when it has a proposal coming up 2. BN posts that `SignedRequestAuthV1` to the builder and caches it in memory 3. VC requests a block via `produce_block_v4` (GET) 4. BN makes bid requests to all builders that it has configured for the proposer, _and_ which it has `SignedRequestAuthV1` cached in memory. 5. BN selects best bid and includes it in the block for the VC to sign. The problem is the potential failure case at step (4). Should we avoid sending the request if the auth isn't cached? Should we sent a request with no auth and hope for the best? Does this imply we need to persist these auth objects to _disk_ in the BN, so that a restart doesn't remove them? <@554799849288105986> is the main one working on this from our side. He mentioned that <@363800010518822915> had solved this in Prysm by including the auth in their gRPC block request (basically like using a POST for produce_block_v4?) This is very similar to how it's handled in Prysm, and yes, eventually it'd be nice to get this speced out in produce_block_v4. See my open issue in https://github.com/ethereum/beacon-APIs/issues/620. I believe the best way to handle this is to add this `BuilderPreferences` object in the call to `produce_block_v4` and the builder preferences is a map per-builder, which includes the signed auth as an optional parameter. so it doesn't rely on caching in step 4 <@602753420033785856> Yep, in Prysm the VC sends the signed auths inside the block request itself (our gRPC equivalent of `produce_block_v4` taking a body), so the BN never depends on cached auths at bid-request time. The preferences/auth push is still useful ahead of time, and the VC resubmits it periodically so a restarted BN repopulates without persisting anything to disk. For step 4 we only query builders we hold an auth for, no auth → skip.. Agree with potuz that the real fix is #620: per-builder preferences map with optional signed auth in the `produce_block_v4` call, which is essentially what we're doing informally Side note: hearing from commist boost made me realize this, the URL inside `SignedRequestAuthV1.Message.Data` currently does double duty as both \"who the auth is for\" and \"the HTTP base URL the BN dials\". That breaks sidecar setups: point the BN at a sidecar and the VC-signed auth is bound to the sidecar URL, so it can't be forwarded to the real builders without the sidecar holding validator keys. One option is fix this is to decouple identity from dial target (auth stays bound to the builder, BN dials a configurable endpoint), worth keeping in mind for #620 yeah the message data of the auth can be arbitrary, the endpoint should be passed to the BN as another entry in the `BuilderPreferences` and they could be equal or not <@755590043632140352> is there some context on this PR? https://github.com/ethereum/consensus-specs/pull/5414 Isn't the 50% mark way too early for the payload reveal deadline? Attestation aggregates are scheduled 50% into the slot, and the payload reveal relys on a attestation threshold being met? Builders should track individual attestations not aggregated what about local block builders? local block builders do not care about this That implies being subscribed to all subnets too, which is quite some overhead. Uhm, but yea, that fixes my timing concern ofc. <@755590043632140352> I know you don't really want to do it, but you should propose a PR to reserve builder versions. If you want it to be included in Glamsterdam. I made a PR for this change: https://github.com/ethereum/consensus-specs/pull/5416 Ok, I'll write it",
   "excerpts": [
     {
       "author": "sproul",
@@ -28,6 +28,94 @@
       "parent": "",
       "content": "so it doesn't rely on caching in step 4 <@602753420033785856>",
       "createdAt": "2026-07-02T13:07:49.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yep, in Prysm the VC sends the signed auths inside the block request itself (our gRPC equivalent of `produce_block_v4` taking a body), so the BN never depends on cached auths at bid-request time. The preferences/auth push is still useful ahead of time, and the VC resubmits it periodically so a restarted BN repopulates without persisting anything to disk. For step 4 we only query builders we hold an auth for, no auth → skip..  Agree with potuz that the real fix is #620: per-builder preferences map with optional signed auth in the `produce_block_v4` call, which is essentially what we're doing informally",
+      "createdAt": "2026-07-02T14:04:55.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Side note: hearing from commist boost made me realize this, the URL inside `SignedRequestAuthV1.Message.Data` currently does double duty as both \"who the auth is for\" and \"the HTTP base URL the BN dials\". That breaks sidecar setups: point the BN at a sidecar and the VC-signed auth is bound to the sidecar URL, so it can't be forwarded to the real builders without the sidecar holding validator keys. One option is fix this is to decouple identity from dial target (auth stays bound to the builder, BN dials a configurable endpoint), worth keeping in mind for #620",
+      "createdAt": "2026-07-02T14:06:13.988000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah the message data of the auth can be arbitrary, the endpoint should be passed to the BN  as another entry in the `BuilderPreferences` and they could be equal or not",
+      "createdAt": "2026-07-02T14:08:10.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352>  is there some context on this PR?\nhttps://github.com/ethereum/consensus-specs/pull/5414\nIsn't the 50% mark way too early for the payload reveal deadline?\nAttestation aggregates are scheduled 50% into the slot,  and the payload reveal relys on a attestation threshold being met?",
+      "createdAt": "2026-07-02T15:02:46.371000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Builders should track individual attestations not aggregated",
+      "createdAt": "2026-07-02T15:16:38.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what about local block builders?",
+      "createdAt": "2026-07-02T15:22:00.508000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "local block builders do not care about this",
+      "createdAt": "2026-07-02T15:22:36.933000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That implies being subscribed to all subnets too, which is quite some overhead.\nUhm, but yea,  that fixes my timing concern ofc.",
+      "createdAt": "2026-07-02T15:37:00.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@755590043632140352> I know you don't really want to do it, but you should propose a PR to reserve builder versions. If you want it to be included in Glamsterdam.",
+      "createdAt": "2026-07-02T16:35:26.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I made a PR for this change:\nhttps://github.com/ethereum/consensus-specs/pull/5416",
+      "createdAt": "2026-07-02T17:49:06.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ok, I'll write it",
+      "createdAt": "2026-07-02T19:19:23.921000+00:00",
       "attachments": []
     }
   ]
