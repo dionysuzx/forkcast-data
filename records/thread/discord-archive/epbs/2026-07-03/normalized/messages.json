@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-07-03",
-  "messageCount": 12,
-  "sourceHash": "77d9194b8c24aef77d4b30264be9e003338fd7f3e502a93fe98d5c94d1288868",
-  "searchText": "Hello <@755590043632140352> <@586161934425128960>. There was a finding that came in the bug bounty program a couple of months ago, but The PoC given was \"gibberish\", and super hard to read, mostly AI slop. so we ended up dropping it and the researcher never came back pushing for it. Recently one of our swarms though came back with a very similar bug, and has made it much more concise and included a consensus spec test. I was wondering if you could take a look, I know sometimes we can create stuff from an \"impossible state\" and it still passes. https://gist.github.com/0xMushow/064e2d89a517f9ebe6285ce9d09cfabc This is flawed: > However, if the payment met quorum before eviction, epoch processing already appended payment.withdrawal to state.builder_pending_withdrawals. There is no possibility of achieving quorum if there hasn't been any blocks from the parent until this block. Quorum is on-chain and no attestations could have been processed I stopped reading here, but I assume you can get an AI to vet that the PoC starts with a flawed state in which the quorum is applied before the epoch transition, which I claim it's impossible also notice that in general, quorum is irrelevant for a payload that **has been included**, the payment processed in this function is for payloads that have been included and thus we just charge the builder concluded the same, the poc tests the reporter added does `_attest_parent_bid_to_quorum` which calls `process_attestation` but not actually processes a block thanks for the quick analysis. it's so easy to build a test that passes but has invalid state Yeah that's why fuzzing STF is hard I just asked claude opus 4.8 whether the report is valid or not and it found the flaw ``` Why it can't actually happen The double payment requires a single state where payment[P] both (a) reached quorum (so epoch settlement paid it) and (b) has P as the immediate parent that is ≥2 epochs stale (so the direct-append branch fires). Those two are mutually exclusive on any one chain history: - latest_execution_payload_bid is written in exactly one place — process_execution_payload_bid (beacon-chain.md:1590), once per block, to that block's own bid. So parent_bid.slot is always the slot of the immediately preceding canonical block. For the elif to fire, that preceding block must be P and must be 2+ epochs old ⇒ a 2+ epoch gap of empty slots between P and the current block. - Weight on payment[P] only comes from same-slot attestations for slot P, which are added by process_attestation — and that only runs inside process_block. Those attestations must be included in blocks built on top of P, during epochs E/E+1 (process_attestation rejects target.epoch older than previous: beacon-chain.md:1751). The clean way to see the contradiction: a block built directly on P inherits P's post-state, in which payment[P] has weight = 0 (attestations for P are only ever added by later blocks, which would then be the parent instead of P). So whenever the elif parent_bid.value > 0 branch fires, the evicted entry provably had weight 0 → epoch settlement never paid it → the direct append is the sole payment. Conversely, any block that gave payment[P] quorum weight becomes the new parent, so P is never the stale immediate parent. The two branches partition cleanly; no entry is paid twice. ``` Also quick question but what's the rationale behind the 256 here? [Here](https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/beacon-chain.md?plain=1#L218) : `MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD uint64(2**8) (= 256)` In the EL [EIP 8282](https://eips.ethereum.org/EIPS/eip-8282) the deposit cap seems to be `MAX_DEPOSIT_REQUESTS_PER_BLOCK = 64`, and the builder exit constant on the CL side (`MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 16`) matches its EIP counterpart (`MAX_EXIT_REQUESTS_PER_BLOCK = 16`) So the deposit side is the odd one out at 4x the EIP value? The EL EIP also gives a security rationale for that cap, *see screenshot below.* So is the CL's `256` intentionally a looser wire-format ceiling (relying on the EL to enforce the `64` drain cap, so a valid payload never actually exceeds `64`), or should it track `64` to match the per-block verification bound the EIP describes? Just want to understand the reasoning. no, we just haven't updated the CL spec yet, we merged https://github.com/ethereum/sys-asm/pull/50 yesterday https://github.com/ethereum/EIPs/pull/11859 also, fixes some stuff in the EIP https://github.com/ethereum/consensus-specs/pull/5420",
+  "messageCount": 101,
+  "sourceHash": "45817d1e5f4f00f045cff025dffa27be7c219ef6fa926a035e6679c405321b17",
+  "searchText": "Hello <@755590043632140352> <@586161934425128960>. There was a finding that came in the bug bounty program a couple of months ago, but The PoC given was \"gibberish\", and super hard to read, mostly AI slop. so we ended up dropping it and the researcher never came back pushing for it. Recently one of our swarms though came back with a very similar bug, and has made it much more concise and included a consensus spec test. I was wondering if you could take a look, I know sometimes we can create stuff from an \"impossible state\" and it still passes. https://gist.github.com/0xMushow/064e2d89a517f9ebe6285ce9d09cfabc This is flawed: > However, if the payment met quorum before eviction, epoch processing already appended payment.withdrawal to state.builder_pending_withdrawals. There is no possibility of achieving quorum if there hasn't been any blocks from the parent until this block. Quorum is on-chain and no attestations could have been processed I stopped reading here, but I assume you can get an AI to vet that the PoC starts with a flawed state in which the quorum is applied before the epoch transition, which I claim it's impossible also notice that in general, quorum is irrelevant for a payload that **has been included**, the payment processed in this function is for payloads that have been included and thus we just charge the builder concluded the same, the poc tests the reporter added does `_attest_parent_bid_to_quorum` which calls `process_attestation` but not actually processes a block thanks for the quick analysis. it's so easy to build a test that passes but has invalid state Yeah that's why fuzzing STF is hard I just asked claude opus 4.8 whether the report is valid or not and it found the flaw ``` Why it can't actually happen The double payment requires a single state where payment[P] both (a) reached quorum (so epoch settlement paid it) and (b) has P as the immediate parent that is ≥2 epochs stale (so the direct-append branch fires). Those two are mutually exclusive on any one chain history: - latest_execution_payload_bid is written in exactly one place — process_execution_payload_bid (beacon-chain.md:1590), once per block, to that block's own bid. So parent_bid.slot is always the slot of the immediately preceding canonical block. For the elif to fire, that preceding block must be P and must be 2+ epochs old ⇒ a 2+ epoch gap of empty slots between P and the current block. - Weight on payment[P] only comes from same-slot attestations for slot P, which are added by process_attestation — and that only runs inside process_block. Those attestations must be included in blocks built on top of P, during epochs E/E+1 (process_attestation rejects target.epoch older than previous: beacon-chain.md:1751). The clean way to see the contradiction: a block built directly on P inherits P's post-state, in which payment[P] has weight = 0 (attestations for P are only ever added by later blocks, which would then be the parent instead of P). So whenever the elif parent_bid.value > 0 branch fires, the evicted entry provably had weight 0 → epoch settlement never paid it → the direct append is the sole payment. Conversely, any block that gave payment[P] quorum weight becomes the new parent, so P is never the stale immediate parent. The two branches partition cleanly; no entry is paid twice. ``` Also quick question but what's the rationale behind the 256 here? [Here](https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/beacon-chain.md?plain=1#L218) : `MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD uint64(2**8) (= 256)` In the EL [EIP 8282](https://eips.ethereum.org/EIPS/eip-8282) the deposit cap seems to be `MAX_DEPOSIT_REQUESTS_PER_BLOCK = 64`, and the builder exit constant on the CL side (`MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD = 16`) matches its EIP counterpart (`MAX_EXIT_REQUESTS_PER_BLOCK = 16`) So the deposit side is the odd one out at 4x the EIP value? The EL EIP also gives a security rationale for that cap, *see screenshot below.* So is the CL's `256` intentionally a looser wire-format ceiling (relying on the EL to enforce the `64` drain cap, so a valid payload never actually exceeds `64`), or should it track `64` to match the per-block verification bound the EIP describes? Just want to understand the reasoning. no, we just haven't updated the CL spec yet, we merged https://github.com/ethereum/sys-asm/pull/50 yesterday https://github.com/ethereum/EIPs/pull/11859 also, fixes some stuff in the EIP https://github.com/ethereum/consensus-specs/pull/5420 <@592004585506340885> this is the PR I meant https://github.com/ethereum/consensus-specs/pull/5422 did we then want to also reduce the default withdrawability delay? what do you think about having `0xB0` offset for builder credentials and reserve that whole speace for builder creds for the future? it's orthogonal to this PR but kind of related Hmm the way this is written is a bit confusing to me. It reads like there's a single allowed version and a single reserved version. Also, generic constants for builders shouldn't include \"payload\" in the name. To be clear, maybe there should be `PAYLOAD_BUILDER_VERSION_MIN` and `PAYLOAD_BUILDER_VERSION_MAX`. And `RESERVED_BUILDER_VERSIONS_START`. This could work, but then we'd be limited to 16 builder versions (probably fine). If this is done, we would mask the 0xB0 part when setting `builder.version` right? Eg 0xB7 would mean `builder.version=7`? no I think the cleanest way to achieve what Misha is saying is to simply change the `0x03` pattern in the onboarding code to `0xb0` and change `PAYLOAD_BUILDER_RESERVED_VERSION` in my PR to `0XB0` instead of the current value. But I kinda think if we go with that that would be dangerous, it would be easier to reserve then the lower part instead of the higher part otherwise a builder sending a deposit right at the fork may actually lose money The first part of this is already merged btw: https://github.com/ethereum/consensus-specs/pull/5416 oh then my PR has to change dramatically 😢 Uh how so? It shouldn't affect your PR at all. This is just the onboarding part sir. Anyway the current spec is also not safe you're missing the point I mentioned above: tooling to create builders will create deposits with withdrawal credentials of 0xB0, then the same tooling sent after the fork will get those builders being useless so you need to use different tools to create a deposit pre and post-fork we should make the process so that a 0x03 (or now 0xb0) deposit before or after (even if it's sent to a different contract) works Yeah I'm not debating that. But the tooling to submit 0xB0 deposits for onboarding already exists... This is required regardless of whatever we decide here. yeah and if the builder sends that after the fork and creates a 0xb0 builder is fucked They're going to be messed up regardless of the version. no, we can do it in a way such that the withdrawal credentials of 0xb0 in the deposit contract maps to version 0 or maps to an allowed version That's what we do now... But only when onboarding. oh WTF, you guys are changing too fast and too much on the spec.. the PR says `This changes the (temporary) withdrawal prefix used onboard builders at the Gloas fork from 0x03 to 0xB0` Doesn't say anything in the description about the post fork non-temporary path yeah and that's my entire point that we need to allow builders to use the same withdrawal credentials pre and post fork so we can simply do this with my PR by saying that the reserved is everything **below** 0xb0 and that the allowed is just a few after 0xb0 and the onboarding does not start from version 0 but from version 0xb0 this way a withdrawal credential of 0xb0 is valid both pre and post-fork Yeah I'm fine with requiring 0xB* withdrawal credentials for onboarding & via deposit requests. This makes sense to me. I can change my PR, but I won't change any name, I will only change the logic and I will let you put whatever name you want in those constants But do remember that it will still require tooling updates. yes, but it will require the same logic pre and post gloas as opposed to different logic What do you mean the same logic? Not exactly. the withdrawal credential can be kept to be exactly the same 0xb0 instead of going from 0xb0 to 0x00 Yeah but you still have to check the signature with a different domain. that's fine, that always happens That's all I'm trying to say. Not the exact same logic. Btw discussing stuff with you always feels so hostile 😅 it's a bit exhausting. I also feel that I speak a different language and I didn't want to write that PR for that reason so, the idea was to start builder prefixes from `0xb0` and reserve that space for builders only, this implies that no validators with such creds prefix will ever exist no that's more invasive that touches the validator flow as well you can write that PR 🙂 I'm only changing the logic in mine do you think we will ever need validator creds to fall into that range? I pushed the changes to reserve everything below 0xb0 and to onboard with version 0xb0 allowing only 0xb0 and 0xb1 to submit bids But 0xb1 will probably be a \"proof builder\" not a \"payload builder\" oh not at all, and yeah probably validators is fine cause it's enforced at deposit time? you mean because of names? I just think that's the next builder version that will be added. When we add support for mandatory proofs. I don't really forsee payload builders needing another version, but idk. yeah I got no clue, probably we will never need any other version... anyway I added these two constant, if you have different names that you want them to have I'll take them i see, so builders with lower prefixes won't exist, right? otherwise you can push the name changes, hopefully the PR passes tests, I had to change the 0b0 logic, but probably the default constructor is now screwed cause version should be 0xb0 instead of 0 Builder version != builder withdrawal prefix. At least I don't think it should. ok, then you do not like my PR, you guys can add whatever logic you want, I think we're wasting too much time over this you can subtract the constant so that they start with version 0 That's just what I think. We need more opinions. I think it would be strange to start builder versions with a non-zero version. you mean to use `0xb0` as an offset for prefixes? Pretty much, yeah. 0xB0 prefix would map to BuilderV0. 0xB1 would map to BuilderV1. Just what I think we should do. I want builders to think about versions instead of \"withdrawal prefixes\" Imo that's a confusing way of handling versions. That was heavily tied to how validators worked. i think we cannot clearly define semantics of a version in this case as we don't know which builder semantics we might need in the future did we then want to also reduce the <@592004585506340885> I think the last push does what you want: map builder reserved to 0, only allow 0 and 1. Don't know about names Thanks. This is better. Not sure we should allow payload bids from v1 builders though. We need more opinions on that. cc <@425572898787426305> <@586161934425128960> And to be clear, you do not like the explicit \"payload builder\" version? How would you design this if the next builder version wasn't supposed to submit execution payload bids? I don't understand Ah you mean to have one version for the fork? Yeah I dislike that, the rationale is in the PR. I want a whitelist and a blacklist. Both I don't care about names and mappings but I do care about having more options I don't get `BUILDER_MIN_WITHDRAWAL_PREFIX`, why is it `0xB0`, I thought we wanna use that only for the onboarding at the fork, this seems confusing, after the fork we can just use `0x00 = v0`, `0x01 = v1` as builder deposits are completely separate from validators Yeah I’m on the fence with this change too, but the rationale (from what I understand) is that the same withdrawal prefix can be used when onboarding and post-upgrade. And it would reduce confusion with validators. But I a",
   "excerpts": [
     {
       "author": "mushow0x",
@@ -106,6 +106,718 @@
       "parent": "",
       "content": "https://github.com/ethereum/consensus-specs/pull/5420",
       "createdAt": "2026-07-03T13:16:32.142000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@592004585506340885> this is the PR I meant\nhttps://github.com/ethereum/consensus-specs/pull/5422",
+      "createdAt": "2026-07-03T14:52:43.029000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "did we then want to also reduce the default withdrawability delay?",
+      "createdAt": "2026-07-03T14:54:03.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what do you think about having `0xB0` offset for builder credentials and reserve that whole speace for builder creds for the future? it's orthogonal to this PR but kind of related",
+      "createdAt": "2026-07-03T15:04:26.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Hmm the way this is written is a bit confusing to me. It reads like there's a single allowed version and a single reserved version. Also, generic constants for builders shouldn't include \"payload\" in the name. To be clear, maybe there should be `PAYLOAD_BUILDER_VERSION_MIN` and `PAYLOAD_BUILDER_VERSION_MAX`. And `RESERVED_BUILDER_VERSIONS_START`.",
+      "createdAt": "2026-07-03T15:12:30.337000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This could work, but then we'd be limited to 16 builder versions (probably fine). If this is done, we would mask the 0xB0 part when setting `builder.version` right? Eg 0xB7 would mean `builder.version=7`?",
+      "createdAt": "2026-07-03T15:15:36.696000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no I think the cleanest way to achieve what Misha is saying is to simply change the `0x03` pattern in the onboarding code to `0xb0` and change `PAYLOAD_BUILDER_RESERVED_VERSION`  in my PR to  `0XB0`  instead of the current value.",
+      "createdAt": "2026-07-03T15:17:31.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But I kinda think if we go with that that would be dangerous, it would be easier to reserve then the lower part instead of the higher part",
+      "createdAt": "2026-07-03T15:18:18.122000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "otherwise a builder sending a deposit right at the fork may actually lose money",
+      "createdAt": "2026-07-03T15:18:31.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The first part of this is already merged btw:\nhttps://github.com/ethereum/consensus-specs/pull/5416",
+      "createdAt": "2026-07-03T15:18:56.474000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh then my PR has to change dramatically 😢",
+      "createdAt": "2026-07-03T15:20:37.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Uh how so? It shouldn't affect your PR at all. This is just the onboarding part sir.",
+      "createdAt": "2026-07-03T15:21:11.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Anyway the current spec is also not safe",
+      "createdAt": "2026-07-03T15:21:37.320000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you're missing the point I mentioned above: tooling to create builders will create deposits with withdrawal credentials of 0xB0, then the same tooling sent after the fork will get those builders being useless",
+      "createdAt": "2026-07-03T15:22:37.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so you need to use different tools to create a deposit pre and post-fork",
+      "createdAt": "2026-07-03T15:22:50.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "we should make the process so that a 0x03 (or now 0xb0) deposit before or after (even if it's sent to a different contract) works",
+      "createdAt": "2026-07-03T15:23:17.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I'm not debating that. But the tooling to submit 0xB0 deposits for onboarding already exists...",
+      "createdAt": "2026-07-03T15:23:17.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This is required regardless of whatever we decide here.",
+      "createdAt": "2026-07-03T15:23:43.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah and if the builder sends that after the fork and creates a 0xb0 builder is fucked",
+      "createdAt": "2026-07-03T15:23:45.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "They're going to be messed up regardless of the version.",
+      "createdAt": "2026-07-03T15:24:05.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, we can do it in a way such that the withdrawal credentials of 0xb0 in the deposit contract maps to version 0",
+      "createdAt": "2026-07-03T15:24:28.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or maps to an allowed version",
+      "createdAt": "2026-07-03T15:24:34.138000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's what we do now...",
+      "createdAt": "2026-07-03T15:24:51.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But only when onboarding.",
+      "createdAt": "2026-07-03T15:25:19.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh WTF, you guys are changing too fast and too much on the spec.. the PR says `This changes the (temporary) withdrawal prefix used onboard builders at the Gloas fork from 0x03 to 0xB0` Doesn't say anything in the description about the post fork non-temporary path",
+      "createdAt": "2026-07-03T15:25:54.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah and that's my entire point",
+      "createdAt": "2026-07-03T15:26:05.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that we need to allow builders to use the same withdrawal credentials pre and post fork",
+      "createdAt": "2026-07-03T15:26:29.209000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so we can simply do this with my PR by saying that the reserved is everything **below** 0xb0",
+      "createdAt": "2026-07-03T15:26:52.777000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and that the allowed is just a few after 0xb0",
+      "createdAt": "2026-07-03T15:27:02.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and the onboarding does not start from version 0 but from version 0xb0",
+      "createdAt": "2026-07-03T15:27:13.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this way a withdrawal credential of 0xb0 is valid both pre and post-fork",
+      "createdAt": "2026-07-03T15:27:25.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I'm fine with requiring 0xB* withdrawal credentials for onboarding & via deposit requests.",
+      "createdAt": "2026-07-03T15:28:02.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "This makes sense to me.",
+      "createdAt": "2026-07-03T15:28:08.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I can change my PR, but I won't change any name, I will only change the logic and I will let you put whatever name you want in those constants",
+      "createdAt": "2026-07-03T15:28:30.172000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But do remember that it will still require tooling updates.",
+      "createdAt": "2026-07-03T15:28:30.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, but it will require the same logic pre and post gloas as opposed to different logic",
+      "createdAt": "2026-07-03T15:28:54.958000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "What do you mean the same logic? Not exactly.",
+      "createdAt": "2026-07-03T15:29:15.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the withdrawal credential can be kept to be exactly the same 0xb0",
+      "createdAt": "2026-07-03T15:29:30.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "instead of going from 0xb0 to 0x00",
+      "createdAt": "2026-07-03T15:29:40.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah but you still have to check the signature with a different domain.",
+      "createdAt": "2026-07-03T15:30:01.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's fine, that always happens",
+      "createdAt": "2026-07-03T15:30:12.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's all I'm trying to say. Not the exact same logic.",
+      "createdAt": "2026-07-03T15:30:15.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Btw discussing stuff with you always feels so hostile 😅 it's a bit exhausting.",
+      "createdAt": "2026-07-03T15:31:05.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I also feel that I speak a different language",
+      "createdAt": "2026-07-03T15:31:22.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and I didn't want to write that PR for that reason",
+      "createdAt": "2026-07-03T15:31:35.010000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so, the idea was to start builder prefixes from `0xb0` and reserve that space for builders only, this implies that no validators with such creds prefix will ever exist",
+      "createdAt": "2026-07-03T15:35:42.328000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no that's more invasive",
+      "createdAt": "2026-07-03T15:38:54.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that touches the validator flow as well",
+      "createdAt": "2026-07-03T15:38:59.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can write that PR",
+      "createdAt": "2026-07-03T15:39:08.622000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "🙂",
+      "createdAt": "2026-07-03T15:39:10.101000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I'm only changing the logic in mine",
+      "createdAt": "2026-07-03T15:39:15.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "do you think we will ever need validator creds to fall into that range?",
+      "createdAt": "2026-07-03T15:39:24.159000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I pushed the changes to reserve everything below 0xb0 and to onboard with version 0xb0",
+      "createdAt": "2026-07-03T15:39:59.682000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "allowing only 0xb0 and 0xb1 to submit bids",
+      "createdAt": "2026-07-03T15:40:09.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But 0xb1 will probably be a \"proof builder\" not a \"payload builder\"",
+      "createdAt": "2026-07-03T15:40:40.252000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "oh not at all, and yeah probably validators is fine cause it's enforced at deposit time?",
+      "createdAt": "2026-07-03T15:40:50.536000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean because of names?",
+      "createdAt": "2026-07-03T15:41:05.882000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I just think that's the next builder version that will be added.",
+      "createdAt": "2026-07-03T15:41:23.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "When we add support for mandatory proofs.",
+      "createdAt": "2026-07-03T15:41:33.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't really forsee payload builders needing another version, but idk.",
+      "createdAt": "2026-07-03T15:41:59.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yeah I got no clue, probably we will never need any other version... anyway I added these two constant, if you have different names that you want them to have I'll take them",
+      "createdAt": "2026-07-03T15:42:09.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i see, so builders with lower prefixes won't exist, right?",
+      "createdAt": "2026-07-03T15:42:31.035000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "otherwise you can push the name changes, hopefully the PR passes tests, I had to change the 0b0 logic, but probably the default constructor is now screwed",
+      "createdAt": "2026-07-03T15:42:35.343000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "cause version should be 0xb0 instead of 0",
+      "createdAt": "2026-07-03T15:42:42.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Builder version != builder withdrawal prefix.",
+      "createdAt": "2026-07-03T15:42:59.375000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "At least I don't think it should.",
+      "createdAt": "2026-07-03T15:43:06.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok, then you do not like my PR, you guys can add whatever logic you want, I think we're wasting too much time over this",
+      "createdAt": "2026-07-03T15:43:37.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can subtract the constant so that they start with version 0",
+      "createdAt": "2026-07-03T15:45:23.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's just what I think. We need more opinions.",
+      "createdAt": "2026-07-03T15:50:36.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think it would be strange to start builder versions with a non-zero version.",
+      "createdAt": "2026-07-03T15:51:14.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean to use `0xb0` as an offset for prefixes?",
+      "createdAt": "2026-07-03T15:51:47.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Pretty much, yeah. 0xB0 prefix would map to BuilderV0.",
+      "createdAt": "2026-07-03T15:54:28.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "0xB1 would map to BuilderV1.",
+      "createdAt": "2026-07-03T15:54:39.460000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Just what I think we should do.",
+      "createdAt": "2026-07-03T15:54:57.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I want builders to think about versions instead of \"withdrawal prefixes\"",
+      "createdAt": "2026-07-03T15:56:17.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Imo that's a confusing way of handling versions.",
+      "createdAt": "2026-07-03T15:56:37.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That was heavily tied to how validators worked.",
+      "createdAt": "2026-07-03T15:56:48.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i think we cannot clearly define semantics of a version in this case as we don't know which builder semantics we might need in the future",
+      "createdAt": "2026-07-03T16:05:04.136000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "did we then want to also reduce the",
+      "createdAt": "2026-07-03T16:07:30.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@592004585506340885> I think the last push does what you want: map builder reserved to 0, only allow 0 and 1. Don't know about names",
+      "createdAt": "2026-07-03T16:38:41.989000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Thanks. This is better. Not sure we should allow payload bids from v1 builders though.",
+      "createdAt": "2026-07-03T16:42:31.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "We need more opinions on that. cc <@425572898787426305> <@586161934425128960>",
+      "createdAt": "2026-07-03T16:42:56.455000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "And to be clear, you do not like the explicit \"payload builder\" version?",
+      "createdAt": "2026-07-03T16:43:21.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "How would you design this if the next builder version wasn't supposed to submit execution payload bids?",
+      "createdAt": "2026-07-03T16:44:00.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't understand",
+      "createdAt": "2026-07-03T16:48:52.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ah you mean to have one version for the fork? Yeah I dislike that, the rationale is in the PR. I want a whitelist and a blacklist. Both",
+      "createdAt": "2026-07-03T16:49:27.520000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't care about names and mappings but I do care about having more options",
+      "createdAt": "2026-07-03T16:49:55.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't get `BUILDER_MIN_WITHDRAWAL_PREFIX`, why is it `0xB0`, I thought we wanna use that only for the onboarding at the fork, this seems confusing, after the fork we can just use `0x00 = v0`, `0x01 = v1` as builder deposits are completely separate from validators",
+      "createdAt": "2026-07-03T16:52:58.502000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Yeah I’m on the fence with this change too, but the rationale (from what I understand) is that the same withdrawal prefix can be used when onboarding and post-upgrade. And it would reduce confusion with validators. But I agree that they are completely separate after the fork.",
+      "createdAt": "2026-07-03T16:54:41.364000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't mind \"too much\" removing this map, but the constant will have to remain to mark the blacklist. Perhaps with a different name, but the point is that two contestants are needed logically",
+      "createdAt": "2026-07-03T16:59:14.424000+00:00",
       "attachments": []
     }
   ]
