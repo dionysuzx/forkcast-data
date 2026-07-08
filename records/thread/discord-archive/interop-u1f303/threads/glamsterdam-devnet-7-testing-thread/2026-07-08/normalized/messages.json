@@ -1,0 +1,794 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/glamsterdam-devnet-7 testing thread",
+  "date": "2026-07-08",
+  "messageCount": 98,
+  "sourceHash": "e696c5cd0c4aa99aa73cf814ccb3df8199d460b0ea37d07e21b99f0495c071ba",
+  "searchText": "<@881905303011086387> ? can you please leave devnet-6 up for a while yeah possibly an extra day We unlikely to launch devnet 7 today the EL tests are not yet released yet and would probably take a couple of days for them to fix everything okay. that helps what do you mean, I was told by ELs that the CL is holding back the fork and we should split it 😅 yeah we have a `glmasterdam-devnet-7` branch. im running against lodestar and it seems fine so far. the ethpandaops image should be ready in like 20min was using ethrex-devnet-6 branch <@360491619402776577> was the biggest advocate of this one I think 😂 same, it should not make a diff `glamsterdam-devnet-7` teriggered: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28934735282 does geth already support gloas in its integrated beacon light client / can it sync without a cl? not sure if anyone has the bandwidth to work on that For glamsterdam-devnet-7 branches please use: Builder Deposit Contract: 0x0000BFF46984E3725691FA540A8C7589300D8282 Builder Exits Contract: 0x000064D678505AD48F8CCB093BC65613800E8282 cc <@1443132403001589771> is the byte code the final one? hopefully its likely gonna be the one that will get audited https://github.com/ethereum/execution-specs/pull/3091 yes seems good, will the addresses be same on mainnet, right? Ideally if the audit finds nothing I don't see a reason to change them for devnet 7 we gonna be deploying the contract pre fork, not bake it in the genesis so we can make sure the workflow is fully working as expected oh just noticed, the `E` and `D` nice took me a while to get them 😂 need to update the EIP https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28935637085 good call: https://github.com/ethereum/EIPs/pull/11899 <@534934855113506836> ah yeah I didn't add github handle we have another PR that cuts the EIP text by more than half, that will conflicts with your PR but we can merge yours first ah didn't know you had an open pr for adjustment also can just target your pr? nah it's fine, even that PR is outdated still described old contract behavior <@586161934425128960> did you guys forget to update smth? ``` What's happening: Every buildoor reveal is rejected by lodestar's beacon API with 400: First offset must equal to fixedEnd 12 != 100 on POST /eth/v1/beacon/execution_payload_envelopes. The bid wins, the payload builds, but the envelope never gets broadcast — so every builder block finalizes without a payload. All 3 retry attempts hit the same lodestar endpoint, so nothing ever lands (buildoor's log shows Previous bid was NOT revealed — payment pending for 2 epochs every slot, and lodestar's logs show the whole network endlessly trying execution_payload_envelopes_by_root for envelopes nobody has). ``` ah we didn't put in the sloppy fix we had for this on the other branch well, I am not happy with the spec, I think the blinded payload was wrong to have, so I will propose an alternative for that endpoint anyways I can apply the hacks for now Well thats a diff question tho 😂 one sec, cherry picking few more commits, team is slow to review 😢 <@412614104222531604> the image has the api hack now, I also cherry picked my gloas circuit breaker update, not sure you wanna test that or not but it's there did you trig a new docker img build by any chance? \"the image has\" indeed thanks I wasn't a good test scenario would be - (1) builder submit high bid to win all payloads but publishes late (eg. at second 6 into the slot) - (2) honest proposer payload reorg forces empty slot - (3) circuit breaker kicks in after a few slots like this and we only build local payloads whats the circuit breaker logic ? it got a bit more complicated compared to pre-gloas ```ts // Exclude clockSlot itself, its payload reveal may still be in flight const {blocksPresent, payloadsRevealed} = this.modules.forkChoice.getPayloadRevealCounts( Math.max(clockSlot - this.faultInspectionWindow, 0), clockSlot - 1 ); const faults = blocksPresent - payloadsRevealed; // Scale the fault budget by blocks present so sparse windows still trigger on high non-reveal rates this.active = faults * this.faultInspectionWindow > this.allowedFaults * blocksPresent; ``` so I am scaling it by missed blocks, but generally speaking, you only count empty slots, ie. not payload revealed, and block are no longer a consideration also our circuit breaker is seeded at startup with some randomness, so it behaves different each time, but that we had already pre-gloas <@358120958726373381> im sorry to say but you have similar bug as <@586161934425128960> did `Reveal failed (attempt 3/3): failed to submit envelope: failed to submit envelope: failed to submit execution payload envelope POST failed with status 400: {\"code\":400,\"message\":\"BAD_REQUEST: invalid SSZ: OffsetIntoFixedPortion(12)\",\"stacktraces\":[]} for slot 109` got an open pr for this ? best I can offer right now is https://github.com/ChainSafe/lodestar/pull/9595 which implements \"the spec\" nah but you said smth like you disagree wiht the spec so I'm curious if you have a pr suggestion to make the spec more gud I mean my PR doesn't implement the actual spec, but my new spec https://github.com/ethereum/beacon-APIs/pull/624 I haven't reviewed this at all and don't wanna work on that today, or tomorrow, but sure happy to get feedback already, it's in a shape that can be reviewed already The branch only has devnet 7 changes. Will need to merge the stateless block production stuff. It’s in a separate branch at the moment Eitan did you attempt to implement the blinded payload stuff, I realized it's super messy and needs a new web3signer path also `BlindedExecutionPayloadEnvelope` doesn't have the slot at all, since we moved that to `payload.slot_number` do we still have blinded payload post gloas? wasn't that supposed to all go away? it's an optimization for local stateful flow, and it can't go away because it never existed before but yeah, we wanna get rid of blinded objects probably blinded blocks go away i did all the beacon node changes (with the blinded paylolad) but havent actually made any changes to the VC so our vc still uses the stateful flow at the moment for local block production nico, the lodestar circuit breaker seems to have kicked off, but it seems to ban both builders not just one is that intentional? so the argument for `BlindedExecutionPayloadEnvelope` is really only about performance, but it seems small compared to passing the blobs around or not pretty sure I was the one that brought up the idea first, on paper it sounded good, but after looking at the implementation, it seems too much effort to me if we even need to force remote signers to support this, for a argubly just a small performance optimization of course, it kicks out all builders oh Thought you gonna do per builder blacklist I think kicking off all builders is too heavy handed nah you can just sibling attack that I remember <@755590043632140352> had an opinion on this I am not gonna implement that, the cirtcuit breaker should prio liveness over everything else hmm at a certain blob count/slot time the optimization might become important? lighthouse also doesn't seem to have any circuit breaker btw Eitan, take a look at my PR 🙂 I am not removing that, we still have only payload vs. payload + blobs yeah no circuit breaker implemented rn on our end oh yeah this PR is much simpler so really the only change in my PR that we no longer blind the payload, which I think is fine performance wise, it's still quite negligible compared to blobs, especially if you think about 48, 72, etc. as max <@412614104222531604> new image is building rn with the stateless block production endpoints any issue with ethrex? i guess we are the only ones in the kt devnet right? 😅 to alone for now <@412614104222531604> wanna throw a block with 8193 deposits? yeah can try btw, this is still something we can do, but I'd rather do this in our bid pool to just drop bids of builders that did not reveal a payload in the last x slots (or epochs), but I would separate that from the circuit breaker behavior",
+  "excerpts": [
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-07-08T10:02:28.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@881905303011086387> ?",
+      "createdAt": "2026-07-08T10:02:29.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you please leave devnet-6 up for a while",
+      "createdAt": "2026-07-08T10:03:38.576000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah",
+      "createdAt": "2026-07-08T10:03:44.124000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "possibly an extra day",
+      "createdAt": "2026-07-08T10:03:44.854000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "We unlikely to launch devnet 7 today",
+      "createdAt": "2026-07-08T10:03:53.199000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "the EL tests are not yet released yet",
+      "createdAt": "2026-07-08T10:04:00.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "and would probably take a couple of days for them to fix everything",
+      "createdAt": "2026-07-08T10:04:09.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tomi0x",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "okay. that helps",
+      "createdAt": "2026-07-08T10:04:34.510000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what do you mean, I was told by ELs that the CL is holding back the fork and we should split it 😅",
+      "createdAt": "2026-07-08T10:08:54.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah we have a `glmasterdam-devnet-7` branch. im running against lodestar and it seems fine so far. the ethpandaops image should be ready in like 20min",
+      "createdAt": "2026-07-08T10:08:56.413000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "was using ethrex-devnet-6 branch",
+      "createdAt": "2026-07-08T10:09:17.060000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@360491619402776577> was the biggest advocate of this one I think 😂",
+      "createdAt": "2026-07-08T10:09:21.007000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "same, it should not make a diff",
+      "createdAt": "2026-07-08T10:10:07.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "`glamsterdam-devnet-7` teriggered: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28934735282",
+      "createdAt": "2026-07-08T10:10:39.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "does geth already support gloas in its integrated beacon light client / can it sync without a cl?",
+      "createdAt": "2026-07-08T10:11:15.798000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "not sure if anyone has the bandwidth to work on that",
+      "createdAt": "2026-07-08T10:12:35.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "For glamsterdam-devnet-7 branches please use: \n\nBuilder Deposit Contract: 0x0000BFF46984E3725691FA540A8C7589300D8282\nBuilder Exits Contract: 0x000064D678505AD48F8CCB093BC65613800E8282",
+      "createdAt": "2026-07-08T10:20:20.109000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@1443132403001589771>",
+      "createdAt": "2026-07-08T10:20:31.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "is the byte code the final one?",
+      "createdAt": "2026-07-08T10:20:48.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hopefully",
+      "createdAt": "2026-07-08T10:20:55.594000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "its likely gonna be the one that will get audited",
+      "createdAt": "2026-07-08T10:21:13.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/ethereum/execution-specs/pull/3091",
+      "createdAt": "2026-07-08T10:21:49.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yes seems good, will the addresses be same on mainnet, right?",
+      "createdAt": "2026-07-08T10:24:24.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Ideally if the audit finds nothing I don't see a reason to change them",
+      "createdAt": "2026-07-08T10:24:48.598000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "for devnet 7 we gonna be deploying the contract pre fork, not bake it in the genesis",
+      "createdAt": "2026-07-08T10:25:14.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so we can make sure the workflow is fully working as expected",
+      "createdAt": "2026-07-08T10:25:25.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh just noticed, the `E` and `D` nice",
+      "createdAt": "2026-07-08T10:25:27.344000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "took me a while to get them 😂",
+      "createdAt": "2026-07-08T10:25:38.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "need to update the EIP",
+      "createdAt": "2026-07-08T10:26:06.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28935637085",
+      "createdAt": "2026-07-08T10:26:15.299000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "good call: https://github.com/ethereum/EIPs/pull/11899 <@534934855113506836>",
+      "createdAt": "2026-07-08T10:30:29.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah yeah I didn't add github handle",
+      "createdAt": "2026-07-08T10:31:42.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we have another PR that cuts the EIP text by more than half, that will conflicts with your PR but we can merge yours first",
+      "createdAt": "2026-07-08T10:32:01.341000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah didn't know you had an open pr for adjustment",
+      "createdAt": "2026-07-08T10:32:21.567000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also can just target your pr?",
+      "createdAt": "2026-07-08T10:32:25.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nah it's fine, even that PR is outdated",
+      "createdAt": "2026-07-08T10:32:34.129000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "still described old contract behavior",
+      "createdAt": "2026-07-08T10:32:42.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@586161934425128960> did you guys forget to update smth?",
+      "createdAt": "2026-07-08T11:19:49.753000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```\n\nWhat's happening: Every buildoor reveal is rejected by lodestar's beacon API with 400: First offset must equal to fixedEnd 12 != 100 on POST /eth/v1/beacon/execution_payload_envelopes. The bid wins, the payload builds, but the envelope never gets broadcast — so every builder block finalizes without a payload. All 3 retry attempts hit the same lodestar endpoint, so nothing ever lands (buildoor's log shows Previous bid was NOT revealed — payment pending for 2 epochs every slot, and lodestar's logs show the whole network endlessly trying execution_payload_envelopes_by_root for envelopes nobody has).\n```",
+      "createdAt": "2026-07-08T11:20:04.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah we didn't put in the sloppy fix we had for this on the other branch",
+      "createdAt": "2026-07-08T11:20:43.980000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "well, I am not happy with the spec, I think the blinded payload was wrong to have, so I will propose an alternative for that endpoint anyways",
+      "createdAt": "2026-07-08T11:21:17.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I can apply the hacks for now",
+      "createdAt": "2026-07-08T11:21:22.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Well",
+      "createdAt": "2026-07-08T11:21:30.261000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "thats a diff question tho 😂",
+      "createdAt": "2026-07-08T11:21:38.919000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "one sec, cherry picking few more commits, team is slow to review 😢",
+      "createdAt": "2026-07-08T11:22:16.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> the image has the api hack now, I also cherry picked my gloas circuit breaker update, not sure you wanna test that or not but it's there",
+      "createdAt": "2026-07-08T12:03:02.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "did you trig a new docker img build by any chance?",
+      "createdAt": "2026-07-08T12:04:49.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "\"the image has\"",
+      "createdAt": "2026-07-08T12:05:06.907000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "indeed thanks",
+      "createdAt": "2026-07-08T12:05:14.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "mariusvanderwijden",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I wasn't",
+      "createdAt": "2026-07-08T12:06:56.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "a good test scenario would be\n- (1) builder submit high bid to win all payloads but publishes late (eg. at second 6 into the slot)\n- (2) honest proposer payload reorg forces empty slot\n- (3) circuit breaker kicks in after a few slots like this and we only build local payloads",
+      "createdAt": "2026-07-08T12:08:16.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "whats the circuit breaker logic ?",
+      "createdAt": "2026-07-08T12:10:03.612000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it got a bit more complicated compared to pre-gloas\n```ts\n  // Exclude clockSlot itself, its payload reveal may still be in flight\n    const {blocksPresent, payloadsRevealed} = this.modules.forkChoice.getPayloadRevealCounts(\n      Math.max(clockSlot - this.faultInspectionWindow, 0),\n      clockSlot - 1\n    ); \n    const faults = blocksPresent - payloadsRevealed;\n\n    // Scale the fault budget by blocks present so sparse windows still trigger on high non-reveal rates\n    this.active = faults * this.faultInspectionWindow > this.allowedFaults * blocksPresent;\n```",
+      "createdAt": "2026-07-08T12:12:06.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so I am scaling it by missed blocks, but generally speaking, you only count empty slots, ie. not payload revealed, and block are no longer a consideration",
+      "createdAt": "2026-07-08T12:12:32.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also our circuit breaker is seeded at startup with some randomness, so it behaves different each time, but that we had already pre-gloas",
+      "createdAt": "2026-07-08T12:13:41.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@358120958726373381> im sorry to say but you have similar bug as <@586161934425128960> did",
+      "createdAt": "2026-07-08T12:17:32.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "`Reveal failed (attempt 3/3): failed to submit envelope: failed to submit envelope: failed to submit execution payload envelope POST failed with status 400: {\"code\":400,\"message\":\"BAD_REQUEST: invalid SSZ: OffsetIntoFixedPortion(12)\",\"stacktraces\":[]} for slot 109`",
+      "createdAt": "2026-07-08T12:17:33.639000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "got an open pr for this ?",
+      "createdAt": "2026-07-08T12:18:06.294000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "best I can offer right now is https://github.com/ChainSafe/lodestar/pull/9595 which implements \"the spec\"",
+      "createdAt": "2026-07-08T12:21:07.808000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nah but you said smth like you disagree wiht the spec",
+      "createdAt": "2026-07-08T12:21:33.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so I'm curious if you have a pr suggestion to make the spec more gud",
+      "createdAt": "2026-07-08T12:21:46.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I mean my PR doesn't implement the actual spec, but my new spec",
+      "createdAt": "2026-07-08T12:21:52.458000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://github.com/ethereum/beacon-APIs/pull/624",
+      "createdAt": "2026-07-08T12:23:10.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I haven't reviewed this at all and don't wanna work on that today, or tomorrow, but sure happy to get feedback already, it's in a shape that can be reviewed already",
+      "createdAt": "2026-07-08T12:23:55.658000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The branch only has devnet 7 changes. Will need to merge the stateless block production stuff. It’s in a separate branch at the moment",
+      "createdAt": "2026-07-08T12:25:01.311000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Eitan did you attempt to implement the blinded payload stuff, I realized it's super messy",
+      "createdAt": "2026-07-08T12:25:33.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "and needs a new web3signer path",
+      "createdAt": "2026-07-08T12:25:46.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also `BlindedExecutionPayloadEnvelope` doesn't have the slot at all, since we moved that to `payload.slot_number`",
+      "createdAt": "2026-07-08T12:26:39.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do we still have blinded payload post gloas?",
+      "createdAt": "2026-07-08T12:27:59.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "wasn't that supposed to all go away?",
+      "createdAt": "2026-07-08T12:28:05.774000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's an optimization for local stateful flow, and it can't go away because it never existed before",
+      "createdAt": "2026-07-08T12:28:50.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but yeah, we wanna get rid of blinded objects probably",
+      "createdAt": "2026-07-08T12:29:09.227000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "blinded blocks go away\n\ni did all the beacon node changes (with the blinded paylolad) but havent actually made any changes to the VC",
+      "createdAt": "2026-07-08T12:29:25.928000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so our vc still uses the stateful flow at the moment for local block production",
+      "createdAt": "2026-07-08T12:29:42.677000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nico, the lodestar circuit breaker seems to have kicked off, but it seems to ban both builders not just one",
+      "createdAt": "2026-07-08T12:31:08.664000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "is that intentional?",
+      "createdAt": "2026-07-08T12:31:12.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so the argument for `BlindedExecutionPayloadEnvelope` is really only about performance, but it seems small compared to passing the blobs around or not\n\npretty sure I was the one that brought up the idea first, on paper it sounded good, but after looking at the implementation, it seems too much effort to me if we even need to force remote signers to support this, for a argubly just a small performance optimization",
+      "createdAt": "2026-07-08T12:31:13.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "of course, it kicks out all builders",
+      "createdAt": "2026-07-08T12:31:28.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh",
+      "createdAt": "2026-07-08T12:31:36.394000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Thought you gonna do per builder blacklist",
+      "createdAt": "2026-07-08T12:31:43.592000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think kicking off all builders is too heavy handed",
+      "createdAt": "2026-07-08T12:31:54.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nah you can just sibling attack that",
+      "createdAt": "2026-07-08T12:31:58.616000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I remember <@755590043632140352> had an opinion on this",
+      "createdAt": "2026-07-08T12:32:06.672000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am not gonna implement that, the cirtcuit breaker should prio liveness over everything else",
+      "createdAt": "2026-07-08T12:32:25.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm at a certain blob count/slot time the optimization might become important?",
+      "createdAt": "2026-07-08T12:32:55.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lighthouse also doesn't seem to have any circuit breaker btw",
+      "createdAt": "2026-07-08T12:33:04.745000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Eitan, take a look at my PR 🙂",
+      "createdAt": "2026-07-08T12:33:16.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I am not removing that, we still have only payload vs. payload + blobs",
+      "createdAt": "2026-07-08T12:33:23.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah no circuit breaker implemented rn on our end",
+      "createdAt": "2026-07-08T12:33:41.164000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh yeah this PR is much simpler",
+      "createdAt": "2026-07-08T12:34:41.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so really the only change in my PR that we no longer blind the payload, which I think is fine performance wise, it's still quite negligible compared to blobs, especially if you think about 48, 72, etc. as max",
+      "createdAt": "2026-07-08T12:34:43.345000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> new image is building rn with the stateless block production endpoints",
+      "createdAt": "2026-07-08T13:09:10.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "edgl_dev",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "any issue with ethrex? i guess we are the only ones in the kt devnet right? 😅",
+      "createdAt": "2026-07-08T13:31:14.751000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "to alone for now",
+      "createdAt": "2026-07-08T13:31:32.535000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> wanna throw a block with 8193 deposits?",
+      "createdAt": "2026-07-08T13:34:42.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah can try",
+      "createdAt": "2026-07-08T13:34:54.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "btw, this is still something we can do, but I'd rather do this in our bid pool to just drop bids of builders that did not reveal a payload in the last x slots (or epochs), but I would separate that from the circuit breaker behavior",
+      "createdAt": "2026-07-08T14:02:37.036000+00:00",
+      "attachments": []
+    }
+  ]
+}
