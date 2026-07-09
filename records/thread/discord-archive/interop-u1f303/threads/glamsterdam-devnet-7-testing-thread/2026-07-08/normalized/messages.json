@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "interop-🌃/_threads/glamsterdam-devnet-7 testing thread",
   "date": "2026-07-08",
-  "messageCount": 98,
-  "sourceHash": "e696c5cd0c4aa99aa73cf814ccb3df8199d460b0ea37d07e21b99f0495c071ba",
-  "searchText": "<@881905303011086387> ? can you please leave devnet-6 up for a while yeah possibly an extra day We unlikely to launch devnet 7 today the EL tests are not yet released yet and would probably take a couple of days for them to fix everything okay. that helps what do you mean, I was told by ELs that the CL is holding back the fork and we should split it 😅 yeah we have a `glmasterdam-devnet-7` branch. im running against lodestar and it seems fine so far. the ethpandaops image should be ready in like 20min was using ethrex-devnet-6 branch <@360491619402776577> was the biggest advocate of this one I think 😂 same, it should not make a diff `glamsterdam-devnet-7` teriggered: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28934735282 does geth already support gloas in its integrated beacon light client / can it sync without a cl? not sure if anyone has the bandwidth to work on that For glamsterdam-devnet-7 branches please use: Builder Deposit Contract: 0x0000BFF46984E3725691FA540A8C7589300D8282 Builder Exits Contract: 0x000064D678505AD48F8CCB093BC65613800E8282 cc <@1443132403001589771> is the byte code the final one? hopefully its likely gonna be the one that will get audited https://github.com/ethereum/execution-specs/pull/3091 yes seems good, will the addresses be same on mainnet, right? Ideally if the audit finds nothing I don't see a reason to change them for devnet 7 we gonna be deploying the contract pre fork, not bake it in the genesis so we can make sure the workflow is fully working as expected oh just noticed, the `E` and `D` nice took me a while to get them 😂 need to update the EIP https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28935637085 good call: https://github.com/ethereum/EIPs/pull/11899 <@534934855113506836> ah yeah I didn't add github handle we have another PR that cuts the EIP text by more than half, that will conflicts with your PR but we can merge yours first ah didn't know you had an open pr for adjustment also can just target your pr? nah it's fine, even that PR is outdated still described old contract behavior <@586161934425128960> did you guys forget to update smth? ``` What's happening: Every buildoor reveal is rejected by lodestar's beacon API with 400: First offset must equal to fixedEnd 12 != 100 on POST /eth/v1/beacon/execution_payload_envelopes. The bid wins, the payload builds, but the envelope never gets broadcast — so every builder block finalizes without a payload. All 3 retry attempts hit the same lodestar endpoint, so nothing ever lands (buildoor's log shows Previous bid was NOT revealed — payment pending for 2 epochs every slot, and lodestar's logs show the whole network endlessly trying execution_payload_envelopes_by_root for envelopes nobody has). ``` ah we didn't put in the sloppy fix we had for this on the other branch well, I am not happy with the spec, I think the blinded payload was wrong to have, so I will propose an alternative for that endpoint anyways I can apply the hacks for now Well thats a diff question tho 😂 one sec, cherry picking few more commits, team is slow to review 😢 <@412614104222531604> the image has the api hack now, I also cherry picked my gloas circuit breaker update, not sure you wanna test that or not but it's there did you trig a new docker img build by any chance? \"the image has\" indeed thanks I wasn't a good test scenario would be - (1) builder submit high bid to win all payloads but publishes late (eg. at second 6 into the slot) - (2) honest proposer payload reorg forces empty slot - (3) circuit breaker kicks in after a few slots like this and we only build local payloads whats the circuit breaker logic ? it got a bit more complicated compared to pre-gloas ```ts // Exclude clockSlot itself, its payload reveal may still be in flight const {blocksPresent, payloadsRevealed} = this.modules.forkChoice.getPayloadRevealCounts( Math.max(clockSlot - this.faultInspectionWindow, 0), clockSlot - 1 ); const faults = blocksPresent - payloadsRevealed; // Scale the fault budget by blocks present so sparse windows still trigger on high non-reveal rates this.active = faults * this.faultInspectionWindow > this.allowedFaults * blocksPresent; ``` so I am scaling it by missed blocks, but generally speaking, you only count empty slots, ie. not payload revealed, and block are no longer a consideration also our circuit breaker is seeded at startup with some randomness, so it behaves different each time, but that we had already pre-gloas <@358120958726373381> im sorry to say but you have similar bug as <@586161934425128960> did `Reveal failed (attempt 3/3): failed to submit envelope: failed to submit envelope: failed to submit execution payload envelope POST failed with status 400: {\"code\":400,\"message\":\"BAD_REQUEST: invalid SSZ: OffsetIntoFixedPortion(12)\",\"stacktraces\":[]} for slot 109` got an open pr for this ? best I can offer right now is https://github.com/ChainSafe/lodestar/pull/9595 which implements \"the spec\" nah but you said smth like you disagree wiht the spec so I'm curious if you have a pr suggestion to make the spec more gud I mean my PR doesn't implement the actual spec, but my new spec https://github.com/ethereum/beacon-APIs/pull/624 I haven't reviewed this at all and don't wanna work on that today, or tomorrow, but sure happy to get feedback already, it's in a shape that can be reviewed already The branch only has devnet 7 changes. Will need to merge the stateless block production stuff. It’s in a separate branch at the moment Eitan did you attempt to implement the blinded payload stuff, I realized it's super messy and needs a new web3signer path also `BlindedExecutionPayloadEnvelope` doesn't have the slot at all, since we moved that to `payload.slot_number` do we still have blinded payload post gloas? wasn't that supposed to all go away? it's an optimization for local stateful flow, and it can't go away because it never existed before but yeah, we wanna get rid of blinded objects probably blinded blocks go away i did all the beacon node changes (with the blinded paylolad) but havent actually made any changes to the VC so our vc still uses the stateful flow at the moment for local block production nico, the lodestar circuit breaker seems to have kicked off, but it seems to ban both builders not just one is that intentional? so the argument for `BlindedExecutionPayloadEnvelope` is really only about performance, but it seems small compared to passing the blobs around or not pretty sure I was the one that brought up the idea first, on paper it sounded good, but after looking at the implementation, it seems too much effort to me if we even need to force remote signers to support this, for a argubly just a small performance optimization of course, it kicks out all builders oh Thought you gonna do per builder blacklist I think kicking off all builders is too heavy handed nah you can just sibling attack that I remember <@755590043632140352> had an opinion on this I am not gonna implement that, the cirtcuit breaker should prio liveness over everything else hmm at a certain blob count/slot time the optimization might become important? lighthouse also doesn't seem to have any circuit breaker btw Eitan, take a look at my PR 🙂 I am not removing that, we still have only payload vs. payload + blobs yeah no circuit breaker implemented rn on our end oh yeah this PR is much simpler so really the only change in my PR that we no longer blind the payload, which I think is fine performance wise, it's still quite negligible compared to blobs, especially if you think about 48, 72, etc. as max <@412614104222531604> new image is building rn with the stateless block production endpoints any issue with ethrex? i guess we are the only ones in the kt devnet right? 😅 to alone for now <@412614104222531604> wanna throw a block with 8193 deposits? yeah can try btw, this is still something we can do, but I'd rather do this in our bid pool to just drop bids of builders that did not reveal a payload in the last x slots (or epochs), but I would separate that from the circuit breaker behavior",
+  "messageCount": 136,
+  "sourceHash": "85336effa0de3878b6f7a058583a9475d6d5aa28864679f53bb40a7a3f43ba48",
+  "searchText": "<@881905303011086387> ? can you please leave devnet-6 up for a while yeah possibly an extra day We unlikely to launch devnet 7 today the EL tests are not yet released yet and would probably take a couple of days for them to fix everything okay. that helps what do you mean, I was told by ELs that the CL is holding back the fork and we should split it 😅 yeah we have a `glmasterdam-devnet-7` branch. im running against lodestar and it seems fine so far. the ethpandaops image should be ready in like 20min was using ethrex-devnet-6 branch <@360491619402776577> was the biggest advocate of this one I think 😂 same, it should not make a diff `glamsterdam-devnet-7` teriggered: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28934735282 does geth already support gloas in its integrated beacon light client / can it sync without a cl? not sure if anyone has the bandwidth to work on that For glamsterdam-devnet-7 branches please use: Builder Deposit Contract: 0x0000BFF46984E3725691FA540A8C7589300D8282 Builder Exits Contract: 0x000064D678505AD48F8CCB093BC65613800E8282 cc <@1443132403001589771> is the byte code the final one? hopefully its likely gonna be the one that will get audited https://github.com/ethereum/execution-specs/pull/3091 yes seems good, will the addresses be same on mainnet, right? Ideally if the audit finds nothing I don't see a reason to change them for devnet 7 we gonna be deploying the contract pre fork, not bake it in the genesis so we can make sure the workflow is fully working as expected oh just noticed, the `E` and `D` nice took me a while to get them 😂 need to update the EIP https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/28935637085 good call: https://github.com/ethereum/EIPs/pull/11899 <@534934855113506836> ah yeah I didn't add github handle we have another PR that cuts the EIP text by more than half, that will conflicts with your PR but we can merge yours first ah didn't know you had an open pr for adjustment also can just target your pr? nah it's fine, even that PR is outdated still described old contract behavior <@586161934425128960> did you guys forget to update smth? ``` What's happening: Every buildoor reveal is rejected by lodestar's beacon API with 400: First offset must equal to fixedEnd 12 != 100 on POST /eth/v1/beacon/execution_payload_envelopes. The bid wins, the payload builds, but the envelope never gets broadcast — so every builder block finalizes without a payload. All 3 retry attempts hit the same lodestar endpoint, so nothing ever lands (buildoor's log shows Previous bid was NOT revealed — payment pending for 2 epochs every slot, and lodestar's logs show the whole network endlessly trying execution_payload_envelopes_by_root for envelopes nobody has). ``` ah we didn't put in the sloppy fix we had for this on the other branch well, I am not happy with the spec, I think the blinded payload was wrong to have, so I will propose an alternative for that endpoint anyways I can apply the hacks for now Well thats a diff question tho 😂 one sec, cherry picking few more commits, team is slow to review 😢 <@412614104222531604> the image has the api hack now, I also cherry picked my gloas circuit breaker update, not sure you wanna test that or not but it's there did you trig a new docker img build by any chance? \"the image has\" indeed thanks I wasn't a good test scenario would be - (1) builder submit high bid to win all payloads but publishes late (eg. at second 6 into the slot) - (2) honest proposer payload reorg forces empty slot - (3) circuit breaker kicks in after a few slots like this and we only build local payloads whats the circuit breaker logic ? it got a bit more complicated compared to pre-gloas ```ts // Exclude clockSlot itself, its payload reveal may still be in flight const {blocksPresent, payloadsRevealed} = this.modules.forkChoice.getPayloadRevealCounts( Math.max(clockSlot - this.faultInspectionWindow, 0), clockSlot - 1 ); const faults = blocksPresent - payloadsRevealed; // Scale the fault budget by blocks present so sparse windows still trigger on high non-reveal rates this.active = faults * this.faultInspectionWindow > this.allowedFaults * blocksPresent; ``` so I am scaling it by missed blocks, but generally speaking, you only count empty slots, ie. not payload revealed, and block are no longer a consideration also our circuit breaker is seeded at startup with some randomness, so it behaves different each time, but that we had already pre-gloas <@358120958726373381> im sorry to say but you have similar bug as <@586161934425128960> did `Reveal failed (attempt 3/3): failed to submit envelope: failed to submit envelope: failed to submit execution payload envelope POST failed with status 400: {\"code\":400,\"message\":\"BAD_REQUEST: invalid SSZ: OffsetIntoFixedPortion(12)\",\"stacktraces\":[]} for slot 109` got an open pr for this ? best I can offer right now is https://github.com/ChainSafe/lodestar/pull/9595 which implements \"the spec\" nah but you said smth like you disagree wiht the spec so I'm curious if you have a pr suggestion to make the spec more gud I mean my PR doesn't implement the actual spec, but my new spec https://github.com/ethereum/beacon-APIs/pull/624 I haven't reviewed this at all and don't wanna work on that today, or tomorrow, but sure happy to get feedback already, it's in a shape that can be reviewed already The branch only has devnet 7 changes. Will need to merge the stateless block production stuff. It’s in a separate branch at the moment Eitan did you attempt to implement the blinded payload stuff, I realized it's super messy and needs a new web3signer path also `BlindedExecutionPayloadEnvelope` doesn't have the slot at all, since we moved that to `payload.slot_number` do we still have blinded payload post gloas? wasn't that supposed to all go away? it's an optimization for local stateful flow, and it can't go away because it never existed before but yeah, we wanna get rid of blinded objects probably blinded blocks go away i did all the beacon node changes (with the blinded paylolad) but havent actually made any changes to the VC so our vc still uses the stateful flow at the moment for local block production nico, the lodestar circuit breaker seems to have kicked off, but it seems to ban both builders not just one is that intentional? so the argument for `BlindedExecutionPayloadEnvelope` is really only about performance, but it seems small compared to passing the blobs around or not pretty sure I was the one that brought up the idea first, on paper it sounded good, but after looking at the implementation, it seems too much effort to me if we even need to force remote signers to support this, for a argubly just a small performance optimization of course, it kicks out all builders oh Thought you gonna do per builder blacklist I think kicking off all builders is too heavy handed nah you can just sibling attack that I remember <@755590043632140352> had an opinion on this I am not gonna implement that, the cirtcuit breaker should prio liveness over everything else hmm at a certain blob count/slot time the optimization might become important? lighthouse also doesn't seem to have any circuit breaker btw Eitan, take a look at my PR 🙂 I am not removing that, we still have only payload vs. payload + blobs yeah no circuit breaker implemented rn on our end oh yeah this PR is much simpler so really the only change in my PR that we no longer blind the payload, which I think is fine performance wise, it's still quite negligible compared to blobs, especially if you think about 48, 72, etc. as max <@412614104222531604> new image is building rn with the stateless block production endpoints any issue with ethrex? i guess we are the only ones in the kt devnet right? 😅 to alone for now <@412614104222531604> wanna throw a block with 8193 deposits? yeah can try btw, this is still something we can do, but I'd rather do this in our bid pool to just drop bids of builders that did not reveal a payload in the last x slots (or epochs), but I would separate that from the circuit breaker behavior <@412614104222531604> just rewatched fcr breakout, feel free to enable it on the devnet-7 for lodestar nodes via `--chain.fastConfirmation`, we are passing spec tests, the only difference with gloas that I am aware of is that in `is_ancestor` you need to count any payload variant (ie. use `PENDING` node) but we merged my fix for that yesterday, you probably wanna observe the CL via `fast_confirmation` event and **also** the EL's safe block hash why not enable by default? it's completely useless if the operator/user doesn't consume it and adds extra work to the node for no reason, at least in lodestar we observed less head vote accuracy on mainnet on the nodes that had fcr enabled (on the devnet it shouldn't matter) what would be the argument for enabling it by default? <@881905303011086387> seems like nimbus enabled it by default (1) why? and (2) how do you avoid that this causes negative effects on validator performance prysm branch: https://github.com/OffchainLabs/prysm/pull/17138 https://klipy.com/gifs/flyby-sailby (1) the EF announced to the banks that by april it is production-ready for use: https://fastconfirm.it/Fast%20Confirmation%20Rule%20for%20Exchanges.pdf > The first consensus clients are expected to be production-ready around the end of Q1. **In Q2, exchanges can already use FCR.** further, fcr is the only spec-compliant way, the earlier justified thing is completely gone / no longer spec-compliant. (2) it shouldn't have an impact on validator performance in nimbus, if you see head vote accuracy issues in nimbus lmk, it's likely not related to fcr (1) how is that relevant to a node operator that just want to use the node to run validators, sure the safe block hash is a nice improvement but if you don't use the node as RPC I don't see any reason for this (2) ok that pretty crazy if that's the case, we just merged bunch of perf improvements maybe it's better on our end as well, last time I saw a ~1%+ head vote accuracy drop. but even then, why spent cpu cycles on this if it's essentially a no-op for stakers it shouldn't affect rewards for us I could include our fcr branch in devnet 7 if that’s something we are testing Would be nice if you see that nimbus has sub-par head vote accuracy, lmk, it would be new to me (and unlikely to be due to fcr) you won't see that on the devnet yeah validator state is tiny I think they have monitoring on the larger testnets as well I would not want it enabled as a validator. As Nico said it provides no benefit for validators. In our case our fcr impl holds a fork choice write lock while looking up states that may or may not be cached. That can def affect validator performance in the worst case I do have FCR enabled on my mainnet RPC node since a while but it's also notable on cpu usage, this is old data, we did some improvements and do more caching to avoid recomputing so this might be better now and <@881905303011086387> you still didn't tell why a staker would want to have this running, it seems crazy to me to burn their cpu for this ok I am switching my rpc node to nimbus now 🙂 running nimbus now, but question that also came up on fcr breakout, why would we emit the event and run fcr during sync <@881905303011086387> seems like nimbus is doing this how do you distinguish whether you are \"during sync\" vs a holesky style situation where there is a block every 2 hours awesome, would be great to have more data! but doesn't fcr become useless if the node is not close to head, let's say 32 slots away, because then it would fallback to finalized anyways, or not? yes, but in that situation it is also free to just return finalized like, there is no concept of \"close to head\", we don't know if there are future blocks so any prose regarding \"during sync\" etc, it's pointless sure, if it doesn't add overhead to sync then it's fine I guess I wont be able to give you val",
   "excerpts": [
     {
       "author": "barnabasbusa",
@@ -788,6 +788,194 @@
       "parent": "interop-🌃",
       "content": "btw, this is still something we can do, but I'd rather do this in our bid pool to just drop bids of builders that did not reveal a payload in the last x slots (or epochs), but I would separate that from the circuit breaker behavior",
       "createdAt": "2026-07-08T14:02:37.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> just rewatched fcr breakout, feel free to enable it on the devnet-7 for lodestar nodes via `--chain.fastConfirmation`, we are passing spec tests, the only difference with gloas that I am aware of is that in `is_ancestor` you need to count any payload variant (ie. use `PENDING` node) but we merged my fix for that yesterday, you probably wanna observe the CL via `fast_confirmation` event and **also** the EL's safe block hash",
+      "createdAt": "2026-07-08T16:02:42.378000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "why not enable by default?",
+      "createdAt": "2026-07-08T16:22:01.058000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's completely useless if the operator/user doesn't consume it and adds extra work to the node for no reason, at least in lodestar we observed less head vote accuracy on mainnet on the nodes that had fcr enabled (on the devnet it shouldn't matter)\n\nwhat would be the argument for enabling it by default?",
+      "createdAt": "2026-07-08T16:51:38.661000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@881905303011086387> seems like nimbus enabled it by default (1) why? and (2) how do you avoid that this causes negative effects on validator performance",
+      "createdAt": "2026-07-08T16:54:58.556000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "prysm branch: https://github.com/OffchainLabs/prysm/pull/17138",
+      "createdAt": "2026-07-08T16:56:38.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "https://klipy.com/gifs/flyby-sailby",
+      "createdAt": "2026-07-08T16:56:52.691000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "(1) the EF announced to the banks that by april it is production-ready for use: https://fastconfirm.it/Fast%20Confirmation%20Rule%20for%20Exchanges.pdf\n> The first consensus clients are expected to be production-ready around the end of Q1. **In Q2, exchanges can already use FCR.**\nfurther, fcr is the only spec-compliant way, the earlier justified thing is completely gone / no longer spec-compliant.\n\n(2) it shouldn't have an impact on validator performance in nimbus, if you see head vote accuracy issues in nimbus lmk, it's likely not related to fcr",
+      "createdAt": "2026-07-08T16:57:25.072000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "(1) how is that relevant to a node operator that just want to use the node to run validators, sure the safe block hash is a nice improvement but if you don't use the node as RPC I don't see any reason for this\n\n(2) ok that pretty crazy if that's the case, we just merged bunch of perf improvements maybe it's better on our end as well, last time I saw a ~1%+ head vote accuracy drop. but even then, why spent cpu cycles on this if it's essentially a no-op for stakers",
+      "createdAt": "2026-07-08T17:00:17.835000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it shouldn't affect rewards for us",
+      "createdAt": "2026-07-08T17:01:11.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I could include our fcr branch in devnet 7 if that’s something we are testing",
+      "createdAt": "2026-07-08T17:08:18.298000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Would be nice",
+      "createdAt": "2026-07-08T17:08:32.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if you see that nimbus has sub-par head vote accuracy, lmk, it would be new to me (and unlikely to be due to fcr)",
+      "createdAt": "2026-07-08T17:09:44.114000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you won't see that on the devnet",
+      "createdAt": "2026-07-08T17:10:20.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah validator state is tiny",
+      "createdAt": "2026-07-08T17:10:42.224000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think they have monitoring on the larger testnets as well",
+      "createdAt": "2026-07-08T17:10:42.868000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I would not want it enabled as a validator. As Nico said it provides no benefit for validators. In our case our fcr impl holds a fork choice write lock while looking up states that may or may not be cached. That can def affect validator performance in the worst case",
+      "createdAt": "2026-07-08T17:10:43.218000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I do have FCR enabled on my mainnet RPC node since a while but it's also notable on cpu usage, this is old data, we did some improvements and do more caching to avoid recomputing so this might be better now",
+      "createdAt": "2026-07-08T17:11:29.079000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "6d78ef47e337296e51d1439dd220831efdf211b8c92b81bc26b9edee8a67244e"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "and <@881905303011086387> you still didn't tell why a staker would want to have this running, it seems crazy to me to burn their cpu for this",
+      "createdAt": "2026-07-08T17:12:06.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok I am switching my rpc node to nimbus now 🙂",
+      "createdAt": "2026-07-08T17:13:20.786000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "running nimbus now, but question that also came up on fcr breakout, why would we emit the event and run fcr during sync <@881905303011086387> seems like nimbus is doing this",
+      "createdAt": "2026-07-08T17:22:13.993000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "84e8bfd44838212fbd9bb3d4b72774c3490f1530b84557ee94c702415bace980"
+        }
+      ]
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "how do you distinguish whether you are \"during sync\" vs a holesky style situation where there is a block every 2 hours",
+      "createdAt": "2026-07-08T17:31:14.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "etan_status",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "awesome, would be great to have more data!",
+      "createdAt": "2026-07-08T17:31:43.226000+00:00",
       "attachments": []
     }
   ]
