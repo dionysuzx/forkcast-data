@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "epbs",
   "date": "2026-07-21",
-  "messageCount": 3,
-  "sourceHash": "146d407d684549187c5293631716500b10f4b737e1b45746dddeb6f12005b10c",
-  "searchText": "<@&1417820113981145228> we need to align at least on the default deadline for external builder requests. Currently it is an absurd 1 second, which arguably there's no reason to lower it cause operators can change it to play timing games. Lighthouse even offers this to be configurable. I believe we should be very aggresive on the attestation deadline, possibly going as far as lowering it to 2 seconds, but after benchmarking and with the current limits we are thinking, 3 seconds is more than enough and it gives us a safety margin in case something goes wrong. However, I believe we have a unique opportunity to change the dynamics of timing games. The TL;DR is this > We should lower the deadline of the request to 200ms, and not make this one configurable. If Lighthouse wants to provide a flag for operators to play timing games, then make the \"request time\" configurable. So let me spell out the obvious: today a client contacts 4 different relays, flashbots (not anymore apparently though) would return immediately, but others would take the full second. So the node since it has a long deadline, anyway waits for an entire second. That means that when the bid that wins is from a relay that returned fast, the node anyway effectively wasted an entire second. The same thing happens for local building. The ones that are determining the timing games are not the operators but the relays. The operator just sets a maximum deadline for the request. With ePBS, the operator itself can play the timing game, wait until the maximum they deem to be safe and request at the very last moment. When this happens the operator should not allow the builder/relay to delay the reply, they are in charge of this return and any delay would further damage the attestation deadline. So I want for CL clients to agree on a sane default, aggressive, it should be max 200ms The builder should keep updating exactly as today their block, and keep the best bid they have at any moment, for them returning should be immediate from this call, no need to delay it. Cancellations don't make any sense, they are in charge of it. cc <@703742742135570499> <@1126229231572094976> <@968526635735326741> you guys were in charge of the benching for the attestation deadline",
+  "messageCount": 18,
+  "sourceHash": "45924e92595547952b76f0e181b2c3d6d8b43b544c4c2e59585751f851e8bc1e",
+  "searchText": "<@&1417820113981145228> we need to align at least on the default deadline for external builder requests. Currently it is an absurd 1 second, which arguably there's no reason to lower it cause operators can change it to play timing games. Lighthouse even offers this to be configurable. I believe we should be very aggresive on the attestation deadline, possibly going as far as lowering it to 2 seconds, but after benchmarking and with the current limits we are thinking, 3 seconds is more than enough and it gives us a safety margin in case something goes wrong. However, I believe we have a unique opportunity to change the dynamics of timing games. The TL;DR is this > We should lower the deadline of the request to 200ms, and not make this one configurable. If Lighthouse wants to provide a flag for operators to play timing games, then make the \"request time\" configurable. So let me spell out the obvious: today a client contacts 4 different relays, flashbots (not anymore apparently though) would return immediately, but others would take the full second. So the node since it has a long deadline, anyway waits for an entire second. That means that when the bid that wins is from a relay that returned fast, the node anyway effectively wasted an entire second. The same thing happens for local building. The ones that are determining the timing games are not the operators but the relays. The operator just sets a maximum deadline for the request. With ePBS, the operator itself can play the timing game, wait until the maximum they deem to be safe and request at the very last moment. When this happens the operator should not allow the builder/relay to delay the reply, they are in charge of this return and any delay would further damage the attestation deadline. So I want for CL clients to agree on a sane default, aggressive, it should be max 200ms The builder should keep updating exactly as today their block, and keep the best bid they have at any moment, for them returning should be immediate from this call, no need to delay it. Cancellations don't make any sense, they are in charge of it. cc <@703742742135570499> <@1126229231572094976> <@968526635735326741> you guys were in charge of the benching for the attestation deadline I internally will continue fighting for the request time **not** to be configurable, and it's fine if clients want to make that timing game configurable, but at least the delay should be on the operators and not on relays Edited the above 200ms -> 300ms cause I'm not sure what's the worst TTL today, but I suspect 200ms is still good enough there's possibly a BLS verification though, so safer may be 300ms https://wondernetwork.com/pings/Sydney Unsure of empirical accuracy, but some of those near/exceed 400ms even higher: https://wondernetwork.com/pings/Auckland this is without finding tiny gimmick islands in the Pacific where 100 people live I believe it's highly unlikely that a default non-configurable value will stop those players (e.g. Kiln is infamous for pushing this to the max) from playing timing games. They will fork and trivially change any default values, this is easier than ever with LLMs. I do agree the space to play timing games should be reduced, the current 4s is too lenient. With a 3s deadline, I think realistically we'll still see timing game players propose ~1.5s into the slot. That is still a second shorter than they have today, resulting in less extra value to capture. Also, builders are *incentivized* to delay their responses as much as possible, it makes them win the bidding round. We already saw this play out with relays - the relays that didn't delay responses quickly became uncompetitive. (In case this needs to be said: I am personally not a fan of timing games at all.) Repeating just in case, I do not say above to stop timing games, just saying we can move them now to the operator instead of the relay. Kiln can happily request later in Gloas Agree with Luca. I think any incentive to fork for a config reason is bad for the network. (also ACK that potuz’s proposal isn’t to stop timing games) But I’m not sure this approach cleanly solves the problem. If I understand the point of the example, if the winning bid is returned 1s early, and the proposer still wait til the last possible moment to receieve the bids from other relays, the timing games wasted 1s where the network could have been attesting. First this assumes the relay that returned their bid 1s early won the auction at all which seems lucky given they couldn’t take advantage of the extra time while others did. But more importantly, adding a `request_time` knob for the proposer doesn’t return this time back for attestations. The proposer would delay their request and all the bids would arrive close to the deadline within 300ms of each other (so no 1s early bid even exists anymore). So this feels more like it just accomplishes shifting sophistication into proposer’s hands rather than relays/builders which I’d argue is not where sophistication should be shifted. e.g., the Kilns that are better at playing timing games would be better at pushing this vs today where relays essentially offer this as a service to any unsophisticated proposer connected for free. So I guess would want to understand how things would play out with a `request_time` knob. I thought everyone was onboard with the relay/builder-side delays. That's what the `X-Timeout-Ms` and `Date-Milliseconds` headers are for in the Builder API right? To allow the builder to time its response exactly. Also, tuning the delay is kind of impractical if you make requests to builders that are geographically distributed. The ones further away from you would gain an advantage since they'd receive your request later. I think the best thing we can default to is similar to today - aim to propose 1s into the slot at the latest. People who want to push things further will find a way, regardless of whether and how easily configurable it is. Instead of focusing on the configurable vs non configurable part of this (clients will do whatever they want) can we focus on the core of the question? Instead of letting an external agent decide the timing we should I think the original point behind those headers was that most node operators don't have the sophistication/expertise to tune those parameters correctly, so letting the \"external agent\" handle it levels the playing field. The operator can still override the default if they want. Having the operator \"play timing games\" by default puts a burden on unsophisticated proposers > That means that when the bid that wins is from a relay that returned fast, the node anyway effectively wasted an entire second This doesn't quite happen If you want the relay/builder to respond right away, you can set the `X-Timeout-MS` header value to 0 or 1. I'm guessing this would work even today on most relays. Perhaps we could make those headers actually **required** for Gloas? I'd support that. Every CL/VC client would be expected to provide values for them, and every builder would be expected to respect them or lose their chance of providing a bid.",
   "excerpts": [
     {
       "author": "potuz",
@@ -28,6 +28,126 @@
       "parent": "",
       "content": "cc <@703742742135570499> <@1126229231572094976> <@968526635735326741> you guys were in charge of the benching for the attestation deadline",
       "createdAt": "2026-07-21T14:01:46.023000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I internally will continue fighting for the request time **not** to be configurable, and it's fine if clients want to make that timing game configurable, but at least the delay should be on the operators and not on relays",
+      "createdAt": "2026-07-21T14:02:43.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Edited the above 200ms -> 300ms cause I'm not sure what's the worst TTL today, but I suspect 200ms is still good enough",
+      "createdAt": "2026-07-21T14:31:58.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "there's possibly a BLS verification though, so safer may be 300ms",
+      "createdAt": "2026-07-21T14:32:25.342000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "https://wondernetwork.com/pings/Sydney",
+      "createdAt": "2026-07-21T14:38:56.406000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Unsure of empirical accuracy, but some of those near/exceed 400ms",
+      "createdAt": "2026-07-21T14:42:47.175000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "even higher: https://wondernetwork.com/pings/Auckland",
+      "createdAt": "2026-07-21T14:49:15.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "this is without finding tiny gimmick islands in the Pacific where 100 people live",
+      "createdAt": "2026-07-21T14:49:50.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "serenita_io",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I believe it's highly unlikely that a default non-configurable value will stop those players (e.g. Kiln is infamous for pushing this to the max) from playing timing games. They will fork and trivially change any default values, this is easier than ever with LLMs.\n\nI do agree the space to play timing games should be reduced, the current 4s is too lenient. With a 3s deadline, I think realistically we'll still see timing game players propose ~1.5s into the slot. That is still a second shorter than they have today,  resulting in less extra value to capture.\n\nAlso, builders are *incentivized* to delay their responses as much as possible, it makes them win the bidding round. We already saw this play out with relays - the relays that didn't delay responses quickly became uncompetitive.\n\n(In case this needs to be said: I am personally not a fan of timing games at all.)",
+      "createdAt": "2026-07-21T15:03:35.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Repeating just in case, I do not say above to stop timing games, just saying we can move them now to the operator instead of the relay. Kiln can happily request later in Gloas",
+      "createdAt": "2026-07-21T15:12:10.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jvranek",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Agree with Luca. I think any incentive to fork for a config reason is bad for the network. (also ACK that potuz’s proposal isn’t to stop timing games)\n\nBut I’m not sure this approach cleanly solves the problem. If I understand the point of the example, if the winning bid is returned 1s early, and the proposer still wait til the last possible moment to receieve the bids from other relays, the timing games wasted 1s where the network could have been attesting. \n\nFirst this assumes the relay that returned their bid 1s early won the auction at all which seems lucky given they couldn’t take advantage of the extra time while others did. But more importantly, adding a `request_time` knob for the proposer doesn’t return this time back for attestations. \n\nThe proposer would delay their request and all the bids would arrive close to the deadline within 300ms of each other (so no 1s early bid even exists anymore). So this feels more like it just accomplishes shifting sophistication into proposer’s hands rather than relays/builders which I’d argue is not where sophistication should be shifted. e.g., the Kilns that are better at playing timing games would be better at pushing this vs today where relays essentially offer this as a service to any unsophisticated proposer connected for free.\n\nSo I guess would want to understand how things would play out with a `request_time` knob.",
+      "createdAt": "2026-07-21T15:14:46.884000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "serenita_io",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I thought everyone was onboard with the relay/builder-side delays. That's what the `X-Timeout-Ms` and `Date-Milliseconds` headers are for in the Builder API right? To allow the builder to time its response exactly.\n\nAlso, tuning the delay is kind of impractical if you make requests to builders that are geographically distributed. The ones further away from you would gain an advantage since they'd receive your request later.",
+      "createdAt": "2026-07-21T15:16:36.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "serenita_io",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the best thing we can default to is similar to today - aim to propose 1s into the slot at the latest. People who want to push things further will find a way, regardless of whether and how easily configurable it is.",
+      "createdAt": "2026-07-21T15:20:31.993000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Instead of focusing on the configurable vs non configurable part of this (clients will do whatever they want) can we focus on the core of the question? Instead of letting an external agent decide the timing we should",
+      "createdAt": "2026-07-21T15:38:57.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "l03443",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I think the original point behind those headers was that most node operators don't have the sophistication/expertise to tune those parameters correctly, so letting the \"external agent\" handle it levels the playing field. The operator can still override the default if they want. Having the operator \"play timing games\" by default puts a burden on unsophisticated proposers\n\n> That means that when the bid that wins is from a relay that returned fast, the node anyway effectively wasted an entire second\nThis doesn't quite happen",
+      "createdAt": "2026-07-21T16:09:53.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "serenita_io",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "If you want the relay/builder to respond right away, you can set the `X-Timeout-MS` header value to 0 or 1. I'm guessing this would work even today on most relays.\n\nPerhaps we could make those headers actually **required** for Gloas? I'd support that. Every CL/VC client would be expected to provide values for them, and every builder would be expected to respect them or lose their chance of providing a bid.",
+      "createdAt": "2026-07-21T19:39:58.099000+00:00",
       "attachments": []
     }
   ]
