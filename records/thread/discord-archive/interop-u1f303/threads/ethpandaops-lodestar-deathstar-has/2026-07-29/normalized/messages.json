@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "interop-🌃/_threads/`ethpandaops_lodestar_deathstar` has",
   "date": "2026-07-29",
-  "messageCount": 3,
-  "sourceHash": "25e91a5e912867f3afd20e11a4800df8754414ceec85bbcfa2f807b1d28e2897",
-  "searchText": "so it looks like there was at least one successful epoch boundary reorg from lighthouse, lodestar and prysm so far, I didn't do much analysis if those reorgs caused clients to do something out of the ordinary, at least from a peering perspective everything looks fine, curious if we should test something else or let this run for a bit more like this, we can next switch to `buildOnParentInLastSlot` instead of `delayLastSlotProposal` what I did notice is that buildoor seems to not reveal slot 31 payloads, <@577788234810130432> you mentioned this before, is that still on purpose? that was mainly an experiment we can turn that off ah that explains it then, <@755590043632140352> was asking this above, and I was confused why the payload is not revealed, I think for now I would just disable that and observe if the reorg behavior is still the same if payload is revealed (it should)",
+  "messageCount": 109,
+  "sourceHash": "aff3f53dc8efde0ec29ac381580ea6fdee97999ceea3ceffd22b1825a9f49477",
+  "searchText": "so it looks like there was at least one successful epoch boundary reorg from lighthouse, lodestar and prysm so far, I didn't do much analysis if those reorgs caused clients to do something out of the ordinary, at least from a peering perspective everything looks fine, curious if we should test something else or let this run for a bit more like this, we can next switch to `buildOnParentInLastSlot` instead of `delayLastSlotProposal` what I did notice is that buildoor seems to not reveal slot 31 payloads, <@577788234810130432> you mentioned this before, is that still on purpose? that was mainly an experiment we can turn that off ah that explains it then, <@755590043632140352> was asking this above, and I was confused why the payload is not revealed, I think for now I would just disable that and observe if the reorg behavior is still the same if payload is revealed (it should) <@755590043632140352> https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/109312 this time the https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/53054fb975a8ba1aeddf8c14231b23846d0b0e38569866265c33f167a17d7610 payload was revealed, so prysm reorgin across epoch boundary seems good to me what's a bit concerning, that there is quite a lot of attesters that votes for the deathstar block and not the prysm block here https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/109313#attestations ~31% didn't vote for prysm block, that doesn't look so good to me, that means they didn't process the block in time probably and set as head ahh interesting, perhaps we sent the block late? or nodes are struggling with the transition surprisingly, it's mostly lighthouse lol aren't they yoloing this on mainnet cc <@358120958726373381> this may be a bug in your epoch preprocessing could you take a look please? also lodestar 🙁 it could be Prysm also being late I can look later, but now I'm tied up in something for a few hours <@1467247836117860547> please check why `lodestar-besu-1` voted for deathstar block and not prysm's block well, there is lodestar nodes that voted for pyrsm block too <@1467247836117860547> please also look if besu finished processing the payload on time... but no, which payload do you mean? prysm build on slot 30, so that payload was old I meant 31, my first guess for a failure mode (and that's why I requested the payload to be present) is an automatic epoch transition being triggered after the payload is inserted and this overloading the node even though the child is going to reorg the whole slot and you need the epoch transition from 30 We would definitely precompute the epoch transition right after importing the payload for 31 and this may actually be a cache miss for Prysm, so it would take longer to import slot 0 perhaps why does epoch transition care about the payload? cc <@363800010518822915> that has better memory than me to remind us that we need to look into the NSC to optimize this situation or we'll be fucked nah we don't, but I think cache's are updated on block AND payload my guess is that the nodes took long to process slot 0 and even probably the proposing node thus sending it late it was only lodestar/lighthouse that votes incorrectly, and nimbus seems completely absent 😄 ah no nimbus-nimbusel-1 did a good vote, overlooked that all lighthouse votes incorrectly, for lodestar there is a split Prysm seems to have voted on Prysm mostly prysm all votes correct I see some missing ahh no, I am looking at the wrong block lol ah yeah no idea, maybe node being stuck because of EL bugs, I didn't look at these last 5 times lodestar was stuck was because of EL, so I stopped debugging this I also do wonder if there are reorgs that didn't work because attesters are slow and vote for deathstar blocks, I only explicitly looked at deathstar blocks that were reorged out successfully but if that was mainnet %, then lighthouse attesters would have not allowed the honest prysm reorg so in the end, the proposer gets punished Besu was **not** late on `lodestar-besu-1`. Across the epoch-3419 boundary (slot 109407→109408, ~16:41:30–16:41:42) every `engine_newPayload` returned VALID and imported in <2s, each followed ~70-100ms later by FCU(VALID). No SYNCING/ACCEPTED/INVALID, no stalls: • #97447 `01fd…` imported 16:41:14.2 • #97448 `36fc…` imported 16:41:26.2 ← boundary payload • #97449 `7346…` imported 16:41:49.3 So EL-side the payload was processed on time — points the bad vote back to the CL (payload-timeliness eval / the epoch-preprocessing-after-payload theory), not Besu. One anomaly though: Besu is chronically hitting `Max 80 active connections limit reached` and rejecting JSON-RPC conns from the CL (172.18.0.3) — 8 rejections at 16:41 right at the boundary, and it recurs across the whole last 90min (27 at 15:57, 25 at 16:56…). The newPayload/FCU calls all got through, but that connection pressure is real on this node and could bite timeliness under load. ah maybe not quite, since pyrsm got proposer boost I think LH has over 50% now anyway isn't it? probably but you need more votes don't you since deathstar didn't get pb while prysm did PB would be irrelevant head is computed after we make it zero so the next proposer just counts and if there's over 50% on the parent that wins can you please check the debug logs of `lodestar-besu-1` and see the timings when we imported the prysm block and why we voted for the deathstar block, there should be debug logs for all of this, we need more timing info, it's likely a slow epoch transition that caused us to set head > 4 seconds ah yeah you right, getting confused <@1467247836117860547> any update on this? Pulled the `lodestar-besu-1` debug log (file logger is at `debug`). The vote-split is at **slot 109312** (epoch-3416 boundary), attestations surfaced in the slot-109313 view. Blocks: • deathstar = **109311** `0x5305…7610` (Dora: Orphaned, graffiti `deathstar…`) • prysm = **109312** `0x305e…d8ea` (`prysm-nimbusel-1`), first block of epoch 3416, **skipped slot 109311** (parent `0x1540…`@109310) Timeline for slot 109312 (slot start 16:22:24.000, 4s attest deadline = 28.000): • 109311 deathstar block arrived **4.81s late** → became our head at 16:22:16.945. So going into 109312 our head was the deathstar block. • 16:22:26.685 — prysm 109312 block received, **delaySec 2.69** (late) • state transition = epoch transition into 3416 **+** the skipped slot 109311 → `validationTime=266ms` (a normal block that slot region is ~115ms, ~2.3×), `recvToValidation=659ms` • **16:22:27.455 — New chain head → 0x305e, reorg depth=2** (orphaned deathstar). That's **3.455s** into the slot. • 16:22:28.000 — 4s attestation deadline • **16:22:28.128 — Published attestations head=`0x5305…7610` (DEATHSTAR), count=4** ← stale • 16:22:28.291 — Published payload attestation beaconBlockRoot=`0x305e…d8ea` (correct/new head), `payloadSeenSec=2.76` / due 6s **Verdict — your hypothesis is basically right, with a twist:** The late + epoch-boundary + skipped-slot block pushed the head switch to **3.455s**, right at the 4s cutoff. But note: on *this* node fork-choice head *did* update at 3.455s (just under 4s), yet the LMD attestation 130ms later still used the **pre-reorg** deathstar head, while the PTC payload attestation ~160ms after that used the **fresh** head. So the LMD head-vote snapshot was taken from the stale head — a sub-second race at the 4s boundary. Slower nodes (all LH, some LS) that finished the transition after 4s missed outright. Dominant factor here = the prysm block arriving **2.69s late**; the epoch transition + skipped-slot processing added ~0.77s on top. **Not** an EL/Besu problem — payload was seen at 2.76s (due 6s) and Besu returned newPayload VALID quickly. Bug-shaped signal worth a look: LMD attestation and PTC payload attestation **diverged on the same node/slot** — LMD stale `0x5305`, PTC fresh `0x305e`. i.e. our attestation-data head can lag a reorg that lands just under the 4s cutoff, even when fork-choice already switched. > prysm 109312 block received, delaySec 2.69 prysm playing timing games on the devnet dude, half a second is not a race. The head was set over 500ms before the attestation, find the bug 🙂 no, attestation deadline is 3 seconds, we are on gloas 😄 lol, this I think is our bug I can look into the logs so that I stop banging my head against Claude on the circuit breaker. Most probably we delayed epoch transition. ahhh shit 🙂 loooool ah but lodestar is still slow somewhere > • 16:22:28.000 — 4s attestation deadline Bought into this yeah poor guy my comment above confused him meh but that's not so satisfying, prysm and other attesters were voting correctly let me look at the logs lighthouse completely sucked and lodestar sucked 50% of the time need some more logs from other nodes that voted correctly, dunno why prysm block would be at 2.69 sec into the slot, that's seems really late can you check the same for `lodestar-nethermind-1` Yeah, Prysm is starting the block production late ``` [2026-07-29 16:22:25.88] INFO rpc/validator: Building block sinceSlotStartTime=1.889582255s slot=109312 ``` we're cooked ok so also prysm bug but as proposer you pre-compute the epoch transition on the proposer head right? so I think if lodestar is proposer, we have 0 issue with those reorgs, but for attesters it's more tricky I need to add more logging, will push something You're right, it's not a race — I chased it into the code. Two things I got wrong in the first pass: **1. The Gloas attestation deadline is 3.0s, not 4s.** `ATTESTATION_DUE_BPS_GLOAS = 2500` → 2500/10000 × 12s = **3.0s** (pre-Gloas is 3333 bps = 4.0s). So \"head set >4s\" doesn't apply — the deadline moved earlier. **2. The 28.128 publish time is a red herring.** The attestation *data* wasn't read at 28.128 (that's just sign+submit lag). The VC actually fetched it at **16:22:27.073** — BN REST log: `Req req-4oaq 172.18.0.10 produceAttestationData` → `Res 200` immediately (172.18.0.10 = our validator container). Timeline, slot 109312 (start 24.000, Gloas attest deadline 27.000): • VC attestation routine races `sleep(3.0s)` vs `waitForBlockSlot(109312)`. `waitForBlockSlot` only fires on the chainHead event (full import + fork-choice head) → didn't happen until 27.455. So the 3.0s sleep won. • **27.073** — VC fetches attestation data. Head at that instant = deathstar `0x5305` (our head since 16:22:16.945). Prysm `0x305e` was received 26.685, validated 27.075, **but not made head until 27.455.** • BN correctly returns head-at-request-time → `0x5305`. • **27.455** — reorg to prysm `0x305e` (3.455s) — i.e. **382ms AFTER we'd already locked the vote at 27.073.** • 28.128 — sign+publish completes (stale `0x5305`). So the vote was decided at **3.07s, ~0.38s _before_ the head flipped** — not 0.5s after. The BN served the correct head for the moment it was asked; there's no stale-head/caching bug in `produceAttestationData` (it reads `forkChoice.getHead()` live). Root cause = the honest prysm block missed the **3.0s** Gloas deadline: it arrived 2.685s late from the proposer **and** took ~380ms to import (first block of epoch 3416, skipped slot 109311 → 266ms state transition + fork-choice) → head at 3.455s. That's a Gloas-wide timing squeeze, which is why LH + LS both mis-voted. Lever is faster epoch-boundary import (your precompute-epoch-after-payload idea) / proposers not sending late — margin was only ~0.45s. I think the issue is <@586161934425128960> that Prysm nodes probably all got the block immediately and had already the epoch transition performed? at least prysm-nimbusel-1 had it I wanna see how the `lodestar-nethermind-1` voted correctly, it must have seen the block a bit earlier do you pre-compute 2 epoch transition? only on some cases, and pre-Gloas we should handle this case well, but I'm not sure if Gloas changed this situation, I'm looking into this it is the note-to-self that I added above for the NSC Both notes updated. Now posting the breakdown in-thread. `lodestar-nethermind-1` — same slot 1",
   "excerpts": [
     {
       "author": "nflaig",
@@ -28,6 +28,860 @@
       "parent": "interop-🌃",
       "content": "ah that explains it then, <@755590043632140352> was asking this above, and I was confused why the payload is not revealed, I think for now I would just disable that and observe if the reorg behavior is still the same if payload is revealed (it should)",
       "createdAt": "2026-07-29T09:57:15.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@755590043632140352> https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/109312 this time the https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/53054fb975a8ba1aeddf8c14231b23846d0b0e38569866265c33f167a17d7610 payload was revealed, so prysm reorgin across epoch boundary seems good to me",
+      "createdAt": "2026-07-29T16:42:41.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what's a bit concerning, that there is quite a lot of attesters that votes for the deathstar block and not the prysm block here https://dora.glamsterdam-devnet-7.ethpandaops.io/slot/109313#attestations",
+      "createdAt": "2026-07-29T16:43:12.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "~31% didn't vote for prysm block, that doesn't look so good to me, that means they didn't process the block in time probably and set as head",
+      "createdAt": "2026-07-29T16:44:00.377000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "7321d909ff748e855c9f3e26873c9dbd8017849df198f17542ba448ff8b55048"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ahh interesting, perhaps we sent the block late? or nodes are struggling with the transition",
+      "createdAt": "2026-07-29T16:44:24.885000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "surprisingly, it's mostly lighthouse lol",
+      "createdAt": "2026-07-29T16:44:28.675000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "aren't they yoloing this on mainnet",
+      "createdAt": "2026-07-29T16:44:35.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@358120958726373381> this may be a bug in your epoch preprocessing",
+      "createdAt": "2026-07-29T16:44:42.816000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "could you take a look please?",
+      "createdAt": "2026-07-29T16:44:47.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also lodestar 🙁",
+      "createdAt": "2026-07-29T16:44:53.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it could be Prysm also being late",
+      "createdAt": "2026-07-29T16:45:03.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I can look later, but now I'm tied up in something for a few hours",
+      "createdAt": "2026-07-29T16:45:16.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> please check why `lodestar-besu-1` voted for deathstar block and not prysm's block",
+      "createdAt": "2026-07-29T16:45:43.974000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "well, there is lodestar nodes that voted for pyrsm block too",
+      "createdAt": "2026-07-29T16:47:02.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> please also look if besu finished processing the payload on time...",
+      "createdAt": "2026-07-29T16:47:08.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but no, which payload do you mean?",
+      "createdAt": "2026-07-29T16:48:23.891000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "prysm build on slot 30, so that payload was old",
+      "createdAt": "2026-07-29T16:48:43.028000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I meant 31, my first guess for a failure mode (and that's why I requested the payload to be present) is an automatic epoch transition being triggered after the payload is inserted and this overloading the node even though the child is going to reorg the whole slot and you need the epoch transition from 30",
+      "createdAt": "2026-07-29T16:49:59.470000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "We would definitely precompute the epoch transition right after importing the payload for 31 and this may actually be a cache miss for Prysm, so it would take longer to import slot 0 perhaps",
+      "createdAt": "2026-07-29T16:50:47.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "why does epoch transition care about the payload?",
+      "createdAt": "2026-07-29T16:51:10.454000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@363800010518822915> that has better memory than me to remind us that we need to look into the NSC to optimize this situation or we'll be fucked",
+      "createdAt": "2026-07-29T16:51:18.728000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "nah we don't, but I think cache's are updated on block AND payload",
+      "createdAt": "2026-07-29T16:52:07.776000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "my guess is that the nodes took long to process slot 0 and even probably the proposing node thus sending it late",
+      "createdAt": "2026-07-29T16:52:50.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it was only lodestar/lighthouse that votes incorrectly, and nimbus seems completely absent 😄",
+      "createdAt": "2026-07-29T16:53:31.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah no nimbus-nimbusel-1 did a good vote, overlooked that",
+      "createdAt": "2026-07-29T16:54:10.003000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "all lighthouse votes incorrectly, for lodestar there is a split",
+      "createdAt": "2026-07-29T16:54:54.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Prysm seems to have voted on Prysm mostly",
+      "createdAt": "2026-07-29T16:54:56.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "prysm all votes correct",
+      "createdAt": "2026-07-29T16:55:06.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I see some missing",
+      "createdAt": "2026-07-29T16:55:13.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ahh no, I am looking at the wrong block lol",
+      "createdAt": "2026-07-29T16:55:27.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah yeah no idea, maybe node being stuck because of EL bugs, I didn't look at these",
+      "createdAt": "2026-07-29T16:55:35.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "last 5 times lodestar was stuck was because of EL, so I stopped debugging this",
+      "createdAt": "2026-07-29T16:55:51.978000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I also do wonder if there are reorgs that didn't work because attesters are slow and vote for deathstar blocks, I only explicitly looked at deathstar blocks that were reorged out successfully",
+      "createdAt": "2026-07-29T17:00:31.621000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but if that was mainnet %, then lighthouse attesters would have not allowed the honest prysm reorg",
+      "createdAt": "2026-07-29T17:01:01.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so in the end, the proposer gets punished",
+      "createdAt": "2026-07-29T17:01:08.655000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Besu was **not** late on `lodestar-besu-1`. Across the epoch-3419 boundary (slot 109407→109408, ~16:41:30–16:41:42) every `engine_newPayload` returned VALID and imported in <2s, each followed ~70-100ms later by FCU(VALID). No SYNCING/ACCEPTED/INVALID, no stalls:\n• #97447 `01fd…` imported 16:41:14.2\n• #97448 `36fc…` imported 16:41:26.2 ← boundary payload\n• #97449 `7346…` imported 16:41:49.3\n\nSo EL-side the payload was processed on time — points the bad vote back to the CL (payload-timeliness eval / the epoch-preprocessing-after-payload theory), not Besu.\n\nOne anomaly though: Besu is chronically hitting `Max 80 active connections limit reached` and rejecting JSON-RPC conns from the CL (172.18.0.3) — 8 rejections at 16:41 right at the boundary, and it recurs across the whole last 90min (27 at 15:57, 25 at 16:56…). The newPayload/FCU calls all got through, but that connection pressure is real on this node and could bite timeliness under load.",
+      "createdAt": "2026-07-29T17:01:24.918000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah maybe not quite, since pyrsm got proposer boost",
+      "createdAt": "2026-07-29T17:01:54.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think LH has over 50% now anyway isn't it?",
+      "createdAt": "2026-07-29T17:02:51.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "probably but you need more votes don't you since deathstar didn't get pb while prysm did",
+      "createdAt": "2026-07-29T17:03:18.736000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "PB would be irrelevant",
+      "createdAt": "2026-07-29T17:03:32.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "head is computed after we make it zero",
+      "createdAt": "2026-07-29T17:03:40.713000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so the next proposer just counts and if there's over 50% on the parent that wins",
+      "createdAt": "2026-07-29T17:03:54.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you please check the debug logs of `lodestar-besu-1` and see the timings when we imported the prysm block and why we voted for the deathstar block, there should be debug logs for all of this, we need more timing info, it's likely a slow epoch transition that caused us to set head > 4 seconds",
+      "createdAt": "2026-07-29T17:04:21.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah yeah you right, getting confused",
+      "createdAt": "2026-07-29T17:04:48.351000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> any update on this?",
+      "createdAt": "2026-07-29T17:57:08.759000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Pulled the `lodestar-besu-1` debug log (file logger is at `debug`). The vote-split is at **slot 109312** (epoch-3416 boundary), attestations surfaced in the slot-109313 view. Blocks:\n• deathstar = **109311** `0x5305…7610` (Dora: Orphaned, graffiti `deathstar…`)\n• prysm = **109312** `0x305e…d8ea` (`prysm-nimbusel-1`), first block of epoch 3416, **skipped slot 109311** (parent `0x1540…`@109310)\n\nTimeline for slot 109312 (slot start 16:22:24.000, 4s attest deadline = 28.000):\n• 109311 deathstar block arrived **4.81s late** → became our head at 16:22:16.945. So going into 109312 our head was the deathstar block.\n• 16:22:26.685 — prysm 109312 block received, **delaySec 2.69** (late)\n• state transition = epoch transition into 3416 **+** the skipped slot 109311 → `validationTime=266ms` (a normal block that slot region is ~115ms, ~2.3×), `recvToValidation=659ms`\n• **16:22:27.455 — New chain head → 0x305e, reorg depth=2** (orphaned deathstar). That's **3.455s** into the slot.\n• 16:22:28.000 — 4s attestation deadline\n• **16:22:28.128 — Published attestations head=`0x5305…7610` (DEATHSTAR), count=4** ← stale\n• 16:22:28.291 — Published payload attestation beaconBlockRoot=`0x305e…d8ea` (correct/new head), `payloadSeenSec=2.76` / due 6s\n\n**Verdict — your hypothesis is basically right, with a twist:**\nThe late + epoch-boundary + skipped-slot block pushed the head switch to **3.455s**, right at the 4s cutoff. But note: on *this* node fork-choice head *did* update at 3.455s (just under 4s), yet the LMD attestation 130ms later still used the **pre-reorg** deathstar head, while the PTC payload attestation ~160ms after that used the **fresh** head. So the LMD head-vote snapshot was taken from the stale head — a sub-second race at the 4s boundary. Slower nodes (all LH, some LS) that finished the transition after 4s missed outright.\n\nDominant factor here = the prysm block arriving **2.69s late**; the epoch transition + skipped-slot processing added ~0.77s on top. **Not** an EL/Besu",
+      "createdAt": "2026-07-29T18:55:10.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "problem — payload was seen at 2.76s (due 6s) and Besu returned newPayload VALID quickly.\n\nBug-shaped signal worth a look: LMD attestation and PTC payload attestation **diverged on the same node/slot** — LMD stale `0x5305`, PTC fresh `0x305e`. i.e. our attestation-data head can lag a reorg that lands just under the 4s cutoff, even when fork-choice already switched.",
+      "createdAt": "2026-07-29T18:55:11.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "> prysm 109312 block received, delaySec 2.69\nprysm playing timing games on the devnet",
+      "createdAt": "2026-07-29T18:58:24.667000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "dude, half a second is not a race.  The head was set over 500ms before the attestation, find the bug 🙂",
+      "createdAt": "2026-07-29T18:58:33.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no, attestation deadline is 3 seconds, we are on gloas 😄",
+      "createdAt": "2026-07-29T18:58:54.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lol, this I think is our bug I can look into the logs so that I stop banging my head against Claude on the circuit breaker. Most probably we delayed epoch transition.",
+      "createdAt": "2026-07-29T18:59:13.507000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ahhh shit 🙂",
+      "createdAt": "2026-07-29T18:59:21.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "loooool",
+      "createdAt": "2026-07-29T18:59:24.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah but lodestar is still slow somewhere",
+      "createdAt": "2026-07-29T18:59:34.384000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "> • 16:22:28.000 — 4s attestation deadline\nBought into this",
+      "createdAt": "2026-07-29T18:59:37.708000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah poor guy my comment above confused him",
+      "createdAt": "2026-07-29T18:59:51.483000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "meh but that's not so satisfying, prysm and other attesters were voting correctly",
+      "createdAt": "2026-07-29T19:00:18.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "let me look at the logs",
+      "createdAt": "2026-07-29T19:00:31.216000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lighthouse completely sucked and lodestar sucked 50% of the time",
+      "createdAt": "2026-07-29T19:00:32.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "need some more logs from other nodes that voted correctly, dunno why prysm block would be at 2.69 sec into the slot, that's seems really late",
+      "createdAt": "2026-07-29T19:01:05.547000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you check the same for `lodestar-nethermind-1`",
+      "createdAt": "2026-07-29T19:02:19.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah, Prysm is starting the block production late\n```\n[2026-07-29 16:22:25.88]  INFO rpc/validator: Building block sinceSlotStartTime=1.889582255s slot=109312\n```",
+      "createdAt": "2026-07-29T19:02:27.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we're cooked",
+      "createdAt": "2026-07-29T19:02:39.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok so also prysm bug",
+      "createdAt": "2026-07-29T19:02:54.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but as proposer you pre-compute the epoch transition on the proposer head right? so I think if lodestar is proposer, we have 0 issue with those reorgs, but for attesters it's more tricky",
+      "createdAt": "2026-07-29T19:03:57.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I need to add more logging, will push something",
+      "createdAt": "2026-07-29T19:07:22.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "You're right, it's not a race — I chased it into the code. Two things I got wrong in the first pass:\n\n**1. The Gloas attestation deadline is 3.0s, not 4s.** `ATTESTATION_DUE_BPS_GLOAS = 2500` → 2500/10000 × 12s = **3.0s** (pre-Gloas is 3333 bps = 4.0s). So \"head set >4s\" doesn't apply — the deadline moved earlier.\n\n**2. The 28.128 publish time is a red herring.** The attestation *data* wasn't read at 28.128 (that's just sign+submit lag). The VC actually fetched it at **16:22:27.073** — BN REST log: `Req req-4oaq 172.18.0.10 produceAttestationData` → `Res 200` immediately (172.18.0.10 = our validator container).\n\nTimeline, slot 109312 (start 24.000, Gloas attest deadline 27.000):\n• VC attestation routine races `sleep(3.0s)` vs `waitForBlockSlot(109312)`. `waitForBlockSlot` only fires on the chainHead event (full import + fork-choice head) → didn't happen until 27.455. So the 3.0s sleep won.\n• **27.073** — VC fetches attestation data. Head at that instant = deathstar `0x5305` (our head since 16:22:16.945). Prysm `0x305e` was received 26.685, validated 27.075, **but not made head until 27.455.**\n• BN correctly returns head-at-request-time → `0x5305`.\n• **27.455** — reorg to prysm `0x305e` (3.455s) — i.e. **382ms AFTER we'd already locked the vote at 27.073.**\n• 28.128 — sign+publish completes (stale `0x5305`).\n\nSo the vote was decided at **3.07s, ~0.38s _before_ the head flipped** — not 0.5s after. The BN served the correct head for the moment it was asked; there's no stale-head/caching bug in `produceAttestationData` (it reads `forkChoice.getHead()` live).\n\nRoot cause = the honest prysm block missed the **3.0s** Gloas deadline: it arrived 2.685s late from the proposer **and** took ~380ms to import (first block of epoch 3416, skipped slot 109311 → 266ms state transition + fork-choice) → head at 3.455s. That's a Gloas-wide timing squeeze, which is why LH + LS both mis-voted. Lever is faster epoch-boundary import (your precompute-epoch-after-payload idea) / proposers",
+      "createdAt": "2026-07-29T19:12:47.419000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "not sending late — margin was only ~0.45s.",
+      "createdAt": "2026-07-29T19:12:48.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think the issue is <@586161934425128960> that Prysm nodes probably all got the block immediately and had already the epoch transition performed? at least prysm-nimbusel-1 had it",
+      "createdAt": "2026-07-29T19:15:07.189000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I wanna see how the `lodestar-nethermind-1` voted correctly, it must have seen the block a bit earlier",
+      "createdAt": "2026-07-29T19:16:45.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "do you pre-compute 2 epoch transition?",
+      "createdAt": "2026-07-29T19:19:05.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "only on some cases, and pre-Gloas we should handle this case well, but I'm not sure if Gloas changed this situation, I'm looking into this",
+      "createdAt": "2026-07-29T19:21:39.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it is the note-to-self that I added above",
+      "createdAt": "2026-07-29T19:21:48.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "for the NSC",
+      "createdAt": "2026-07-29T19:21:50.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Both notes updated. Now posting the breakdown in-thread.\n\n`lodestar-nethermind-1` — same slot 109312 (epoch-3416 boundary), and the result flips: **it voted CORRECTLY for the prysm block `0x305e`, not deathstar.** Opposite of besu-1, and the contrast is the whole story.\n\nTimeline (slot start 16:22:24.000, Gloas attest deadline = 3.0s = :27.000):\n- :17.368 — head = deathstar `0x5305` (109311, 4.81s late) — same starting point as besu\n- :20.488 — epoch-3416 transition precomputed, durationMs=483 (~3.5s early) → NOT a stall, hypothesis ruled out here too\n- :26.225 — prysm `0x305e` received, delaySec **2.223** (~460ms earlier than besu's 2.685)\n- :26.866 — state transition verified, validationTime 258ms (epoch tx + skipped slot, ~2.3× normal)\n- **:27.023 — New chain head → `0x305e`, reorg depth=2 = 3.023s** (besu was 3.455s → 432ms earlier here)\n- :27.000 — VC fires produceAttestationData (3.0s timer)\n- **:27.080 — BN services the fetch, getHead() = `0x305e`** (BN was mid block-import, so the request queued ~80ms behind it)\n- :27.084 — Signed attestation head=`0x305e`; **:27.806 — Published attestations head=`0x305e`, count=3** ✓ (PTC also fresh `0x305e`)\n\n**Why nethermind voted right and besu voted wrong — same 3.0s deadline, opposite interleave on the BN event loop:**\n- nethermind: head flip (:27.023) landed **57ms BEFORE** the BN serviced the attn fetch (:27.080) → returned fresh prysm\n- besu: BN serviced the fetch (:27.073) **382ms BEFORE** its head flip (:27.455) → returned stale deathstar",
+      "createdAt": "2026-07-29T19:39:46.059000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The only real difference was ~460ms of gossip-propagation luck: nethermind got the prysm block early enough that its block-import (head flip) beat the attestation-service call by a hair. So whether a Lodestar node mis-votes here comes down to whether its block-import/head-flip lands before or after the BN services the ~3.0s attestation fetch — a razor-thin margin at the Gloas 3.0s deadline, not an attestation-path bug. `produceAttestationData` read the live head correctly on both nodes; it just got asked at different points relative to the import. Lever is unchanged: faster epoch-boundary import / proposers not sending 2.2–2.7s late.\n\nSide note, unrelated to the vote: nethermind-1 is carrying a large failed-payload-download backlog (`Error downloading payload in BlockInputSync` / pendingPayloads=99 across slots ~106k–109k). Didn't touch this live vote, but it's a health signal on that node if you want me to dig.",
+      "createdAt": "2026-07-29T19:39:46.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> can we run the clients with debug logs instead of info?",
+      "createdAt": "2026-07-29T19:59:09.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "on the devnet?",
+      "createdAt": "2026-07-29T19:59:13.628000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lodestar always writes debug to file, don't you guys do that?",
+      "createdAt": "2026-07-29T20:04:49.180000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but also that is a good point, I think `panda` doesn't have debug logs available",
+      "createdAt": "2026-07-29T20:05:03.063000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "lodekeeper uses panda a lot",
+      "createdAt": "2026-07-29T20:05:07.929000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "> :26.225 — prysm 0x305e received, delaySec 2.223 (~460ms earlier than besu's 2.685\nI don't get it, how can there be such a large difference on a devnet? aren't these nodes in the same data center or at least geolocation?",
+      "createdAt": "2026-07-29T20:08:08.965000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think we need another prysm reorg, also I think probably let lodekeeper check all deathstar slot 31 blocks, becasue based on this observation, it's not highly unlikely that the epoch boundary reorg failed in some cases and slot 0 was orphaned instead",
+      "createdAt": "2026-07-29T20:10:33.844000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think Manu added a PR to do that... but I'm old enough that I forget, only learned to watch logs in these devnets with docker logs.... the panda cli I don't trust that much 🙂",
+      "createdAt": "2026-07-29T20:15:17.264000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if there's a single hop difference it could be a lock in gossip validation before broadcating",
+      "createdAt": "2026-07-29T20:15:56.412000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "hmm shouldn't all nodes be direct peers?",
+      "createdAt": "2026-07-29T20:37:46.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I wanna a bigger sample size",
+      "createdAt": "2026-07-29T20:38:18.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you check this, are there canonical deathstar blocks at slot 31? meaning the proposer boost reorg failed",
+      "createdAt": "2026-07-29T20:38:52.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "What's your mesh size",
+      "createdAt": "2026-07-29T20:41:22.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ah you right, it's 8 I think <@1467247836117860547> please double check it",
+      "createdAt": "2026-07-29T20:42:41.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no wait 8 sounds low? let's wait for lodekeeper response",
+      "createdAt": "2026-07-29T20:43:01.620000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it seems we found the Prysm cause for the delay",
+      "createdAt": "2026-07-29T20:58:51.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "All recorded and cross-verified. Posting the answer in-thread.\n\n**No — 0 reorg failures.** Across every deathstar slot-31 (epoch-boundary) proposal in devnet-7 history, not one canonical deathstar block orphaned an honest slot-0. I enumerated all 100 deathstar validators (indices **300–399**, `proposer_name=deathstar`, image `lodestar:deathstar-devnet-7`) via Dora and cross-verified against nethermind-1's canonical chain.\n\n**Sample = 122 deathstar slot-31 proposals:** 70 Orphaned · 46 Canonical · 6 Missing.\n\nMatrix (deathstar s31 → honest next s0):\n- Orphaned → Canonical: **62** (reorg worked ✓)\n- Canonical → Canonical: 38 (slot-0 built *on* deathstar)\n- Canonical → Missing/no-block: 8 (slot-0 proposer missed)\n- Orphaned → Orphaned/Missing: 8 (deeper reorg; deathstar still lost)\n- deathstar Missing (no block): 6\n- **Canonical → Orphaned: 0** ← the failure mode you predicted\n\nThe 46 Canonical are **not** failures:\n- 40 are **pre-epoch-1339** — the honest network only starts orphaning deathstar at e1339 (first Orphaned in the whole history), so before that deathstar was effectively a normal proposer and slot-0 built on it.\n- 6 are attack-era survivors (e1940/1992/3155/3307/3327/3362): 4× the honest slot-0 built *on* the deathstar block (verified e3307: s0 `105856.parent_root == deathstar 105855`), 2× the honest slot-0 proposer simply **missed** (verified e3155: slot 100992 is empty in the canonical chain). None orphaned an honest block.",
+      "createdAt": "2026-07-29T21:02:25.558000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "So proposer-boost held at every boundary where an honest slot-0 actually competed — attack-era success = **70/76 orphaned (92%)**, and the survivors are all accepted-or-missed, never a lost honest block.\n\nOne caveat I can't close from status alone: whether those 4 \"accepted\" attack-era deathstar blocks were genuinely timely or late-but-un-reorged (beacon logs for those epochs are long gone). I can pull Xatu block-arrival timing on just those 4 to rule out a soft failure if you want. Script + full per-slot data saved.",
+      "createdAt": "2026-07-29T21:02:26.276000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Confirmed — **mesh size D = 8**, you're right. Verified in source on `unstable` (and the running SHA): `GOSSIP_D = 8` (target), `GOSSIP_D_LOW = 6`, `GOSSIP_D_HIGH = 12`, `Dlazy = 6` — exactly the Eth p2p-interface spec values. It's tunable via `--network.gossipsubD/DLow/DHigh`, but the devnet nodes run the defaults (no override in the beacon args/env).\n\nLive on lodestar-nethermind-1 right now:\n- `beacon_block` topic mesh = **7** peers\n- each data-column subnet mesh = 7–9 peers (target 8)\n- 35 total connected peers (33 speaking gossipsub `/meshsub/1.2.0`)\n\nSo on the propagation spread that started this: the nodes are all *connected* (35 peers each) but the block-topic **mesh is only 8** — forwarding isn't direct to everyone. besu-1 and nethermind-1 very likely aren't in each other's block mesh, so a block reaches them over different hop counts, and with each hop being validate-then-rebroadcast (potuz's \"lock in gossip validation before broadcasting\"), a ~460ms delta is easily explained by a 1-hop difference. So it's mesh topology, not a peering gap — they don't need to be direct mesh peers, just connected.",
+      "createdAt": "2026-07-29T21:06:27.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "is this urgent?",
+      "createdAt": "2026-07-29T21:37:07.711000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Not at all",
+      "createdAt": "2026-07-29T21:37:19.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Not even necessary perhaps",
+      "createdAt": "2026-07-29T21:37:30.149000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@755590043632140352> dis good for debug logs\n```\ndevops@prysm-ethrex-1 ➜  ~ sudo tail -n 100 -f /data/prysm/logs/beacon-chain.log\ntime=\"2026-07-29 21:40:48.25\" level=debug msg=\"Gossip message was ignored\" agent=\"Prysm/v7.1.7/3cf9687dd9b5018ab3eeb7c474794aea38a63335\" error=\"gloas data column block not yet seen\" gossipScore=32.72 multiaddress=\"/ip4/159.223.116.60/tcp/9000\" package=\"beacon-chain/sync\" peerID=16Uiu2HAm21RU3UTEdzUvYHne4Kc2ggegAA2FYJju7hcoCQ8eStBo topic=\"/eth2/1200e934/data_column_sidecar_63/ssz_snappy\"\n```",
+      "createdAt": "2026-07-29T21:42:20.585000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "This has the VCs as well?",
+      "createdAt": "2026-07-29T21:44:07.901000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Lool I keep piping docker logs to a file",
+      "createdAt": "2026-07-29T21:44:31.057000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "theres the same for the VC",
+      "createdAt": "2026-07-29T21:44:52.435000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Nice thanks!",
+      "createdAt": "2026-07-29T21:45:07.444000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "qu0b",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "np",
+      "createdAt": "2026-07-29T21:45:10.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I just force lodekeeper to read the raw debug log files",
+      "createdAt": "2026-07-29T22:06:29.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think AI is very good to parse metrics, give me the snippet of the logs on a timeline I want, etc.. but to actually read the logs and figure out what happend I am orders of magnitude faster than Claude, so I rather not have AI wasting my time",
+      "createdAt": "2026-07-29T22:22:11.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "But to get graphs of the metrics, timelines, build summary tables, etc.. AI is a great tool",
+      "createdAt": "2026-07-29T22:23:04.532000+00:00",
       "attachments": []
     }
   ]
