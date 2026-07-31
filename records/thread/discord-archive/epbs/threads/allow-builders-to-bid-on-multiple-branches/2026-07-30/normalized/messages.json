@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs/_threads/Allow builders to bid on multiple branches",
+  "date": "2026-07-30",
+  "messageCount": 30,
+  "sourceHash": "5eeb09a2fd07d9a39a308d6566e0e8ff2602f5dcefb1e20107c642a022e3f0ea",
+  "searchText": "I'm worried about complexity in potuz's one.. at this stage i'd avoid introducing such changes that probably will cause some perf headache. I'd go with nicos' one and eventually tune it later if required can you open an alternative to how we wanna limit bids that is less strict than your PR and simpler my proposal was something like this ```python def is_bid_parent_candidate(store: Store, bid: ExecutionPayloadBid) -> bool: if bid.parent_block_root not in store.blocks: return False head = get_head(store) head_block = store.blocks[head.root] parent_block = store.blocks[bid.parent_block_root] return parent_block.slot >= head_block.slot or bid.parent_block_root == head_block.parent_root ``` but that means it could be from a block from different branch too, maybe that's even good? it definitely doesn't make sense to allow bids for any block as parent that exists in fork choice Technically the **only** case that forces the long computation in my PR is the PB reorg. If we're willing to relax the strictness to only one then it can be simplified as the following PR https://github.com/ethereum/consensus-specs/pull/5497 ```python def is_bid_on_current_head(store: Store, bid: ExecutionPayloadBid) -> bool: \"\"\" Check if ``bid`` is compatible with the head branch. \"\"\" head_node = get_head(store) head_block = store.blocks[head_node.root] head_bid = head_block.body.signed_execution_payload_bid.message builds_on_parent_block = bid.parent_block_root == head_block.parent_root builds_on_parent_payload = bid.parent_block_hash == head_bid.parent_block_hash if builds_on_parent_block and builds_on_parent_payload: return True if bid.parent_block_root != head_node.root: return False builds_on_head_payload = bid.parent_block_hash == head_bid.block_hash if should_build_on_full(store, head_node, bid.slot): return builds_on_head_payload return builds_on_parent_payload ``` WTF is this? ``` PR title must use imperative mood ``` That's a bit imperative not changing my title one concern with `should_build_on_full` what if node is slow to process payload then `head.payload_status == PAYLOAD_STATUS_EMPTY` so we don't propagate bids for full? yeah I think this is correct, we do not want to propagate bids for full if we do not know the payload is valid Also this gives a chance to multiple bids to actually arrive should I tweak the number in my pr to 2 then? hmm, yeah the problem with this approach is that anyway it needs your PR 🙁 I guess if peers have different full/empty view it still works to propagate 3 bids the previous one had the beautiful thing that it didn't need the counter yes, and it would be great if we could also cover the PB reorg just with this, but I think allowing 2 bids is unavoidable anyway with this Calling `should_build_on_full` is hiding a lot of complexity here. Based on what I've heard from other devs, not sure this is fine. What complexity? Hmm I take this back. It's not as bad as I remembered. I was thinking of the timeliness & DA checks. It should be fine. Okay we just need devs to come to consensus. Then we'll merge one. so what if `get_head` is still the previous head becasue we didn't recompute it? are we fine with that behavior? ok I am confused, why do we need my PR still? yours allow a bid per branch instead of per slot ``` [IGNORE] this is the first signed bid seen with a valid signature from the given builder for the tuple (bid.slot, bid.parent_block_hash, bid.parent_block_root). ``` <@654267572107083777> <@491624610215886849> <@504202741933932544> could we get another review on this alternative? https://github.com/ethereum/consensus-specs/pull/5497 We don't strictly need it but if the builder sends at different times in the slot it may sneak more than 2 yes, I think anyways we should allow full/empty so that is fine with me, I think my pr is more invasive since it adds a new config If devs are okay with this PR, we'll merge it & make a release. We just need reviews/approvals at this point. I think 5497 is much better. We can operate entirely on the head itself which is easier than the previous PR and less invasive than adding more const params.",
+  "excerpts": [
+    {
+      "author": "tbenr",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I'm worried about complexity in potuz's one.. at this stage i'd avoid introducing such changes that probably will cause some perf headache. I'd go with nicos' one and eventually tune it later if required",
+      "createdAt": "2026-07-30T07:58:42.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "can you open an alternative to how we wanna limit bids that is less strict than your PR and simpler\n\nmy proposal was something like this\n```python\ndef is_bid_parent_candidate(store: Store, bid: ExecutionPayloadBid) -> bool:\n    if bid.parent_block_root not in store.blocks:\n        return False\n\n    head = get_head(store)\n    head_block = store.blocks[head.root]\n    parent_block = store.blocks[bid.parent_block_root]\n    return parent_block.slot >= head_block.slot or bid.parent_block_root == head_block.parent_root\n```\nbut that means it could be from a block from different branch too, maybe that's even good? it definitely doesn't make sense to allow bids for any block as parent that exists in fork choice",
+      "createdAt": "2026-07-30T10:54:56.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Technically the **only**  case that forces the long computation in my PR is the PB reorg. If we're willing to relax the strictness to only one then it can be simplified as the following PR https://github.com/ethereum/consensus-specs/pull/5497",
+      "createdAt": "2026-07-30T11:17:40.220000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "```python\ndef is_bid_on_current_head(store: Store, bid: ExecutionPayloadBid) -> bool:\n    \"\"\"\n    Check if ``bid`` is compatible with the head branch.\n    \"\"\"\n    head_node = get_head(store)\n    head_block = store.blocks[head_node.root]\n    head_bid = head_block.body.signed_execution_payload_bid.message\n\n    builds_on_parent_block = bid.parent_block_root == head_block.parent_root\n    builds_on_parent_payload = bid.parent_block_hash == head_bid.parent_block_hash\n\n    if builds_on_parent_block and builds_on_parent_payload:\n        return True\n\n    if bid.parent_block_root != head_node.root:\n        return False\n\n    builds_on_head_payload = bid.parent_block_hash == head_bid.block_hash\n\n    if should_build_on_full(store, head_node, bid.slot):\n        return builds_on_head_payload\n\n    return builds_on_parent_payload\n```",
+      "createdAt": "2026-07-30T11:18:23.167000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "WTF is this?\n```\nPR title must use imperative mood\n```",
+      "createdAt": "2026-07-30T11:23:05.016000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "That's a bit imperative",
+      "createdAt": "2026-07-30T11:23:09.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "not changing my title",
+      "createdAt": "2026-07-30T11:23:23.533000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "one concern with `should_build_on_full` what if node is slow to process payload then `head.payload_status == PAYLOAD_STATUS_EMPTY` so we don't propagate bids for full?",
+      "createdAt": "2026-07-30T11:23:28.625000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yeah I think this is correct, we do not want to propagate bids for full if we do not know the payload is valid",
+      "createdAt": "2026-07-30T11:24:00.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Also this gives a chance to multiple bids to actually arrive",
+      "createdAt": "2026-07-30T11:24:24.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "should I tweak the number in my pr to 2 then?",
+      "createdAt": "2026-07-30T11:24:40.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "hmm, yeah the problem with this approach is that anyway it needs your PR 🙁",
+      "createdAt": "2026-07-30T11:25:33.906000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I guess if peers have different full/empty view it still works to propagate 3 bids",
+      "createdAt": "2026-07-30T11:25:49.792000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "the previous one had the beautiful thing that it didn't need the counter",
+      "createdAt": "2026-07-30T11:26:00.905000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, and it would be great if we could also cover the PB reorg just with this, but I think allowing 2 bids is unavoidable anyway with this",
+      "createdAt": "2026-07-30T11:26:39.465000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Calling `should_build_on_full` is hiding a lot of complexity here.",
+      "createdAt": "2026-07-30T14:06:54.910000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Based on what I've heard from other devs, not sure this is fine.",
+      "createdAt": "2026-07-30T14:07:06.783000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "What complexity?",
+      "createdAt": "2026-07-30T14:15:34.823000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Hmm I take this back. It's not as bad as I remembered.",
+      "createdAt": "2026-07-30T14:20:00.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I was thinking of the timeliness & DA checks.",
+      "createdAt": "2026-07-30T14:20:23.668000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "It should be fine.",
+      "createdAt": "2026-07-30T14:20:31.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "Okay we just need devs to come to consensus. Then we'll merge one.",
+      "createdAt": "2026-07-30T14:20:50.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "so what if `get_head` is still the previous head becasue we didn't recompute it? are we fine with that behavior?",
+      "createdAt": "2026-07-30T14:21:03.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "ok I am confused, why do we need my PR still? yours allow a bid per branch instead of per slot\n```\n[IGNORE] this is the first signed bid seen with a valid signature from the given builder for the tuple (bid.slot, bid.parent_block_hash, bid.parent_block_root).\n```",
+      "createdAt": "2026-07-30T14:21:55.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "<@654267572107083777> <@491624610215886849> <@504202741933932544> could we get another review on this alternative?\nhttps://github.com/ethereum/consensus-specs/pull/5497",
+      "createdAt": "2026-07-30T14:24:34.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We don't strictly need it but if the builder sends at different times in the slot it may sneak more than 2",
+      "createdAt": "2026-07-30T14:25:48.038000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "yes, I think anyways we should allow full/empty so that is fine with me, I think my pr is more invasive since it adds a new config",
+      "createdAt": "2026-07-30T14:26:27.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "If devs are okay with this PR, we'll merge it & make a release.",
+      "createdAt": "2026-07-30T14:54:43.955000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "We just need reviews/approvals at this point.",
+      "createdAt": "2026-07-30T14:55:07.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Cross-layer",
+      "parent": "epbs",
+      "content": "I think 5497 is much better. We can operate entirely on the head itself which is easier than the previous PR and less invasive than adding more const params.",
+      "createdAt": "2026-07-30T20:29:20.842000+00:00",
+      "attachments": []
+    }
+  ]
+}
