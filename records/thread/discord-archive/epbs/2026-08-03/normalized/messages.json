@@ -1,0 +1,630 @@
+{
+  "schemaVersion": 1,
+  "channel": "epbs",
+  "date": "2026-08-03",
+  "messageCount": 76,
+  "sourceHash": "db9dd6155e1e8f7cb213df48901a8b55b20606bedc043deeb3f790eb376d0a28",
+  "searchText": "In gloas attestations (on the beacon block and the PTC attestations) are given 3 seconds to propagate through the network (if i understand correctly), this is not the case for the execution payload. - builder must send payload to arrive at PTC members BY the 6s mark - aggregators include attestations received UP TO the 6s mark if a block builder is to observe attestations AND ensure the execution payload arrives at PTC members by the 6s mark, then no block builder, however well connected, can ever observe the same attestations as the aggregators, since it has to sacrifice some portion of the attestation propagation window to ensure that the payload propagates. So the builder is by design forced to operate with uncertainty: it cannot form the same view of attestations as an aggregator so can only ever have a probabilistic view of whether or not a beacon block will be accepted - and so a builder may form a different view from attestation aggregators simply because, for example, many attestations are slow to propagate. if there is such a diverge of views, either the builder does not release the payload but has to pay anyway because the aggregators, with the benefit of extra time, think that it should have - or it does release the payload but it is not included and users transactions can be unbundled / exploited etc. So either way there is increased jeopardy for builders compared to now. is this an unintended consequence of the design? or something that is intended? the squeeze on payload propagation time seems out of step with the rest of the design. attestations have about 9 seconds to propagate, depending on peering, they have about 3 seconds if they require being seen by an aggregator, and then aggregates have about 6 seconds to propagate. PTC attestations have 3 seconds. The builder can form a subset of the view of aggregators, if the builder has seen 40% of the attestations then it's safe they can rebroadcast those attestations themselves (their node will do this automatically). And we're p99 in well under 1 second on mainnet for 40% of the committee. In addition the builder can never be same-slot-unbundled, which, of course is not remotely comparable with not being unbundled, but it is a better situation than in pre-Gloas where unbundling can replay transactions with the same slot context. > The builder can form a subset of the view of aggregators, if the builder has seen 40% of the attestations then it's safe they can rebroadcast those attestations themselves (their node will do this automatically). And we're p99 in well under 1 second on mainnet for 40% of the committee. but the chain itself does not proceed on this basis? what is the reason for that? I don't understand the question, apologies iI think you are saying that builders can release the execution payload if they have seen 40% of attestations, is that correct? yes and does the network as whole consider the beacon block as canonical / included (not sure what the correct term is), once 40% of attestations have been seen? if it is the case that a lower bar is sufficient to give confidence, I wonder why the timeline does not allow for time for the execution payload to propogate that does not overlap so much with attestations? The network considers the block as canonical even with zero attestations. What the 40% number gives you is that the next proposer cannot reorg that block. right but could it happen that 40% of attestations arrive early all attesting to the block and then 60% arrive later all attesting that it is missing? for example That doesn't matter In that case the next proposer also can't reorg The problem could be if there's an equivocation or if the chain is actually split and 60% attest to other contenting block adding that feature to deathstar right now, but `broadcast_validation=consensus_and_equivocation` should cover that right? ok understood. So p99 for 40% of attestations is 1s? and how long is the tail there? 1% of blocks is still 72 blocks per day i guess the question is how often would < 40% of attestations be seen before the builder has to release execution payload (as c. 5s) and yet > 40% are seen by 6s or later. presumably that is non-zero The tail doesn't really matter for 40% right? If you haven't seen 40% you can withhold cause you won't pay as 60% won't be reached. I do not have the numbers for this, Perhaps <@84562395988508672> could check on xatu but I'm pretty certain that never happened ever on mainnet so I wouldn't even know how to measure why won't 60% be reached? because > 20% of attestations NEVER arrive after ~5s? I mean, builder observes < 40% of attestations at ~5s so does not release the payload. is it then impossible for 60% to be reached? because you need a very specific target: you need more than 20% of attestations to arrive after you stopped listening for attestations (say for example 1 second) and before the slot deadline. and this is not possible? no, it's not impossible, I can be a malicious staker with 20% of the stake and trigger this by releasing my attestations that late or the builder could be partitioned or other technical reasons you mean the builder not able to see the 40% arriving? yes, that is more likely a reason to be grieved if you withhold. But this can be the case with any limit for example what happens if the builder never sees the block and it's canonical I’m a fair way away from my laptop sorry, but it’s all in panda so Claude should be able to check very quickly if you just copy in this chat transcript😂🙏 Claude says: \"Ran it — over 1,788 mainnet slots (six hours spread across Aug 1), p40 attestation arrival exceeded 5 s in exactly 1 slot — 0.06% — and never exceeded 6 s.\" using ethpandaops data using this query in duckDB: ``` WITH first_seen AS ( SELECT slot, slot_start_date_time // 3600 AS hr, attesting_validator_index AS v, min(propagation_slot_start_diff) AS ms FROM read_parquet([ 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/0.parquet', 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/4.parquet', 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/8.parquet', 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/12.parquet', 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/16.parquet', 'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/20.parquet']) WHERE propagation_slot_start_diff < 60000 GROUP BY 1, 2, 3 ), per_slot AS ( SELECT slot, hr, quantile_cont(ms, 0.4) AS p40_ms, count(*) AS seen FROM first_seen GROUP BY 1, 2 ), trimmed AS ( SELECT * FROM per_slot WHERE slot NOT IN (SELECT min(slot) FROM per_slot GROUP BY hr) AND slot NOT IN (SELECT max(slot) FROM per_slot GROUP BY hr) ) SELECT count(*) AS slots, round(avg(seen)) AS avg_validators_seen, round(quantile_cont(p40_ms, 0.5)) AS median_p40_ms, round(quantile_cont(p40_ms, 0.9)) AS p90_p40_ms, round(quantile_cont(p40_ms, 0.99)) AS p99_p40_ms, count(*) FILTER (p40_ms > 5000) AS slots_over_5s, round(100.0 * count(*) FILTER (p40_ms > 5000) / count(*), 2) AS pct_over_5s, round(100.0 * count(*) FILTER (p40_ms > 6000) / count(*), 2) AS pct_over_6s FROM trimmed; ``` Ran a different sample. Claude has opinions.. ``` Same picture, near-identically — Aug 2, six different hours (02/06/10/14/18/22 UTC), another 1,788 slots: ┌──────────────────────┬───────────┬───────────┐ │ metric │ Aug 1 │ Aug 2 │ ├──────────────────────┼───────────┼───────────┤ │ median per-slot p40 │ 2.6 s │ 2.6 s │ ├──────────────────────┼───────────┼───────────┤ │ p90 │ 4.0 s │ 3.9 s │ ├──────────────────────┼───────────┼───────────┤ │ p99 │ 4.4 s │ 4.4 s │ ├──────────────────────┼───────────┼───────────┤ │ slots with p40 > 5 s │ 1 (0.06%) │ 1 (0.06%) │ ├──────────────────────┼───────────┼───────────┤ │ slots with p40 > 6 s │ 0 │ 0 │ └──────────────────────┴───────────┴───────────┘ The distributions are so close (median identical to the millisecond, tails within ~100 ms) that this looks like a stable structural property of current mainnet propagation, not something that varies day to day or by time of day: the 40% mark lands mid-slot-third with a long thin tail, and a slot where it slips past 5 s happens roughly once per ~1,800 slots (~6 hours), essentially never past 6 s. So across both samples: 2 of 3,576 slots would have left a gloas builder still waiting on its 40% evidence at the 5 s mark, and none at the reveal deadline itself. ``` of course this is current mainnet with different attestation time, so hard to conclude anything I guess. That's not the data you want: you now want that 1 slot **and also** want that the block got more than 60% attestations I very much doubt that can exist on mainnet \" 14899328 was pure lateness, not contest. Nearly everyone voted for the block — the whole attestation wave just arrived late (median 5.2 s, p90 7.1 s). The committee saw the block, waited out its import, and voted for it past the deadline.\" both epoch boundary slots so it did happen in 14899328 - once in a sample of 12 hours (from the p.o.v. of the pandaops node or nodes of course) so not a single block would have grieved the builder? or 328 had less than 40% of the vote? slot 14899328 would have - 40% at 5.047s into the slot assuming a builder would leave 1s for block propagation. that's a slot zero... would be good to pick up logs from that node that may be an issue with the importing at that time what is a 'slot zero'? it's a first block in the epoch right they are usually slower to propagate and to be voted and they are usually reorged well, more likely to be reorged because of the additional processing required? It's a combination of factors, but I mostly blame bad coding on our side but yeah, in that slot nodes need to perform an epoch transition give me a sec to look at that block from the point of view of my node I have a (probably poorly connected) node locally that saw the block at 3.136s but did not see all data columns until 6.91s. Data columns are required for attestation? or not? yep, that block arrived at my node at 3.51\" and I attested right at the limit. In this situation most of the network is attesting at the same time at 4 seconds, both the people that got the block and those that didn't. The previous block **was also late** which is tricky cause those may be reorged. The nice thing about this block is that both this block and its parent were playing aggressive timing games... I assume people playing these games will not put out trustless bids data columns are not required to attest, but if they don't arrive by 9 seconds into the slot then the payload alone will be reorged and if it had trustless bids, it will be reorged and charged even if the builder revealed any timing games delay is determined by the proposer currently yep, and there's very little we can do to mitigate them, I think the best we can do is to tighten the attestation deadline as much as we can so an honest builder of slot 14899328 would have been justified in not releasing the payload (40% of attestations not seen at 5s), but would have had to pay b/c > 60% of the committee attested? but in gloas the attestation deadline is 1 second earlier, so we hope this won't happen? yes, an honest builder sending a trustless bid on that block and not revealing at 1 second after the attestation deadline because it didn' t see the 40% of the committee would have been penalized But we need to check that Claude statement cause it' s obviously a lot of slop > \" 14899328 was pure lateness, not contest. Nearly everyone voted for the block — the whole attestation wave just arrived late (median 5.2 s, p90 7.1 s). The committee saw the block, waited out its import, and voted for it past the deadline.\" This is pure crap you can tell it to C",
+  "excerpts": [
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In gloas attestations (on the beacon block and the PTC attestations) are given 3 seconds to propagate through the network (if i understand correctly), this is not the case for the execution payload. \n\n- builder must send payload to arrive at PTC members BY the 6s mark\n- aggregators include attestations received UP TO the 6s mark\n\nif a block builder is to observe attestations AND ensure the execution payload arrives at PTC members by the 6s mark, then no block builder, however well connected, can ever observe the same attestations as the aggregators, since it has to sacrifice some portion of the attestation propagation window to ensure that the payload propagates.\n\nSo the builder is by design forced to operate with uncertainty: it cannot form the same view of attestations as an aggregator so can only ever have a probabilistic view of whether or not a beacon block will be accepted - and so a builder may form a different view from attestation aggregators simply because, for example, many attestations are slow to propagate. \n\nif there is such a diverge of views, either the builder does not release the payload but has to pay anyway because the aggregators, with the benefit of extra time, think that it should have - or it does release the payload but it is not included and users transactions can be unbundled / exploited etc. So either way there is increased jeopardy for builders compared to now. \n\nis this an unintended consequence of the design? or something that is intended? the squeeze on payload propagation time seems out of step with the rest of the design.",
+      "createdAt": "2026-08-03T15:10:05.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "attestations have about 9 seconds to propagate, depending on peering, they have about 3 seconds if they require being seen by an aggregator, and then aggregates have about 6 seconds to propagate. \n\nPTC attestations have 3 seconds. \n\nThe builder can form a subset of the view of aggregators, if the builder has seen 40% of the attestations then it's safe they can rebroadcast those attestations themselves (their node will do this automatically). And we're p99 in well under 1 second on mainnet for 40% of the committee.",
+      "createdAt": "2026-08-03T15:18:44.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In addition the builder can never be same-slot-unbundled, which, of course is not remotely comparable with not being unbundled, but it is a better situation than in pre-Gloas where unbundling can replay transactions with the same slot context.",
+      "createdAt": "2026-08-03T15:20:19.629000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> The builder can form a subset of the view of aggregators, if the builder has seen 40% of the attestations then it's safe they can rebroadcast those attestations themselves (their node will do this automatically). And we're p99 in well under 1 second on mainnet for 40% of the committee.\n\nbut the chain itself does not proceed on this basis? what is the reason for that?",
+      "createdAt": "2026-08-03T15:28:23.952000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I don't understand the question, apologies",
+      "createdAt": "2026-08-03T15:29:32.780000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "iI think you are saying that builders can release the execution payload if they have seen 40% of attestations, is that correct?",
+      "createdAt": "2026-08-03T15:30:26.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2026-08-03T15:30:49.014000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and does the network as whole consider the beacon block as canonical / included (not sure what the correct term is), once 40% of attestations have been seen?",
+      "createdAt": "2026-08-03T15:31:53.802000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "if it is the case that a lower bar is sufficient to give confidence, I wonder why the timeline does not allow for time for the execution payload to propogate that does not overlap so much with attestations?",
+      "createdAt": "2026-08-03T15:34:56.421000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The network considers the block as canonical even with zero attestations. What the 40% number gives you is that the next proposer cannot reorg that block.",
+      "createdAt": "2026-08-03T15:47:34.984000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "right but could it happen that 40% of attestations arrive early all attesting to the block and then 60% arrive later all attesting that it is missing?",
+      "createdAt": "2026-08-03T15:49:47.287000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "for example",
+      "createdAt": "2026-08-03T15:50:07.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That doesn't matter",
+      "createdAt": "2026-08-03T15:50:31.518000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "In that case the next proposer also can't reorg",
+      "createdAt": "2026-08-03T15:50:47.710000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The problem could be if there's an equivocation or if the chain is actually split and 60% attest to other contenting block",
+      "createdAt": "2026-08-03T15:51:25.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "adding that feature to deathstar right now, but `broadcast_validation=consensus_and_equivocation` should cover that right?",
+      "createdAt": "2026-08-03T15:52:04.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "ok understood.  So p99 for 40% of attestations is 1s? and how long is the tail there? 1% of blocks is still 72 blocks per day",
+      "createdAt": "2026-08-03T15:56:18.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "i guess the question is how often would < 40% of attestations be seen before the builder has to release execution payload (as c. 5s) and yet > 40% are seen by 6s or later.",
+      "createdAt": "2026-08-03T15:58:10.877000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "presumably that is non-zero",
+      "createdAt": "2026-08-03T15:58:31.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "The tail doesn't really matter for 40% right? If you haven't seen 40% you can withhold cause you won't pay as 60% won't be reached. I do not have the numbers for this, Perhaps <@84562395988508672> could check on xatu but I'm pretty certain that never happened ever on mainnet so I wouldn't even know how to measure",
+      "createdAt": "2026-08-03T15:58:58.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "why won't 60% be reached? because  > 20% of attestations NEVER arrive after ~5s?",
+      "createdAt": "2026-08-03T15:59:57.137000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I mean, builder observes < 40% of attestations at ~5s so does not release the payload.",
+      "createdAt": "2026-08-03T16:00:46.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "is it then impossible for 60% to be reached?",
+      "createdAt": "2026-08-03T16:01:13.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because you need a very specific target: you need more than 20% of attestations to arrive after you stopped listening for attestations (say for example 1 second) and before the slot deadline.",
+      "createdAt": "2026-08-03T16:02:16.266000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and this is not possible?",
+      "createdAt": "2026-08-03T16:03:07.128000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "no, it's not impossible, I can be a malicious staker with 20% of the stake and trigger this by releasing my attestations that late",
+      "createdAt": "2026-08-03T16:03:18.572000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or the builder could be partitioned or other technical reasons",
+      "createdAt": "2026-08-03T16:05:18.125000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you mean the builder not able to see the 40% arriving? yes, that is more likely a reason to be grieved if you withhold. But this can be the case with any limit",
+      "createdAt": "2026-08-03T16:06:13.957000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "for example what happens if the builder never sees the block",
+      "createdAt": "2026-08-03T16:06:28.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and it's canonical",
+      "createdAt": "2026-08-03T16:06:33.613000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "samcm",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I’m a fair way away from my laptop sorry, but it’s all in panda so Claude should be able to check very quickly if you just copy in this chat transcript😂🙏",
+      "createdAt": "2026-08-03T16:36:05.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Claude says: \"Ran it — over 1,788 mainnet slots (six hours spread across Aug 1), p40 attestation arrival exceeded 5 s in exactly 1 slot — 0.06% — and never exceeded 6 s.\"",
+      "createdAt": "2026-08-03T17:32:01.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "using ethpandaops data",
+      "createdAt": "2026-08-03T17:32:16.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "using this query in duckDB:\n```\n  WITH first_seen AS (\n      SELECT slot,\n             slot_start_date_time // 3600 AS hr,\n             attesting_validator_index AS v,\n             min(propagation_slot_start_diff) AS ms\n      FROM read_parquet([\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/0.parquet',\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/4.parquet',\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/8.parquet',\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/12.parquet',\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/16.parquet',\n          'https://data.ethpandaops.io/xatu/mainnet/databases/default/libp2p_gossipsub_beacon_attestation/2026/8/1/20.parquet'])\n      WHERE propagation_slot_start_diff < 60000\n      GROUP BY 1, 2, 3\n  ),\n  per_slot AS (\n      SELECT slot, hr,\n             quantile_cont(ms, 0.4) AS p40_ms,\n             count(*) AS seen\n      FROM first_seen \n      GROUP BY 1, 2\n  ),\n  trimmed AS (\n      SELECT * FROM per_slot\n      WHERE slot NOT IN (SELECT min(slot) FROM per_slot GROUP BY hr)\n        AND slot NOT IN (SELECT max(slot) FROM per_slot GROUP BY hr)\n  )\n  SELECT count(*) AS slots,\n         round(avg(seen)) AS avg_validators_seen,\n         round(quantile_cont(p40_ms, 0.5)) AS median_p40_ms,\n         round(quantile_cont(p40_ms, 0.9)) AS p90_p40_ms,\n         round(quantile_cont(p40_ms, 0.99)) AS p99_p40_ms,\n         count(*) FILTER (p40_ms > 5000) AS slots_over_5s,\n         round(100.0 * count(*) FILTER (p40_ms > 5000) / count(*), 2) AS pct_over_5s,\n         round(100.0 * count(*) FILTER (p40_ms > 6000) / count(*), 2) AS pct_over_6s\n  FROM trimmed;\n```",
+      "createdAt": "2026-08-03T17:37:05.385000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "Ran a different sample. Claude has opinions..\n```\nSame picture, near-identically — Aug 2, six different hours (02/06/10/14/18/22 UTC), another 1,788 slots:\n\n  ┌──────────────────────┬───────────┬───────────┐\n  │        metric        │   Aug 1   │   Aug 2   │\n  ├──────────────────────┼───────────┼───────────┤\n  │ median per-slot p40  │ 2.6 s     │ 2.6 s     │\n  ├──────────────────────┼───────────┼───────────┤\n  │ p90                  │ 4.0 s     │ 3.9 s     │\n  ├──────────────────────┼───────────┼───────────┤\n  │ p99                  │ 4.4 s     │ 4.4 s     │\n  ├──────────────────────┼───────────┼───────────┤\n  │ slots with p40 > 5 s │ 1 (0.06%) │ 1 (0.06%) │\n  ├──────────────────────┼───────────┼───────────┤\n  │ slots with p40 > 6 s │ 0         │ 0         │\n  └──────────────────────┴───────────┴───────────┘\n\n  The distributions are so close (median identical to the millisecond, tails within ~100 ms) that this looks like a stable structural property of current mainnet propagation, not something that varies day to day or by time of day: the 40% mark lands mid-slot-third with a long thin tail, and a slot where it slips past 5 s happens roughly once per ~1,800 slots (~6 hours),\n  essentially never past 6 s.\n\n  So across both samples: 2 of 3,576 slots would have left a gloas builder still waiting on its 40% evidence at the 5 s mark, and none at the reveal deadline itself.\n```\nof course this is current mainnet with different attestation time, so hard to conclude anything I guess.",
+      "createdAt": "2026-08-03T17:47:02.156000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "That's not the data you want: you now want that 1 slot **and also** want that the block got more than 60% attestations",
+      "createdAt": "2026-08-03T17:51:49.113000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I very much doubt that can exist on mainnet",
+      "createdAt": "2026-08-03T17:52:03.487000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-08-03T18:57:46.138000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-08-03_at_19.57.40.png",
+          "content": "ba5a53925770db85e44c1234010753df4657c2d85b934bf5759d0940459e18b1"
+        }
+      ]
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "\" 14899328 was pure lateness, not contest. Nearly everyone voted for the block — the whole attestation wave just arrived late (median 5.2 s, p90 7.1 s). The committee saw the block, waited out its import, and  voted for it past the deadline.\"",
+      "createdAt": "2026-08-03T18:58:26.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "both epoch boundary slots",
+      "createdAt": "2026-08-03T18:59:10.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so it did happen in 14899328 - once in a sample of 12 hours",
+      "createdAt": "2026-08-03T18:59:46.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "(from the p.o.v. of the pandaops node or nodes of course)",
+      "createdAt": "2026-08-03T19:05:44.790000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so not a single block would have grieved the builder?",
+      "createdAt": "2026-08-03T20:59:05.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "or 328 had less than 40% of the vote?",
+      "createdAt": "2026-08-03T20:59:45.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "slot 14899328 would have - 40% at 5.047s into the slot",
+      "createdAt": "2026-08-03T21:00:12.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "assuming a builder would leave 1s for block propagation.",
+      "createdAt": "2026-08-03T21:00:51.917000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "that's a slot zero... would be good to pick up logs from that node  that  may be an issue with the importing at that time",
+      "createdAt": "2026-08-03T21:02:41.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "what is a 'slot zero'?",
+      "createdAt": "2026-08-03T21:04:18.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it's a first block in the epoch",
+      "createdAt": "2026-08-03T21:04:34.155000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "right",
+      "createdAt": "2026-08-03T21:04:44.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "they are usually slower to propagate and to be voted",
+      "createdAt": "2026-08-03T21:04:45.659000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and they are usually reorged",
+      "createdAt": "2026-08-03T21:05:03.561000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "well, more likely to be reorged",
+      "createdAt": "2026-08-03T21:05:15.289000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "because of the additional processing required?",
+      "createdAt": "2026-08-03T21:06:35.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "It's a combination of factors, but I mostly blame bad coding on our side",
+      "createdAt": "2026-08-03T21:07:03.688000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "but yeah, in that slot nodes need to perform an epoch transition",
+      "createdAt": "2026-08-03T21:07:44.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "give me a sec to look at that block from the point of view of my node",
+      "createdAt": "2026-08-03T21:07:54.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "I have a (probably poorly connected) node locally that saw the block at 3.136s but did not see all data columns until 6.91s. \nData columns are required for attestation? or not?",
+      "createdAt": "2026-08-03T21:12:28.949000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yep, that block arrived at my node at 3.51\" and I attested right at the limit. In this situation most of the network is attesting at the same time at 4 seconds, both the people that got the block and those that didn't. The previous block **was also late** which is tricky cause those may be reorged. The nice thing about this block is that both this block and its parent were playing aggressive timing games... I assume people playing these games will not put out trustless bids",
+      "createdAt": "2026-08-03T21:14:39.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "data columns are not required to attest, but if they don't arrive by 9 seconds into the slot then the payload alone will be reorged",
+      "createdAt": "2026-08-03T21:16:12.565000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "and if it had trustless bids, it will be reorged and charged even if the builder revealed",
+      "createdAt": "2026-08-03T21:16:33.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "any timing games delay is determined by the proposer currently",
+      "createdAt": "2026-08-03T21:17:04.723000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yep, and there's very little we can do to mitigate them, I think the best we can do is to tighten the attestation deadline as much as we can",
+      "createdAt": "2026-08-03T21:19:01.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "so an honest builder of slot 14899328 would have been justified in not releasing the payload (40% of attestations not seen at 5s), but would have had to pay b/c > 60% of the committee attested? \nbut in gloas the attestation deadline is 1 second earlier, so we hope this won't happen?",
+      "createdAt": "2026-08-03T21:22:07.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes, an honest builder sending a trustless bid on that block and not revealing at 1  second after the attestation deadline because it didn' t see the 40% of the committee would have been penalized",
+      "createdAt": "2026-08-03T21:25:45.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "But we need to check that Claude statement cause it' s obviously a lot of slop",
+      "createdAt": "2026-08-03T21:27:29.301000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "> \" 14899328 was pure lateness, not contest. Nearly everyone voted for the block — the whole attestation wave just arrived late (median 5.2 s, p90 7.1 s). The committee saw the block, waited out its import, and  voted for it past the deadline.\"\nThis is pure crap",
+      "createdAt": "2026-08-03T21:27:46.800000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "you can tell it to Claude and see if it figures out why",
+      "createdAt": "2026-08-03T21:27:59.687000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "isn't this also good for builders to move from 3s --> 2s for the attestation deadline so they have more time to observe before `PAYLOAD_DUE_MS`?",
+      "createdAt": "2026-08-03T21:29:02.094000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes and no, it depends on the size of the block they're building. If we price things so that a very large payload is buildable, they need to broadcast earlier as well",
+      "createdAt": "2026-08-03T21:31:32.652000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "the numbers at least are correct if not the whys and wherefores",
+      "createdAt": "2026-08-03T21:34:32.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "<@1257246783503994940> if you're honestly asking about release thresholds, I am uncertain of the level of risk assesment builders do per-block, but I would consider releasing at 20% and not 40%. You can only be reorged by a malicious proposer and a collusion of 2 consecutive malicious proposers can always do bad things.",
+      "createdAt": "2026-08-03T21:44:21.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "At least by default I'd release at 20% and no equivocation.",
+      "createdAt": "2026-08-03T21:44:45.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "A very sophisticated builder can actually follow the whole curve and get a very good estimate of the attestations a block will get, attestation propagation follows a very precise curve, so if you monitor the evolution of attestations over time, you can do a regression of that curve and estimate with a very small error how many attestations the block will get.",
+      "createdAt": "2026-08-03T21:48:38.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "it looks like for the epoch zero slots the attestation arrival is often pushed to the right, e.g. just now 14914208:",
+      "createdAt": "2026-08-03T22:05:37.616000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-08-03_at_23.05.29.png",
+          "content": "0d7dcab0005e4c1189829ce05c06e4983e14089e90deac96d8f3f2a98e718056"
+        }
+      ]
+    },
+    {
+      "author": "potuz",
+      "category": "Cross-layer",
+      "parent": "",
+      "content": "yes the problem at slot zero is that it is often late, so everyone sends the attestation at exactly the same time, at 4 seconds. Every other slot has some distribution according to when clients got their block... this will slightly get better (ever so slightly because Prysm's participation is low) in the next Prysm release that attenuates this",
+      "createdAt": "2026-08-03T23:43:17.897000+00:00",
+      "attachments": []
+    }
+  ]
+}
