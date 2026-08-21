@@ -1,0 +1,936 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃/_threads/https___api-buildoor-lodestar-ethrex-1.",
+  "date": "2026-08-20",
+  "messageCount": 115,
+  "sourceHash": "4057329e81ad5e0cd5e545df16452ac8ee6f6f91c6abd6d4411d4522f6ddbdd1",
+  "searchText": "<@1467247836117860547> can you check the debug logs of this node I don't really get why there would be no bids, my node is receiving proposer preferences cc <@808969530608451584> might know ↪️ Model Fallback: openai/gpt-5.5 (selected claude-cli/claude-opus-4-8; session expired) Checked ~07:24-09:25 UTC OTel logs for `buildoor-lodestar-ethrex-1`. Main read: - ethrex/execution looks clean: no errors/warns, just FCU V4 payload-attributes + requested-payload flow. - Lodestar is synced/current in logs: latest sample around 09:25 has slot `49626`, peers `65`, exec block valid. Finalized epoch still `1534`, but that matches the wider devnet non-finality. - Only real Lodestar error burst I see is stale: 07:44 `Invalid fork=fulu for post-gloas fork types` eventstream errors, then Fastify `Cannot write headers after they are sent`; one `REGEN_ERROR_NO_SEED_STATE` at 07:56. Not recurring now. - Current noise is mostly REST probes: `Block not found`, `Execution payload envelope not found`, old epoch committee requests. - Buildoor is warning every slot: `No proposer preferences for slot — skipping bids`; it still builds/dispatches payloads, so that looks like proposer-preference/bid path noise rather than EL/CL being dead. Xatu sidecar says `node_is_healthy=true`, `node_is_syncing=false`, `events_failed=0`; brief export 502s around 08:18-08:20 recovered. <@1467247836117860547> whats lodestar's circuit breaker logic to when to use bids or not circuit breaker should not be active on the devnet right now Got the full picture from source. Here's the answer. Lodestar has **two** builder circuit breakers, and which one is live depends on the fork — for a `buildoor` (Gloas/ePBS) devnet it's the second one. **Pre-Gloas — missed-slot health gate** (`chain.ts::updateBuilderStatus`, runs every slot in `prepareNextSlot`): - Signal is `forkChoice.getSlotsPresent(clockSlot - faultInspectionWindow)` = how many slots in the window actually had a block (not missed). - Builder stays enabled only if `slotsPresent >= min(faultInspectionWindow - allowedFaults, clockSlot)`. Otherwise status flips to `BuilderStatus.circuitBreaker` and you build locally. - Logic: too many missed slots ⇒ chain is unhealthy ⇒ don't hand block production to an external builder, self-build. **Post-Gloas — EMPTY-block rate gate** (`chain/builderCircuitBreaker.ts`): - In Gloas the proposer always produces the beacon block regardless of bid source, so missed *blocks* stop being a builder-health signal. Instead it counts canonical blocks that ended up **EMPTY** (payload not revealed) vs FULL, over the window (excluding the current slot since its payload status may be unresolved). - Activates when `empty * faultInspectionWindow > allowedFaults * canonicalBlocks` — i.e. the EMPTY rate exceeds the fault budget, scaled by observed blocks so sparse windows still trip on a high EMPTY rate. - Resumes selecting bids only when back within budget **and** it has seen ≥4 canonical blocks (`MIN_BLOCKS_TO_DEACTIVATE`) — a minimum recovery sample so it doesn't flap. **Params** (`getFaultInspectionParams`, both share them): - `faultInspectionWindow` default = `SLOTS_PER_EPOCH + rand(0..SLOTS_PER_EPOCH)` (≈32–63 slots), min `SLOTS_PER_EPOCH`. Randomized so validators don't all flip in lockstep. - `allowedFaults` default = `min(configured, floor(faultInspectionWindow/4))` → ~25% budget. - CLI: `--builder.faultInspectionWindow`, `--builder.allowedFaults`. This is a **chain-health override** and is orthogonal to `--builder.selection` (maxprofit/builderalways/…) and the per-block `shouldOverrideBuilder` EL signal — when the breaker is active it forces local build regardless of selection. <@1467247836117860547> what I am interested in, can you check the lodestar nodes (ie. lodestar-geth-1 and others), did they submit proposer preference before the fork, and also are submitting them right now? (you should see this in debug logs of the validator client and/or beacon node) <@412614104222531604> seems like bids are coming in now yeah not sure what was the diff is the circuit breaker gonna be opt in for you guys? so you wont have it on by default? or did you disable it just for this devnet? no, it's not gonna be opt in, and it's enabled, I meant it should not be active on the devnet, since it doesn't satisfy the conditions <@586161934425128960> bids coming from non lodestar builder thats why they come in finally the registration of a prysm node went through so all bids coming from prysm looks like lodestar on the buildoor node doesn't see the prop prefs that's strange, need to investigate, my node saw them you should have ssh access to the buildoor node too what are the conditions for circuit breaker to kick off? non finality is not one of them as lodekeeper outlined above we don't have any missed payloads so it won't trigger ok so you aren't checking finality condition s shouldn't non finality be one? 😅 its kind of the worst state for the network to be in and we'd ideally want to reduce complexity to recover it when it happens no I don't think so, cc <@755590043632140352> it's proposers that are doing badly, not builders I see pros and cons with activating it during non-finality ```Bid #1 FAILED for slot 49711: failed to submit bid: failed to submit bid: failed to submit execution payload bid POST failed with status 400: {\"message\":\"state for bid parent block root is unavailable\",\"code\":400}``` also prysm <> buildoor failing to build payloads now but with epbs ideally if clients work correctly, the CL chain should be a separate consideration and not be affected by bad payloads Here's the answer for Nico: Short version: on **devnet-8** (Gloas-forked ~07:44 UTC today) the Lodestar nodes are NOT getting proposer preferences flowing — the path is wedged by a fork bug at the transition. On **devnet-7** (already on Gloas) it works fine. Method caveat first: the VC submit line `Submitted signed proposer preferences` is logged at **debug** (`validator/src/services/proposerPreferences.ts:127`), and every devnet node runs at info — so the raw submit line isn't in Xatu/OTel. What I can measure is the `proposer_preferences` count on each beacon's `/eth/v1/events` stream (the xatu-sentry sidecar taps it), which is the downstream proof of the whole path working. devnet-8 (fork ~07:44): - Before the fork: pre-Gloas, zero proposer preferences for every client (feature doesn't exist yet) — nothing to submit. - At the fork (07:44:00): all 14 Lodestar nodes threw `Invalid fork=fulu for post-gloas fork types` at `beacon-node/src/network/processor/gossipHandlers.ts:1326` (the `proposer_preferences` handler), immediately followed by `Cannot write headers after they are sent` on the eventstream req. - Right now (~2h later): Lodestar event streams emit **0** `proposer_preferences` events. Last 20 min across clients: grandine 911, prysm 543, lighthouse 184, teku 123, **lodestar 0**, nimbus 0. Bids and other topics still flow on Lodestar (bid events 2036) — so it's specifically the proposer_preferences path that's stuck. devnet-7 (stable Gloas, control): Lodestar emits proposer preferences normally — **569** in the last 20 min, right in line with prysm/lighthouse/teku. So this is a Gloas fork-*transition* regression on Lodestar, not a general gap. Downstream: buildoor-lodestar-ethrex-1 is still logging \"No proposer preferences for slot — skipping bids\" (149× in the last 30 min), consistent with its Lodestar beacon not delivering proposer_preferences. Likely root cause: the fork lookup in the proposer_preferences gossip handler resolves to `fulu` instead of `gloas` right at the boundary (wrong slot/state for the fork calc). One-shot error at 07:44, but the eventstream emission has stayed dead since. I can't see the VC's actual submit debug line without turning on debug — but there were **no** submit *errors* on any Lodestar VC in 14h. If you want the definitive submit-side trace I can bump one devnet-8 Lodestar node to debug (needs a restart) and capture it. > Likely root cause: the fork lookup in the proposer_preferences gossip handler resolves to fulu instead of that sounds like a bug on our end, let me debug this separately yeah but the `if clients work correctly` is carrying a lot of weight. IMO non finality in regular operation isnt a thing that happens anyway. It happens when there's bugs or exploits. And when it happens we need to triage and debug asap, and adding builder complexity in that state feels a bit un-necessary to me. I get that post epbs we're separating it and it doesnt matter where the payload really comes from, but from a debug perspective its one more piece we'd need to think about rather than just disabling the flow and only needing to care about EL + CL where every dev can see locally what's going on. can you upload your findings as a public gist Done — public gist: https://gist.github.com/lodekeeper/cc86936c36ec737b9994568efa56d825 It's the full writeup: the `Invalid fork=fulu for post-gloas fork types` error at `gossipHandlers.ts:1326` (all 14 Lodestar nodes at 07:44), the per-client `proposer_preferences` event-stream tables for devnet-8 (Lodestar 0) vs devnet-7 control (Lodestar 569), the buildoor downstream symptom, the debug-level submit-side caveat, and the ClickHouse queries to reproduce. <@654267572107083777> whats the circuit breaker design of nimbus during non finality? looks like the number of payloads delivered is now less than before so I think we should indeed rethink the circuit breaker logic during non finality I think it would be better to fall back to local block building need to think more about this, I am pretty sure we talked about this ~2 years ago already on telegram, but with gloas, the consideration changes either way, it's pretty simple to check for recent finalization, we do this for proposer boost reorg already, the question is also if builders would even submit bids in the current state plataberget is in since you do not get enough attestation weight to safely reveal, but I let potuz chime in on this if that's the case, then the circuit breaker will activate soon we have 10k builders I think Pari that the most important thing is that we want to be reliable, more than easier to debug, and if the CL's are failing, adding local building will make it only worse. I think in this case it's fine to rely on builders until payloads are actually missed I mean the global circuit breaker There's zero indication that builders are a problem if there aren't payloads missing but why? either the local EL is healthy - in which case we can build blocks or its unhealthy and in which case we cannot validate blocks to attest to them. in either situation the CL is better off locally buliding (or atleast as good as via builder) but the local building gets you a simpler debug path. if there is a bug in prysm and prysm is used for a builder and we now have a fork and all the blocks being built by prysm getting accepted, then its kinda fucked situation no? like right now prysm is the only builder being used to build blocks, and looks like another client locally builds conflicting fork blocks also another prysm block just came in which is on a different fork than the other prysm node :/ I think relying on builders during non finality is a no go how are we relying on them? you can also make the argument that weak nodes in the network could benefit from using a builder bid so they do not need to broadcast the large payload + blobs themselves when they are the proposer right now we have single builder that submit the bids we don't need large payloads tho if that builder is acting fine, what's the problem? I rather have something small built vs nothing how do you know if the builder is acting fine? I see conflicting forks now being built by the builder it's revealing payloads timely that's most likely the connected CL that is the problem but that doesn't affect the canonical chain? No, in this situation the circuit breaker would trigger 3 forks, prysm building",
+  "excerpts": [
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-08-20T09:22:22.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> can you check the debug logs of this node",
+      "createdAt": "2026-08-20T09:22:23.013000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I don't really get why there would be no bids, my node is receiving proposer preferences",
+      "createdAt": "2026-08-20T09:22:41.871000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "cc <@808969530608451584> might know",
+      "createdAt": "2026-08-20T09:22:52.543000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "↪️ Model Fallback: openai/gpt-5.5 (selected claude-cli/claude-opus-4-8; session expired)",
+      "createdAt": "2026-08-20T09:26:32.464000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Checked ~07:24-09:25 UTC OTel logs for `buildoor-lodestar-ethrex-1`.\n\nMain read:\n- ethrex/execution looks clean: no errors/warns, just FCU V4 payload-attributes + requested-payload flow.\n- Lodestar is synced/current in logs: latest sample around 09:25 has slot `49626`, peers `65`, exec block valid. Finalized epoch still `1534`, but that matches the wider devnet non-finality.\n- Only real Lodestar error burst I see is stale: 07:44 `Invalid fork=fulu for post-gloas fork types` eventstream errors, then Fastify `Cannot write headers after they are sent`; one `REGEN_ERROR_NO_SEED_STATE` at 07:56. Not recurring now.\n- Current noise is mostly REST probes: `Block not found`, `Execution payload envelope not found`, old epoch committee requests.\n- Buildoor is warning every slot: `No proposer preferences for slot — skipping bids`; it still builds/dispatches payloads, so that looks like proposer-preference/bid path noise rather than EL/CL being dead.\n\nXatu sidecar says `node_is_healthy=true`, `node_is_syncing=false`, `events_failed=0`; brief export 502s around 08:18-08:20 recovered.",
+      "createdAt": "2026-08-20T09:26:33.663000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> whats lodestar's circuit breaker logic to when to use bids or not",
+      "createdAt": "2026-08-20T09:29:09.945000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "circuit breaker should not be active on the devnet right now",
+      "createdAt": "2026-08-20T09:30:09.061000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Got the full picture from source. Here's the answer.\n\nLodestar has **two** builder circuit breakers, and which one is live depends on the fork — for a `buildoor` (Gloas/ePBS) devnet it's the second one.\n\n**Pre-Gloas — missed-slot health gate** (`chain.ts::updateBuilderStatus`, runs every slot in `prepareNextSlot`):\n- Signal is `forkChoice.getSlotsPresent(clockSlot - faultInspectionWindow)` = how many slots in the window actually had a block (not missed).\n- Builder stays enabled only if `slotsPresent >= min(faultInspectionWindow - allowedFaults, clockSlot)`. Otherwise status flips to `BuilderStatus.circuitBreaker` and you build locally.\n- Logic: too many missed slots ⇒ chain is unhealthy ⇒ don't hand block production to an external builder, self-build.\n\n**Post-Gloas — EMPTY-block rate gate** (`chain/builderCircuitBreaker.ts`):\n- In Gloas the proposer always produces the beacon block regardless of bid source, so missed *blocks* stop being a builder-health signal. Instead it counts canonical blocks that ended up **EMPTY** (payload not revealed) vs FULL, over the window (excluding the current slot since its payload status may be unresolved).\n- Activates when `empty * faultInspectionWindow > allowedFaults * canonicalBlocks` — i.e. the EMPTY rate exceeds the fault budget, scaled by observed blocks so sparse windows still trip on a high EMPTY rate.\n- Resumes selecting bids only when back within budget **and** it has seen ≥4 canonical blocks (`MIN_BLOCKS_TO_DEACTIVATE`) — a minimum recovery sample so it doesn't flap.\n\n**Params** (`getFaultInspectionParams`, both share them):\n- `faultInspectionWindow` default = `SLOTS_PER_EPOCH + rand(0..SLOTS_PER_EPOCH)` (≈32–63 slots), min `SLOTS_PER_EPOCH`. Randomized so validators don't all flip in lockstep.\n- `allowedFaults` default = `min(configured, floor(faultInspectionWindow/4))` → ~25% budget.",
+      "createdAt": "2026-08-20T09:31:02.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "- CLI: `--builder.faultInspectionWindow`, `--builder.allowedFaults`.\n\nThis is a **chain-health override** and is orthogonal to `--builder.selection` (maxprofit/builderalways/…) and the per-block `shouldOverrideBuilder` EL signal — when the breaker is active it forces local build regardless of selection.",
+      "createdAt": "2026-08-20T09:31:03.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@1467247836117860547> what I am interested in, can you check the lodestar nodes (ie. lodestar-geth-1 and others), did they submit proposer preference before the fork, and also are submitting them right now? (you should see this in debug logs of the validator client and/or beacon node)",
+      "createdAt": "2026-08-20T09:32:35.715000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@412614104222531604> seems like bids are coming in now",
+      "createdAt": "2026-08-20T09:37:42.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah not sure what was the diff",
+      "createdAt": "2026-08-20T09:37:53.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "is the circuit breaker gonna be opt in for you guys? so you wont have it on by default? or did you disable it just for this devnet?",
+      "createdAt": "2026-08-20T09:38:13.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no, it's not gonna be opt in, and it's enabled, I meant it should not be active on the devnet, since it doesn't satisfy the conditions",
+      "createdAt": "2026-08-20T09:38:51.308000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@586161934425128960> bids coming from non lodestar builder",
+      "createdAt": "2026-08-20T09:38:53.387000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "thats why they come in",
+      "createdAt": "2026-08-20T09:38:57.052000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "finally the registration of a prysm node went through so all bids coming from prysm",
+      "createdAt": "2026-08-20T09:39:08.080000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "looks like lodestar on the buildoor node doesn't see the prop prefs",
+      "createdAt": "2026-08-20T09:39:19.144000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "that's strange, need to investigate, my node saw them",
+      "createdAt": "2026-08-20T09:39:38.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you should have ssh access to the buildoor node too",
+      "createdAt": "2026-08-20T09:39:54.140000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what are the conditions for circuit breaker to kick off?",
+      "createdAt": "2026-08-20T09:40:03.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "non finality is not one of them",
+      "createdAt": "2026-08-20T09:40:08.417000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "as lodekeeper outlined above",
+      "createdAt": "2026-08-20T09:40:41.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we don't have any missed payloads so it won't trigger",
+      "createdAt": "2026-08-20T09:41:08.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok",
+      "createdAt": "2026-08-20T09:41:22.603000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so you aren't checking finality condition s",
+      "createdAt": "2026-08-20T09:41:30.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "shouldn't non finality be one? 😅 \nits kind of the worst state for the network to be in and we'd ideally want to reduce complexity to recover it when it happens",
+      "createdAt": "2026-08-20T09:41:34.731000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no I don't think so, cc <@755590043632140352>",
+      "createdAt": "2026-08-20T09:41:51.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's proposers that are doing badly, not builders",
+      "createdAt": "2026-08-20T09:42:08.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I see pros and cons with activating it during non-finality",
+      "createdAt": "2026-08-20T09:42:41.107000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "```Bid #1 FAILED for slot 49711: failed to submit bid: failed to submit bid: failed to submit execution payload bid POST failed with status 400: {\"message\":\"state for bid parent block root is unavailable\",\"code\":400}```",
+      "createdAt": "2026-08-20T09:43:16.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also prysm <> buildoor failing to build payloads now",
+      "createdAt": "2026-08-20T09:43:26.789000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but with epbs ideally if clients work correctly, the CL chain should be a separate consideration and not be affected by bad payloads",
+      "createdAt": "2026-08-20T09:43:34.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Here's the answer for Nico:\n\nShort version: on **devnet-8** (Gloas-forked ~07:44 UTC today) the Lodestar nodes are NOT getting proposer preferences flowing — the path is wedged by a fork bug at the transition. On **devnet-7** (already on Gloas) it works fine.\n\nMethod caveat first: the VC submit line `Submitted signed proposer preferences` is logged at **debug** (`validator/src/services/proposerPreferences.ts:127`), and every devnet node runs at info — so the raw submit line isn't in Xatu/OTel. What I can measure is the `proposer_preferences` count on each beacon's `/eth/v1/events` stream (the xatu-sentry sidecar taps it), which is the downstream proof of the whole path working.\n\ndevnet-8 (fork ~07:44):\n- Before the fork: pre-Gloas, zero proposer preferences for every client (feature doesn't exist yet) — nothing to submit.\n- At the fork (07:44:00): all 14 Lodestar nodes threw `Invalid fork=fulu for post-gloas fork types` at `beacon-node/src/network/processor/gossipHandlers.ts:1326` (the `proposer_preferences` handler), immediately followed by `Cannot write headers after they are sent` on the eventstream req.\n- Right now (~2h later): Lodestar event streams emit **0** `proposer_preferences` events. Last 20 min across clients: grandine 911, prysm 543, lighthouse 184, teku 123, **lodestar 0**, nimbus 0. Bids and other topics still flow on Lodestar (bid events 2036) — so it's specifically the proposer_preferences path that's stuck.\n\ndevnet-7 (stable Gloas, control): Lodestar emits proposer preferences normally — **569** in the last 20 min, right in line with prysm/lighthouse/teku. So this is a Gloas fork-*transition* regression on Lodestar, not a general gap.\n\nDownstream: buildoor-lodestar-ethrex-1 is still logging \"No proposer preferences for slot — skipping bids\" (149× in the last 30 min), consistent with its Lodestar beacon not delivering proposer_preferences.\n\nLikely root cause: the fork lookup in the proposer_preferences gossip handler resolves to `fulu` instead of",
+      "createdAt": "2026-08-20T09:44:35.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "`gloas` right at the boundary (wrong slot/state for the fork calc). One-shot error at 07:44, but the eventstream emission has stayed dead since.\n\nI can't see the VC's actual submit debug line without turning on debug — but there were **no** submit *errors* on any Lodestar VC in 14h. If you want the definitive submit-side trace I can bump one devnet-8 Lodestar node to debug (needs a restart) and capture it.",
+      "createdAt": "2026-08-20T09:44:36.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "> Likely root cause: the fork lookup in the proposer_preferences gossip handler resolves to fulu instead of\nthat sounds like a bug on our end, let me debug this separately",
+      "createdAt": "2026-08-20T09:48:20.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah but the `if clients work correctly` is carrying a lot of weight. IMO non finality in regular operation isnt a thing that happens anyway. It happens when there's bugs or exploits. And when it happens we need to triage and debug asap, and adding builder complexity in that state feels a bit un-necessary to me. I get that post epbs we're separating it and it doesnt matter where the payload really comes from, but from a debug perspective its one more piece we'd need to think about rather than just disabling the flow and only needing to care about EL + CL where every dev can see locally what's going on.",
+      "createdAt": "2026-08-20T09:52:31.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can you upload your findings as a public gist",
+      "createdAt": "2026-08-20T09:52:31.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lodekeeper",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Done — public gist:\n\nhttps://gist.github.com/lodekeeper/cc86936c36ec737b9994568efa56d825\n\nIt's the full writeup: the `Invalid fork=fulu for post-gloas fork types` error at `gossipHandlers.ts:1326` (all 14 Lodestar nodes at 07:44), the per-client `proposer_preferences` event-stream tables for devnet-8 (Lodestar 0) vs devnet-7 control (Lodestar 569), the buildoor downstream symptom, the debug-level submit-side caveat, and the ClickHouse queries to reproduce.",
+      "createdAt": "2026-08-20T09:53:46.202000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@654267572107083777> whats the circuit breaker design of nimbus during non finality?",
+      "createdAt": "2026-08-20T09:53:53.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "looks like the number of payloads delivered is now less than before",
+      "createdAt": "2026-08-20T09:55:57.930000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so I think we should indeed rethink the circuit breaker logic",
+      "createdAt": "2026-08-20T09:56:07.006000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "during non finality I think it would be better to fall back to local block building",
+      "createdAt": "2026-08-20T09:56:16.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "need to think more about this, I am pretty sure we talked about this ~2 years ago already on telegram, but with gloas, the consideration changes either way, it's pretty simple to check for recent finalization, we do this for proposer boost reorg already, the question is also if builders would even submit bids in the current state plataberget is in since you do not get enough attestation weight to safely reveal, but I let potuz chime in on this",
+      "createdAt": "2026-08-20T09:56:54.212000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if that's the case, then the circuit breaker will activate soon",
+      "createdAt": "2026-08-20T09:57:37.083000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we have 10k builders",
+      "createdAt": "2026-08-20T09:58:06.432000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think Pari that the most important thing is that we want to be reliable, more than easier to debug, and if the CL's are failing, adding local building will make it only worse. I think in this case it's fine to rely on builders until payloads are actually missed",
+      "createdAt": "2026-08-20T09:58:12.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I mean the global circuit breaker",
+      "createdAt": "2026-08-20T09:58:23.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "There's zero indication that builders are a problem if there aren't payloads missing",
+      "createdAt": "2026-08-20T09:58:58.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but why? either the local EL is healthy - in which case we can build blocks or its unhealthy and in which case we cannot validate blocks to attest to them. in either situation the CL is better off locally buliding (or atleast as good as via builder) but the local building gets you a simpler debug path.",
+      "createdAt": "2026-08-20T10:00:59.336000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if there is a bug in prysm and prysm is used for a builder and we now have a fork and all the blocks being built by prysm getting accepted, then its kinda fucked situation no?",
+      "createdAt": "2026-08-20T10:01:04.856000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "like right now prysm is the only builder being used to build blocks, and looks like another client locally builds conflicting fork blocks",
+      "createdAt": "2026-08-20T10:01:33.840000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "also another prysm block just came in which is on a different fork than the other prysm node :/",
+      "createdAt": "2026-08-20T10:01:50.259000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think relying on builders during non finality is a no go",
+      "createdAt": "2026-08-20T10:02:35.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "how are we relying on them?",
+      "createdAt": "2026-08-20T10:03:02.398000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "you can also make the argument that weak nodes in the network could benefit from using a builder bid so they do not need to broadcast the large payload + blobs themselves when they are the proposer",
+      "createdAt": "2026-08-20T10:04:24.973000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "right now we have single builder that submit the bids",
+      "createdAt": "2026-08-20T10:04:25.055000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we don't need large payloads tho",
+      "createdAt": "2026-08-20T10:04:37.188000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if that builder is acting fine, what's the problem?",
+      "createdAt": "2026-08-20T10:04:43.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I rather have something small built vs nothing",
+      "createdAt": "2026-08-20T10:04:44.987000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "how do you know if the builder is acting fine?",
+      "createdAt": "2026-08-20T10:04:53.964000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I see conflicting forks now being built by the builder",
+      "createdAt": "2026-08-20T10:05:03.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's revealing payloads timely",
+      "createdAt": "2026-08-20T10:05:05.950000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "that's most likely the connected CL that is the problem",
+      "createdAt": "2026-08-20T10:05:30.433000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but that doesn't affect the canonical chain?",
+      "createdAt": "2026-08-20T10:05:38.127000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "No, in this situation the circuit breaker would trigger",
+      "createdAt": "2026-08-20T10:05:38.329000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "",
+      "createdAt": "2026-08-20T10:06:08.992000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-08-20_at_12.06.03.png",
+          "content": "283f222a8ed97ab365334739edf53133469160ad899c621ae61b50d606704b5f"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "3 forks, prysm building all of them",
+      "createdAt": "2026-08-20T10:06:19.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "which one is \"good\" ?",
+      "createdAt": "2026-08-20T10:06:28.217000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "literally my point, how do we know the builder's CL client won't have a bug?",
+      "createdAt": "2026-08-20T10:06:40.248000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "prysm-erigon-1 is on the canonical fork (with nimbus/lodestar) and is using builder (im guessing some condition for circuit breaker isnt met)",
+      "createdAt": "2026-08-20T10:06:51.330000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "esp if they gonna be maintaining their own closed source CLs going forward?",
+      "createdAt": "2026-08-20T10:06:55.534000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The fork are not decided by the builder!",
+      "createdAt": "2026-08-20T10:06:57.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The forks have nothing to do with the builder",
+      "createdAt": "2026-08-20T10:07:15.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah the forks are just a regular prysm bug right",
+      "createdAt": "2026-08-20T10:07:24.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Non finality has nothing to do with the CB",
+      "createdAt": "2026-08-20T10:07:30.512000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "That looks like a nimbusel issue",
+      "createdAt": "2026-08-20T10:08:12.779000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "could be a nimbusel + Reth issue as well ofc",
+      "createdAt": "2026-08-20T10:08:29.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "both are on forks",
+      "createdAt": "2026-08-20T10:08:33.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "what potuz is saying 😅",
+      "createdAt": "2026-08-20T10:08:46.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Don't know about the reth one",
+      "createdAt": "2026-08-20T10:08:48.876000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I don't care that this builder is submitting bids on a wrong fork",
+      "createdAt": "2026-08-20T10:09:06.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "IMO we're gonna disagree there, i think CB should trigger on non finality - but I see your point, smaller nodes would benefit from having the builder path. My concern is just that i still like to treat builders as a massive unknown with codebases and tools that we don't test or get visibility on and its better to focus on known paths when there's a crisis.",
+      "createdAt": "2026-08-20T10:09:50.004000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "You're betting on epbs separating concerns so nicely that it doesnt matter what builders do, so keep them around. Im betting that we don't know where the bug is during non finality so its best to reduce complex pieces.",
+      "createdAt": "2026-08-20T10:10:46.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah I also agree with pari here, I think non finality should def be a default circuit breaker condition",
+      "createdAt": "2026-08-20T10:11:24.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we shouldn't bet anything, can't we test this in a nft devnet? I am happy to add a feature flag to make the circuit breaker finality aware",
+      "createdAt": "2026-08-20T10:11:37.631000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "What's the test though?  i think we're disagreeing on an idea and not on something provable right? my bug doesnt exist, your local builder helping the solo staker is an idea too 😅",
+      "createdAt": "2026-08-20T10:12:30.179000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "but you can prove your side no? just make the builder behave maliciously",
+      "createdAt": "2026-08-20T10:13:06.368000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah, we can do that in the nft devnet!",
+      "createdAt": "2026-08-20T10:13:19.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "if it has negative effects on the chain during non-finality, we should not use builder bids",
+      "createdAt": "2026-08-20T10:13:24.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "doubt its gonna be conclusive, but you also made a great point earlier that builders would likely selfishly stop publishing bids during non finality since they wont get the attestations to safely release",
+      "createdAt": "2026-08-20T10:13:53.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so it might just be a non issue",
+      "createdAt": "2026-08-20T10:14:03.650000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I can add a feature flag for this, I think it might be fine to let the operator configure this behavior",
+      "createdAt": "2026-08-20T10:15:15.306000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "eg. a solo staker might favor using bids during non finality if they have bad upload? I don't really know tbh I see arguments for both sides",
+      "createdAt": "2026-08-20T10:15:56.803000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I only know that after deneb my node orphaned a bunch of blocks due to blobs and bad code on lodestar side, so I had to use builder blocks for a while",
+      "createdAt": "2026-08-20T10:17:03.198000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "(and german internet 😂 )",
+      "createdAt": "2026-08-20T10:17:14.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "really would require too much context to make good decisions",
+      "createdAt": "2026-08-20T10:19:21.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "we need to have sane defaults for best UX",
+      "createdAt": "2026-08-20T10:19:27.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "it's currently checking whether sufficiently many payloads came in in the last, I think, epoch",
+      "createdAt": "2026-08-20T10:54:17.358000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The only reason I am hearing from Pari/Barnabas to fallback to self-building: \n\n- Because it takes away one item from testing and it makes it easier to diagnose.  \n\nThis may seem true on first sight but it is actually false: a bug in the CL may make payloads disappear, just as a bug on the builder would. But it can also create all sorts of other bugs that a builder could not.  Diagnosing block building paths on the local build path is harder than on the external builder: failure to deliver from the builder and we do not care if it was it's CL or its EL, we simply cut it off... failure from delivering a self built payload and we have no clue what failed, it could be the CL, the EL, a combination, etc.. and we NEED to diagnose it to fix the chain. \n\nArguments to not fall back to self-building:\n\n- The chain is more reliable with many builders instead of 1, one active non-blacklisted builder will keep the chain running, that's 1 of N instead of 1/1. \n- The chain can advance even if all ELs from all active validators are failing to build blocks, there are plenty of scenarios that can trigger this: a failure to identify limits for example can lead to block building time to take more than the timeout, forcing clients to censor, we've had this already when we talked about gas limits and deposits. Builders can change this, local builders cannot. \n- Local builders that are stressed can't propagate blocks correctly or at least have a much harder time than external builders. \n\n\nIt will take a lot of work to convince me that you are right <@199561711278227457>",
+      "createdAt": "2026-08-20T10:55:53.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "after reading this, now I am even more on the \"use builder bids\" side 😁",
+      "createdAt": "2026-08-20T11:31:46.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "<@808969530608451584> or other panda, can we withhold payloads on plataberget for a bit to test circuit breaker during non-finality?",
+      "createdAt": "2026-08-20T11:57:52.697000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "or better yet, make some late, and withhold others",
+      "createdAt": "2026-08-20T11:58:08.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I think I found the problem, at the fork transition we had the wrong fork version during validation, and a single invalid event breaks our sse streaming, need to fix this properly, I guess it's not so urgent right now, a reboot of the node would fix it, but it has to sync pretty far now so I would not touch it for now",
+      "createdAt": "2026-08-20T11:59:59.936000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "We only merged CB for P2P bids. I'll have the relay version ready today",
+      "createdAt": "2026-08-20T12:08:09.579000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "I also want to onboard some validators",
+      "createdAt": "2026-08-20T12:08:23.472000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "gonna need to finalize for that first lol",
+      "createdAt": "2026-08-20T12:10:18.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Didn't prysm nodes heal already? Lighthouse and teku alone manage to stop finality?",
+      "createdAt": "2026-08-20T12:11:39.760000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "apparently not? https://dora.glamsterdam-devnet-8.ethpandaops.io/slots/filtered?f=&f.pname=prysm&f.builderblock=0&f.status=0x7&f.pstatus=0x7&c=50&d=0x207ff",
+      "createdAt": "2026-08-20T12:13:50.549000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah not yet",
+      "createdAt": "2026-08-20T12:14:03.100000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Did they fall back from being synced?",
+      "createdAt": "2026-08-20T12:15:10.581000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "well they're all on their own fork: https://dora.glamsterdam-devnet-8.ethpandaops.io/forks",
+      "createdAt": "2026-08-20T12:15:28.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Some of those nodes were working",
+      "createdAt": "2026-08-20T12:15:39.647000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "parithosh",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah i think your arguments are very valid, ill try to come up with some scenario where the contra is true - but you're right, in the end it may be best to leave the builder path untouched on non finality.",
+      "createdAt": "2026-08-20T13:01:26.630000+00:00",
+      "attachments": []
+    }
+  ]
+}

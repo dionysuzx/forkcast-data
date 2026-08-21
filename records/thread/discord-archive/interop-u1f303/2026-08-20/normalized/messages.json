@@ -1,0 +1,918 @@
+{
+  "schemaVersion": 1,
+  "channel": "interop-🌃",
+  "date": "2026-08-20",
+  "messageCount": 112,
+  "sourceHash": "a16aca741a734669775f46d8ec567d17f87ced8489e851e66b8f4b751b8aac5c",
+  "searchText": "hey <@592004585506340885> did you make the builder deposits via dora? I tried it yesterday but the transactions reverted. Dora showed a queue fee of 1 wei while the contract’s fee getter returned 48 wei, so it looks like Dora is not calculating the queue fee correctly? (cc <@808969530608451584>) Hey there. No I didn’t use dora. Yes, that does sound like a bug! 5 mins till the fork hey @jtraglia did you make the builder looks like nimbus is the only client so far able to handle the large number of builder deposits because lodestar wasn't a proposer yet 😄 all my nodes are following head so unlucky yeah lodestar is in the clear too i think the issue for us was our deposit optimizations got mnerged into devnet 8 branch like an hour or two ago i think any builder deposits that came in earlier than that would not have been cached Lighthouse — beacon process hangs dead. Every lighthouse beacon stopped logging within seconds of the transition (last lines 07:50:35–48): Transitioned to new fork: Gloas → State advance too slow (advancing 49151→49152) → total silence, and the HTTP API is down (VCs scream No synced beacon nodes, dora shows Disconnected). No restart/boot lines since, so it's a hang (likely a deadlock in the state-advance path at the fork), not a crash loop. Worth grabbing a stack dump from one node before restarting anything — that evidence disappears on restart. Prysm — fork-epoch state transition times out. Beacons are alive and chatting on p2p, but every node logs ERROR blockchain: Could not update epoch boundary caches error=could not process slots: context deadline exceeded — the Fulu→Gloas process_slots across the boundary never completes, so heads are pinned at 49149. Teku — can't satisfy DA for Gloas blob blocks. Teku transitioned fine event-wise and sees tip blocks via gossip, but every data_column_sidecars_by_root request to every peer returns 0/N with errors (e.g. for slot-49181's block, canonical with 15 blobs), so the availability check never passes and imports stall at 49149. Given the known teku #9929 highest-milestone sidecar-schema bug (which was masked pre-fork by exactly this req/resp path), this smells like either its reverse phase or a by_root schema/protocol mismatch at the fork boundary — the gossip side was supposed to self-heal at Gloas, but the req/resp fallback it was leaning on has now broken. yeah most builder deposits were done 10h ago that seems bad, why would that depend on builder deposit time? don't you recache everything ? we just have a scheduler that activates 2 epochs before the fork i dunno, i havent reviewed the PR. but thats what i think happened it could alos be you didn't handle all edge cases I put in ~5k invlaid validator deposits with the same pubkey as my builder for example i think we handle edge cases, but yeah the PR author is telling me we dont recache atm <@412614104222531604> do you have any error messages you can share so looks like we don't have any external bids coming in as none of the clients enable that by default we used the default flags on all clients. I'd expect that p2p bids should be enabled by default going into gloas. Would clients consider switching this on ? Teku should be on by default but we are the one stalled so guess we just reject them I was asking this here https://discord.com/channels/694822223575384095/748687253307392101/1537428177045954610 in eth-staker discord, I think we should use p2p bids by default but still boost local payload by ~10% `Bid skipped for slot 49268: no proposer preferences for slot — bid skipped` our buildoor instances see no proposer preferences sent at all do clients want me to resurrect the chain, and leave one node in the old state? Or rather want me to leave it all in this broken state? how you plan to do that? wipe and resync from latest checkpoint well it's pre gloas though I don't think we can finalize a post gloas checkpoint with prysm/lighthouse/teku dead, can we? we could if we shuffle some validators around <@358120958726373381> could we somehow retrigger the cache for the builder deposits? maybe if we genesis sync ? I see proposer preferences being broadcast but the reason lodestar is not using any bids is because there are none I'll try to restart a single lighthouse beacon and see if the hung process gets resolved https://api-buildoor-lodestar-ethrex-1.srv.glamsterdam-devnet-8.ethpandaops.io <@412614104222531604> how can I download a gloas state from the testnet? yeah we have a fix that might resolve the issue im merging it into our branch now minority client chain now 😁 https://klipy.com/gifs/captain-phillips-look G G captain... you guys can sync from unfinalized? i can provide a checkpoint nope it looks like we might be able to sync from local and see whats going on, ppl looking now I can also try to nuke a db on one host and see if it works looks like a network error - like network code https://gist.github.com/nflaig/c02c00714d07df076bed23200805d2d6 that's more or less a mix of s2/s3/s5 from [here](https://github.com/jtraglia/kurtosis-devnets/tree/master/gloas-deposits) https://api-buildoor-lodestar-ethrex-1. prysm recovered on its own? Ah crap you always set the fork to when I'm sleeping. Not looking into this. I'll actually have a good coffee and see the kids go to school before 😄. In prysm case it could have been the recache issue. Terrence had tested this scenario with invalid deposits without trouble <@412614104222531604> can you try restart all Teku from finalized state pre-gloas, I think that should help <@412614104222531604> merged a fix for lighthouse. All the prysm does are coming online now. We should finalize before ACD We are finalized did you do something? I added the builder deposit cache to devnet8 branch, it wasn't there so we struggled In slot [51104](https://dora.glamsterdam-devnet-8.ethpandaops.io/slot/51104), I proposed a test payload that has an invalid BAL. The payload was orphaned correctly, which is good, but I'm investigating if all clients rejected the block as early as possible. Are we forking now? we never saw the payload, the builder didnt reveal it. Likely the beacon node you used to broadcast the payload rejected it from prysm: `Builder failed to reveal payload, blacklisting it builderIndex=0 ` My builder won another slot before I could stop it (51136), jfyi > Builder failed to reveal payload, blacklisting it builderIndex=0 Ohh that thing is by default 😮 it makes everything more interesting to debug <@358120958726373381> in all my kurtosis runs against lighthouse, it misses proposing on slot 1, is this expected? btw looks like gas limit schedule works we are at 68M now talking about gas limit, are we set on shipping a schedule that starts pumping at the fork itself? we didn't start pumping at the fork that's my worry we started pumping 20 epochs after the fork yeah that's fine which is exactly what we set in the gas schedule I meant with Gloas is this already set in stone? no? this is just for this testnet I don't care what gas schedule we come up with but we have a way to predetermine the schedule with a single release we just did 200M 20epochs after and its now slowly gonna climb up like the first slot of every epoch? no that shouldnt happen no the first slot of the run slot=1 whenever lighthouse is the proposer for that slot, the slot is missed this is also with genesis in gloas <@808969530608451584> <@194432762315407360> just submitted the first builder exit. My AI had this remark. Is this accurate? > Gas was 575,591 — far above the ~170k a builder deposit cost. That's the first-ever write to this contract (cold SSTOREs from zero) landing under Glamsterdam's repriced storage and account-write costs. Worth knowing that the first exit after the fork is disproportionately expensive; subsequent ones should be much cheaper now the slots are warm. yeaaa, it's a lot 😄 I think the huuge diff comes from the fact that we initialized the builder deposit contract with deposits before gloas, so the slots are initialized. for the exits, which are only possible post gloas, you have to pay the initialization cost under the new gloas gas pricing without early deposits on the builder deposit contract, the first depositor would have the same high gas usage post gloas Hmm yeah, not a big deal I suppose. lighthouse nodes are back, something related to FCR got us stuck hmm okay, yeah I think im seeing that on my end. will take a deeper look, thanks! <@358120958726373381> another one on Lighthouse, I'm running extensive testing on kurtosis only, I see lighthouse fails to pack PTC attestations sporadically, on a chain that has consistent 100% inclusion, 512 PTC attestations all the time, from time to time there's a block with many less PTC attestations (48) and it's always, 100% of times, a LH node It's also surprising that in all cases LH packs exactly 48 attestations out of the 512! And it's not gossip cause the packed attestations are from all participating clients, so LH is aggregating, just not all is that the beacon committee size by chance? yes, that's it Nico good catch! I'm pretty sure this is a bug in Lightouse then it's the same bug I fixed on prysm side yeah most likely care to open the LH PR lol 🙂 https://github.com/OffchainLabs/prysm/pull/17028 just point claude at this <@358120958726373381> they probably count it otherwise they can't pass spectests, but they aren't packing them duplicated, that's the issue I suppose Thanks! We can honestly remove the inhibitor and allow exits to be submitted before the fork, if you feel like it makes enough of a difference No I don’t think it matters at all. It was merely an observation 😄 I would keep everything as-is.",
+  "excerpts": [
+    {
+      "author": "jimmygchen",
+      "category": "Testing",
+      "parent": "",
+      "content": "hey <@592004585506340885> did you make the builder deposits via dora? I tried it yesterday but the transactions reverted. Dora showed a queue fee of 1 wei while the contract’s fee getter returned 48 wei, so it looks like Dora is not calculating the queue fee correctly? (cc <@808969530608451584>)",
+      "createdAt": "2026-08-20T01:15:52.602000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hey there. No I didn’t use dora. Yes, that does sound like a bug!",
+      "createdAt": "2026-08-20T01:22:49.864000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "5 mins till the fork",
+      "createdAt": "2026-08-20T07:45:42.069000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "hey @jtraglia did you make the builder",
+      "createdAt": "2026-08-20T07:45:55.500000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like nimbus is the only client so far able to handle the large number of builder deposits",
+      "createdAt": "2026-08-20T07:52:46.606000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "",
+      "createdAt": "2026-08-20T07:53:09.060000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-08-20_at_09.53.02.png",
+          "content": "75a16790c47e1dc5b19da86991a997af5d96d42ab53ccd67e4def65d02554c67"
+        }
+      ]
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "because lodestar wasn't a proposer yet 😄",
+      "createdAt": "2026-08-20T07:53:31.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "all my nodes are following head",
+      "createdAt": "2026-08-20T07:53:38.126000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "so unlucky",
+      "createdAt": "2026-08-20T07:54:01.725000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah lodestar is in the clear too",
+      "createdAt": "2026-08-20T07:54:54.025000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think the issue for us was our deposit optimizations got mnerged into devnet 8 branch like an hour or two ago",
+      "createdAt": "2026-08-20T08:00:22.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think any builder deposits that came in earlier than that would not have been cached",
+      "createdAt": "2026-08-20T08:00:31.912000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Lighthouse — beacon process hangs dead. Every lighthouse beacon stopped logging within seconds of the transition (last lines 07:50:35–48): Transitioned to new fork: Gloas → State advance too slow (advancing 49151→49152) → total silence, and the HTTP API is down (VCs scream No synced beacon nodes, dora shows Disconnected). No restart/boot lines since, so it's a hang (likely a deadlock in the state-advance path at the fork), not a crash loop. Worth grabbing a stack dump from one node before restarting anything — that evidence disappears on restart.\n\nPrysm — fork-epoch state transition times out. Beacons are alive and chatting on p2p, but every node logs ERROR blockchain: Could not update epoch boundary caches error=could not process slots: context deadline exceeded — the Fulu→Gloas process_slots across the boundary never completes, so heads are pinned at 49149.\n\nTeku — can't satisfy DA for Gloas blob blocks. Teku transitioned fine event-wise and sees tip blocks via gossip, but every data_column_sidecars_by_root request to every peer returns 0/N with errors (e.g. for slot-49181's block, canonical with 15 blobs), so the availability check never passes and imports stall at 49149. Given the known teku #9929 highest-milestone sidecar-schema bug (which was masked pre-fork by exactly this req/resp path), this smells like either its reverse phase or a by_root schema/protocol mismatch at the fork boundary — the gossip side was supposed to self-heal at Gloas, but the req/resp fallback it was leaning on has now broken.",
+      "createdAt": "2026-08-20T08:00:32.033000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah most builder deposits were done 10h ago",
+      "createdAt": "2026-08-20T08:01:04.099000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "that seems bad, why would that depend on builder deposit time?",
+      "createdAt": "2026-08-20T08:01:16.372000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "don't you recache everything ?",
+      "createdAt": "2026-08-20T08:01:29.064000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "we just have a scheduler that activates 2 epochs before the fork",
+      "createdAt": "2026-08-20T08:01:44.645000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "i dunno, i havent reviewed the PR. but thats what i think happened",
+      "createdAt": "2026-08-20T08:01:48.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "it could alos be you didn't handle all edge cases",
+      "createdAt": "2026-08-20T08:02:22.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "I put in ~5k invlaid validator deposits with the same pubkey as my builder for example",
+      "createdAt": "2026-08-20T08:02:50.377000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "i think we handle edge cases, but yeah the PR author is telling me we dont recache atm",
+      "createdAt": "2026-08-20T08:03:36.084000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> do you have any error messages you can share",
+      "createdAt": "2026-08-20T08:06:57.427000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "so looks like we don't have any external bids coming in as none of the clients enable that by default",
+      "createdAt": "2026-08-20T08:12:15.466000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we used the default flags on all clients.",
+      "createdAt": "2026-08-20T08:12:21.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'd expect that p2p bids should be enabled by default going into gloas. Would clients consider switching this on ?",
+      "createdAt": "2026-08-20T08:12:56.600000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "Teku should be on by default",
+      "createdAt": "2026-08-20T08:13:33.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "but we are the one stalled so guess we just reject them",
+      "createdAt": "2026-08-20T08:13:57.150000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "I was asking this here https://discord.com/channels/694822223575384095/748687253307392101/1537428177045954610 in eth-staker discord, I think we should use p2p bids by default but still boost local payload by ~10%",
+      "createdAt": "2026-08-20T08:14:15.626000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "`Bid skipped for slot 49268: no proposer preferences for slot — bid skipped`",
+      "createdAt": "2026-08-20T08:14:44.862000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "our buildoor instances see no proposer preferences sent at all",
+      "createdAt": "2026-08-20T08:14:56.346000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "do clients want me to resurrect the chain, and leave one node in the old state?",
+      "createdAt": "2026-08-20T08:18:34.207000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "Or rather want me to leave it all in this broken state?",
+      "createdAt": "2026-08-20T08:18:55.636000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "how you plan to do that?",
+      "createdAt": "2026-08-20T08:19:15.169000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "wipe and resync from latest checkpoint",
+      "createdAt": "2026-08-20T08:19:39.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "well it's pre gloas though",
+      "createdAt": "2026-08-20T08:19:50.838000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't think we can finalize a post gloas checkpoint with prysm/lighthouse/teku dead, can we?",
+      "createdAt": "2026-08-20T08:20:33.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we could if we shuffle some validators around",
+      "createdAt": "2026-08-20T08:20:45.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@358120958726373381> could we somehow retrigger the cache for the builder deposits?",
+      "createdAt": "2026-08-20T08:21:06.768000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "maybe if we genesis sync ?",
+      "createdAt": "2026-08-20T08:21:15.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "I see proposer preferences being broadcast but the reason lodestar is not using any bids is because there are none",
+      "createdAt": "2026-08-20T08:22:19.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'll try to restart a single lighthouse beacon and see if the hung process gets resolved",
+      "createdAt": "2026-08-20T08:23:24.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://api-buildoor-lodestar-ethrex-1.srv.glamsterdam-devnet-8.ethpandaops.io",
+      "createdAt": "2026-08-20T08:25:16.826000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "inspector.butters",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> how can I download a gloas state from the testnet?",
+      "createdAt": "2026-08-20T08:26:35.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah we have  a fix that might resolve the issue",
+      "createdAt": "2026-08-20T08:40:01.674000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "im merging it into our branch now",
+      "createdAt": "2026-08-20T08:40:05.791000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "minority client chain now 😁",
+      "createdAt": "2026-08-20T08:43:37.471000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "0862e59aacfde753c606c0c72acf04ece5186e48e0f0144b7224f8821f509e0a"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://klipy.com/gifs/captain-phillips-look",
+      "createdAt": "2026-08-20T08:47:52.176000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "G G captain...",
+      "createdAt": "2026-08-20T08:50:03.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "you guys can sync from unfinalized? i can provide a checkpoint",
+      "createdAt": "2026-08-20T08:51:09.578000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "nope",
+      "createdAt": "2026-08-20T08:51:20.034000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "it looks like we might be able to sync from local and see whats going on, ppl looking now",
+      "createdAt": "2026-08-20T08:59:14.370000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I can also try to nuke a db on one host and see if it works",
+      "createdAt": "2026-08-20T08:59:41.488000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Testing",
+      "parent": "",
+      "content": "looks like a network error - like network code",
+      "createdAt": "2026-08-20T08:59:56.732000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://gist.github.com/nflaig/c02c00714d07df076bed23200805d2d6 that's more or less a mix of s2/s3/s5 from [here](https://github.com/jtraglia/kurtosis-devnets/tree/master/gloas-deposits)",
+      "createdAt": "2026-08-20T09:10:29.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://api-buildoor-lodestar-ethrex-1.",
+      "createdAt": "2026-08-20T09:22:22.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "prysm recovered on its own?",
+      "createdAt": "2026-08-20T09:34:09.740000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "Ah crap you always set the fork to when I'm sleeping. Not looking into this. I'll actually have a good coffee and see the kids go to school before 😄. In prysm case it could have been the recache issue. Terrence had tested this scenario with invalid deposits without trouble",
+      "createdAt": "2026-08-20T09:40:04.204000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "stefanbratanov",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> can you try restart all Teku from finalized state pre-gloas, I think that should help",
+      "createdAt": "2026-08-20T10:13:42.297000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hopinheimer",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@412614104222531604> merged a fix for lighthouse.",
+      "createdAt": "2026-08-20T10:25:23.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "All the prysm does are coming online now. We should finalize before ACD",
+      "createdAt": "2026-08-20T13:42:39.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "We are finalized",
+      "createdAt": "2026-08-20T13:55:41.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "did you do something?",
+      "createdAt": "2026-08-20T13:55:54.352000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "I added the builder deposit cache to devnet8 branch, it wasn't there so we struggled",
+      "createdAt": "2026-08-20T14:00:09.977000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "In slot [51104](https://dora.glamsterdam-devnet-8.ethpandaops.io/slot/51104), I proposed a test payload that has an invalid BAL. The payload was orphaned correctly, which is good, but I'm investigating if all clients rejected the block as early as possible.",
+      "createdAt": "2026-08-20T14:27:45.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "Are we forking now?",
+      "createdAt": "2026-08-20T14:29:31.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "we never saw the payload, the builder didnt reveal it. Likely the beacon node you used to broadcast the payload rejected it\nfrom prysm: `Builder failed to reveal payload, blacklisting it builderIndex=0 `",
+      "createdAt": "2026-08-20T14:29:44.638000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Testing",
+      "parent": "",
+      "content": "My builder won another slot before I could stop it (51136), jfyi",
+      "createdAt": "2026-08-20T14:36:49.238000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "> Builder failed to reveal payload, blacklisting it builderIndex=0\nOhh that thing is by default 😮",
+      "createdAt": "2026-08-20T14:40:30.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "terencechain",
+      "category": "Testing",
+      "parent": "",
+      "content": "it makes everything more interesting to debug",
+      "createdAt": "2026-08-20T14:43:50.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@358120958726373381> in all my kurtosis runs against lighthouse, it misses proposing on slot 1, is this expected?",
+      "createdAt": "2026-08-20T14:53:51.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "btw looks like gas limit schedule works\nwe are at 68M now",
+      "createdAt": "2026-08-20T14:58:11.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "talking about gas limit, are we set on shipping a schedule that starts pumping at the fork itself?",
+      "createdAt": "2026-08-20T14:59:41.102000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we didn't start pumping at the fork",
+      "createdAt": "2026-08-20T14:59:56.237000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "that's my worry",
+      "createdAt": "2026-08-20T15:00:04.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we started pumping 20 epochs after the fork",
+      "createdAt": "2026-08-20T15:00:05.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah that's fine",
+      "createdAt": "2026-08-20T15:00:24.810000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "which is exactly what we set in the gas schedule",
+      "createdAt": "2026-08-20T15:00:26.961000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I meant with Gloas",
+      "createdAt": "2026-08-20T15:00:27.754000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "is this already set in stone?",
+      "createdAt": "2026-08-20T15:00:42.807000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "no?",
+      "createdAt": "2026-08-20T15:00:47.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is just for this testnet",
+      "createdAt": "2026-08-20T15:00:51.719000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "I don't care what gas schedule we come up with",
+      "createdAt": "2026-08-20T15:01:00.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "but we have a way to predetermine the schedule with a single release",
+      "createdAt": "2026-08-20T15:01:12.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "we just did 200M 20epochs after",
+      "createdAt": "2026-08-20T15:01:23.564000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Testing",
+      "parent": "",
+      "content": "and its now slowly gonna climb up",
+      "createdAt": "2026-08-20T15:01:28.693000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "like the first slot of every epoch? no that shouldnt happen",
+      "createdAt": "2026-08-20T15:22:00.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "no the first slot of the run",
+      "createdAt": "2026-08-20T15:28:47.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "slot=1",
+      "createdAt": "2026-08-20T15:28:51.796000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "whenever lighthouse is the proposer for that slot, the slot is missed",
+      "createdAt": "2026-08-20T15:29:02.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "this is also with genesis in gloas",
+      "createdAt": "2026-08-20T15:29:14.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@808969530608451584> <@194432762315407360> just submitted the first builder exit. My AI had this remark. Is this accurate?\n> Gas was 575,591 — far above the ~170k a builder deposit cost. That's the first-ever write to this contract (cold SSTOREs from zero) landing under Glamsterdam's repriced storage and account-write costs. Worth knowing that the first exit after the fork is disproportionately expensive; subsequent ones should be much cheaper now the slots are warm.",
+      "createdAt": "2026-08-20T15:32:31.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeaaa, it's a lot 😄",
+      "createdAt": "2026-08-20T15:35:32.226000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "",
+      "content": "I think the huuge diff comes from the fact that we initialized the builder deposit contract with deposits before gloas,  so the slots are initialized.\nfor the exits, which are only possible post gloas, you have to pay the initialization cost under the new gloas gas pricing",
+      "createdAt": "2026-08-20T15:36:30.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Testing",
+      "parent": "",
+      "content": "without early deposits on the builder deposit contract, the first depositor would have the same high gas usage post gloas",
+      "createdAt": "2026-08-20T15:38:20.499000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "Hmm yeah, not a big deal I suppose.",
+      "createdAt": "2026-08-20T15:41:24.941000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "lighthouse nodes are back, something related to FCR got us stuck",
+      "createdAt": "2026-08-20T15:57:07.590000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "hmm okay, yeah I think im seeing that on my end. will take a deeper look, thanks!",
+      "createdAt": "2026-08-20T16:01:23.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "<@358120958726373381> another one on Lighthouse, I'm running extensive testing on kurtosis only, I see lighthouse fails to pack PTC attestations sporadically, on a chain that has consistent 100% inclusion, 512 PTC attestations all the time, from time to time there's a block with many less PTC attestations (48) and it's always, 100% of times, a LH node",
+      "createdAt": "2026-08-20T16:12:51.721000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "It's also surprising that in all cases LH packs exactly 48 attestations",
+      "createdAt": "2026-08-20T16:13:23.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "out of the 512!",
+      "createdAt": "2026-08-20T16:13:27.657000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "And it's not gossip cause the packed attestations are from all participating clients, so LH is aggregating, just not all",
+      "createdAt": "2026-08-20T16:14:00.596000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "is that the beacon committee size by chance?",
+      "createdAt": "2026-08-20T16:14:19.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "yes, that's it Nico good catch!",
+      "createdAt": "2026-08-20T16:15:04.635000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "I'm pretty sure this is a bug in Lightouse",
+      "createdAt": "2026-08-20T16:15:12.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "then it's the same bug I fixed on prysm side",
+      "createdAt": "2026-08-20T16:15:16.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "yeah most likely",
+      "createdAt": "2026-08-20T16:15:55.118000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "care to open the LH PR lol 🙂",
+      "createdAt": "2026-08-20T16:16:08.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "",
+      "content": "https://github.com/OffchainLabs/prysm/pull/17028 just point claude at this <@358120958726373381>",
+      "createdAt": "2026-08-20T16:16:17.903000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Testing",
+      "parent": "",
+      "content": "they probably count it otherwise they can't pass spectests, but they aren't packing them duplicated, that's the issue I suppose",
+      "createdAt": "2026-08-20T16:17:21.203000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "0xunclebill",
+      "category": "Testing",
+      "parent": "",
+      "content": "Thanks!",
+      "createdAt": "2026-08-20T16:57:31.391000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".fjl",
+      "category": "Testing",
+      "parent": "",
+      "content": "We can honestly remove the inhibitor and allow exits to be submitted before the fork, if you feel like it makes enough of a difference",
+      "createdAt": "2026-08-20T19:09:43.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "",
+      "content": "No I don’t think it matters at all. It was merely an observation 😄 I would keep everything as-is.",
+      "createdAt": "2026-08-20T19:10:32.111000+00:00",
+      "attachments": []
+    }
+  ]
+}
