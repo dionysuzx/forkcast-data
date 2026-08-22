@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "channel": "consensus-dev/_threads/8205",
+  "date": "2026-08-21",
+  "messageCount": 30,
+  "sourceHash": "4179ec479d10e6fe78a00c801b700f23c60b69db646d92649e4aa586061f86b2",
+  "searchText": "I was just looking into this from the PQ side(since the PoP is technically no longer needed either for rogue keys attacks), I am working myself through a different solution (with different tradeoffs) at the moment, but would be happy to discuss and review this further once I've fleshed it out a bit more! 8205 does look a bit complicated on first glance though tbh 😅 It will be great to review your proposal! <@565595741477928990> is the main author of 8205. We are not dying on the hill for this exact implementation, but rather want to have a viable solution for the deposit process vuln Hey <@427491045308235776>! I’d be happy to read your proposal when it’s ready, especially from the PQ angle And I agree with Dima: we’re not attached to this exact implementation. The important thing is to find a viable way to fix the underlying vulnerability. 8205 does look a bit scary at first glance 😅 But most of its length is boilerplate for the EL -> CL request bus, copied from EIPs 7002/7251 with small changes. So, on the EL side, it’s a system contract similar to 7002, 7251, and 8282, following the same well known pattern. The CL changes are fairly simple: one extra check when processing deposits and some storage for preregistrations in the beacon state with expiration: https://github.com/avsetsin/consensus-specs/blob/eip8205/specs/_features/eip8205/beacon-chain.md <@565595741477928990> Also just to clarify the problem: - An honest validator wants to register the following (B, WC, A). However, an attacker frontruns by putting their deposit first: (B, WC', 1 ETH) <- attacker frontruns (B, WC, A) <- honest validator tops up attackers WC' with amount A instead of registering The attacker in this case would need the private key for B because the initial deposit requires a signature, but the topup does not Where: - B is a bls public key - WC is withdrawal credentials - A is the amount in ETH An attack specific to delegated staking. There are two actors: - the delegator (the one who deposits on validators) - the node operator (the one who run validators and owns private keys) The node operator typically generates a large number of deposit data (keys) in advance and provides them to the delegator (e.g., LSP). When the delegator has the opportunity (e.g., when users stake in protocol), they make a deposit to CL using the depositData provided to them earlier In this scenario, the attacker is the node operator. They possess the validator’s private key and can sign any deposit data and front-run the delegator to stole delegator's (or LSP's) funds Makes sense, to be clear, the way the node operator front runs the delegator is by depositing 1 ETH into deposit contract under a different withdrawal credential? Yes What do you think about this rough idea: (It's not the original idea that I am working on, but it potentially works too) - Explicitly distinguishing between topups and registrations - Making a registration of an already registered BLS credential, be refundable to the withdrawal credential that was used in the registration - We can distinguish between topups and registerations by setting the withdrawal credentials and the signature to zeros for topups - Need to double check the complexity of the second Tradeoff here is that it doesn't completely mitigate it like a pre-registration mechanism would, but the attacker doesn't gain anything from it anymore I guess an attacker could pre-register using the pre-registration mechanism too (it's just that similarly they would not gain anything) > Explicitly distinguishing between topups and registrations Overall, this is a good approach, and it's pretty much what we're trying to suggest, but from a slightly different angle. The difference is that 8205 uses a separate flow to do so, in order to avoid interfering with the current deposit process and keep it backward-compatible If we reuse an existing flow (via a deposit contract), some interesting issues arise: - The race is still on, but only for registrations, and yes, it can be resolving with a refund as you sudgested. However, for the app level (staking protocols), this isn't an ideal solution. Although this scenario is less likely since the attack would no longer be profitable – it still needs to be handled (it will become griefing instead of theft). Such returns must be accounted for separately and the ETH that is deposited with the registration is still blocked on CL for a while (depending on the implementation, it might even have to wait all the entry queue since we need to think about churn consumption), although it is recoverable - Registration timing – currently, a validator is registered only after it has waited through the entire entry queue. If registration is moved earlier, problems arise: the number of deposit requests in a block is not limited (unlike in blocks 7002 or 7251, for example), only by gas. So it opens a DoS attack vector when the chain need to check lots of BLS signature to process registrations in one block (8205 reuse 7002 queue logic to limit the number of requests per block and current approach limit's it by churn and number of request that can be processed in a block). Maybe there's a good way to solve this, but that's what we were struggling with when we were thinking about the design of the 8205 - Not the biggest problem, but this will also change the way validators are created. I see it like a validator is first created with a zero balance (so that it's registered in the same block, but we don't bypassing churn), and its ETH are placed in pending_deposits. For staking protocols that calculates TVL on CL, this is no backward-compatible. For example, Lido encountered a similar issue with Pectra (https://github.com/ethereum/consensus-specs/blob/master/specs/electra/fork.md - we have adapted to this migration) > Making a registration of an already registered BLS credential, be refundable to the withdrawal credential that was used in the registration There is a related EIP (https://eips.ethereum.org/EIPS/eip-7684) addressing returns if WCs do not match. It partially solves the problem, but not completely (the attack becomes griefing instead of theft). We’re comparing it to the approach in 8205 here: https://hackmd.io/@george-avs/r1oK_afsbe (at the very bottom of the document) So, the key idea is the same: to separate registration and deposit in time and provide verifiability that the WCs are correctly registered > I guess an attacker could pre-register using the pre-registration mechanism too (it's just that similarly they would not gain anything) By having preregistration in the beacon state, we can build a guaranteed deposit mechanism with specific WCs using beacon proofs (https://eips.ethereum.org/EIPS/eip-4788) We plan to write a contract (I already have a draft ready) that will accept the proof and verify that the proof is in the beacon state and that it has not yet expired. And this contract can be used by any staking protocol to securely process deposits. For the staking protocol, the process will be as follows: the node operator provides a deposit data and pre-registration (this can be treated as a permanent commitment that this public key is tied to specific WCs). The protocol can deposit to this key at any time in two steps: pre-registration, followed by a deposit with proof. In this process, no funds are at risk and there is no double entry queue for stake To clarify, the distinction between registration and topups will only be for the purpose of disallowing double registering. So I wouldn't imagine that it changes anything wrt registration timing, there's just a tighter constraint on what a valid registration is. I don't really get the benefit for staking protocols. You are just shifting the problem from frontrunning deposits to frontrunning preregistrations, which a staking protocol still needs to handle. The advantage of preregistration is that it doesn’t have to wait in the entry queue and doesn’t require 1 ETH for a pre-deposit (which is non-recoverable if you decide not to deposit later). You can submit a preregistration and make a deposit with a beacon proof almost immediately, guaranteeing that you’ll create a validator with the correct WCs. Currently, to deposit a validator in bond-like approaches, you need to send a deposit of 1 ETH to a validator, wait 39 days (current entry queue) for the validator to appear in the registry, and only then deposit the remainder after proving that the validator is in the registry with the correct WCs. For 0x02 validator, this means that 2047 out of 2048 ETH do not earn rewards during this time and pass through the entry queue twice. <@707508825955237898> So for RP the benefit is that you can transition from pre-deposits to pre-registrations. Operator does pre-registration and prooves it on chain. Once proven the deposit can be safely made. you don't actually need to do the double queue thing, though yes that's what rocket pool is currently doing. So this is about speeding up the process by a day or so in my mind. I'm just wondering if we are talking about making a change specifically to improve this, if it's not possible to completely avoid the issue. this is a proposal to avoid the double queue issue for rocket pool, using a fraud proof approach instead: <https://rpips.rocketpool.net/RPIPs/RPIP-79> Yeah, it's true, the time can be reduced, but that will add more complexity. You'll need either oracles, a ZK proof (that your deposit is the first in the pending_deposits), or a challenge period (like in RPIP you shared) How can you avoid the full queue? The idea is that all protocol have their own protection. This EIP allows for a common solution and completely avoiding the problem (nobody needs a solution) just isn't possible? the things sjors lists above It looks like no. But if you have ideas, let's discuss For BLS, have you considered a 2-of-2 threshold signature instead? The node operator and the delegator would generate public keys A and B. They both sign some deposit data, producing S_a and S_b. The node operator sends B and S_b to the delegate to combine to make the combined pubkey and signature. The combined public key to registered onchain is pubkey= A + B, the combined signature is sig=S_a + S_b Once registration is done, the delegator can send the node operator the private key for A, so that the node operator can sign for A+B by themselves",
+  "excerpts": [
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "",
+      "createdAt": "2026-08-21T09:36:52.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "I was just looking into this from the PQ side(since the PoP is technically no longer needed either for rogue keys attacks), I am working myself through a different solution (with different tradeoffs) at the moment, but would be happy to discuss and review this further once I've fleshed it out a bit more!\n\n8205 does look a bit complicated on first glance though tbh 😅",
+      "createdAt": "2026-08-21T09:36:53.095000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dgusakov",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "It will be great to review your proposal! <@565595741477928990> is the main author of 8205. We are not dying on the hill for this exact implementation, but rather want to have a viable solution for the deposit process vuln",
+      "createdAt": "2026-08-21T09:47:18.210000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "Hey <@427491045308235776>! I’d be happy to read your proposal when it’s ready, especially from the PQ angle\n\nAnd I agree with Dima: we’re not attached to this exact implementation. The important thing is to find a viable way to fix the underlying vulnerability.\n\n8205 does look a bit scary at first glance 😅 But most of its length is boilerplate for the EL -> CL request bus, copied from EIPs 7002/7251 with small changes. So, on the EL side, it’s a system contract similar to 7002, 7251, and 8282, following the same well known pattern.\n\nThe CL changes are fairly simple: one extra check when processing deposits and some storage for preregistrations in the beacon state with expiration: https://github.com/avsetsin/consensus-specs/blob/eip8205/specs/_features/eip8205/beacon-chain.md",
+      "createdAt": "2026-08-21T10:05:45.845000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "<@565595741477928990> Also just to clarify the problem:\n\n- An honest validator wants to register the following (B, WC, A). \n\nHowever, an attacker frontruns by putting their deposit first:\n\n(B, WC', 1 ETH) <- attacker frontruns\n\n(B, WC, A) <- honest validator tops up attackers WC' with amount A instead of registering\n\nThe attacker in this case would need the private key for B because the initial deposit requires a signature, but the topup does not",
+      "createdAt": "2026-08-21T10:39:44.775000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "Where:\n\n- B is a bls public key\n- WC is withdrawal credentials\n- A is the amount in ETH",
+      "createdAt": "2026-08-21T10:40:17.134000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "An attack specific to delegated staking. There are two actors:\n- the delegator (the one who deposits on validators)\n- the node operator (the one who run validators and owns private keys)\n\nThe node operator typically generates a large number of deposit data (keys) in advance and provides them to the delegator (e.g., LSP). When the delegator has the opportunity (e.g., when users stake in protocol), they make a deposit to CL using the depositData provided to them earlier\n\nIn this scenario, the attacker is the node operator. They possess the validator’s private key and can sign any deposit data and front-run the delegator to stole delegator's (or LSP's) funds",
+      "createdAt": "2026-08-21T10:52:07.795000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "Makes sense, to be clear, the way the node operator front runs the delegator is by depositing 1 ETH into deposit contract under a different withdrawal credential?",
+      "createdAt": "2026-08-21T10:57:14.374000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "Yes",
+      "createdAt": "2026-08-21T10:58:07.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "What do you think about this rough idea:\n\n(It's not the original idea that I am working on, but it potentially works too)\n\n- Explicitly distinguishing between topups and registrations\n- Making a registration of an already registered BLS credential, be refundable to the withdrawal credential that was used in the registration\n\n- We can distinguish between topups and registerations by setting the withdrawal credentials and the signature to zeros for topups\n\n- Need to double check the complexity of the second\n\nTradeoff here is that it doesn't completely mitigate it like a pre-registration mechanism would, but the attacker doesn't gain anything from it anymore",
+      "createdAt": "2026-08-21T11:00:33.573000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "I guess an attacker could pre-register using the pre-registration mechanism too (it's just that similarly they would not gain anything)",
+      "createdAt": "2026-08-21T11:03:20.405000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "> Explicitly distinguishing between topups and registrations\nOverall, this is a good approach, and it's pretty much what we're trying to suggest, but from a slightly different angle. The difference is that 8205 uses a separate flow to do so, in order to avoid interfering with the current deposit process and keep it backward-compatible",
+      "createdAt": "2026-08-21T11:40:54.426000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "If we reuse an existing flow (via a deposit contract), some interesting issues arise:\n- The race is still on, but only for registrations, and yes, it can be resolving with a refund as you sudgested. However, for the app level (staking protocols), this isn't an ideal solution. Although this scenario is less likely since the attack would no longer be profitable – it still needs to be handled (it will become griefing instead of theft). Such returns must be accounted for separately and the ETH that is deposited with the registration is still blocked on CL for a while (depending on the implementation, it might even have to wait all the entry queue since we need to think about churn consumption), although it is recoverable\n- Registration timing – currently, a validator is registered only after it has waited through the entire entry queue. If registration is moved earlier, problems arise: the number of deposit requests in a block is not limited (unlike in blocks 7002 or 7251, for example), only by gas. So it opens a DoS attack vector when the chain need to check lots of BLS signature to process registrations in one block (8205 reuse 7002 queue logic to limit the number of requests per block and current approach limit's it by churn and number of request that can be processed in a block). Maybe there's a good way to solve this, but that's what we were struggling with when we were thinking about the design of the 8205\n- Not the biggest problem, but this will also change the way validators are created. I see it like a validator is first created with a zero balance (so that it's registered in the same block, but we don't bypassing churn), and its ETH are placed in pending_deposits. For staking protocols that calculates TVL on CL, this is no backward-compatible. For example, Lido encountered a similar issue with Pectra (https://github.com/ethereum/consensus-specs/blob/master/specs/electra/fork.md - we have adapted to this migration)",
+      "createdAt": "2026-08-21T11:40:57.409000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "> Making a registration of an already registered BLS credential, be refundable to the withdrawal credential that was used in the registration\n\nThere is a related EIP (https://eips.ethereum.org/EIPS/eip-7684) addressing returns if WCs do not match. It partially solves the problem, but not completely  (the attack becomes griefing instead of theft). We’re comparing it to the approach in 8205 here: https://hackmd.io/@george-avs/r1oK_afsbe (at the very bottom of the document)",
+      "createdAt": "2026-08-21T11:40:59.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "So, the key idea is the same: to separate registration and deposit in time and provide verifiability that the WCs are correctly registered",
+      "createdAt": "2026-08-21T11:42:43.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "> I guess an attacker could pre-register using the pre-registration mechanism too (it's just that similarly they would not gain anything)\n\nBy having preregistration in the beacon state, we can build a guaranteed deposit mechanism with specific WCs using beacon proofs (https://eips.ethereum.org/EIPS/eip-4788)\n\nWe plan to write a contract (I already have a draft ready) that will accept the proof and verify that the proof is in the beacon state and that it has not yet expired. And this contract can be used by any staking protocol to securely process deposits.",
+      "createdAt": "2026-08-21T11:49:34.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "For the staking protocol, the process will be as follows: the node operator provides a deposit data and pre-registration (this can be treated as a permanent commitment that this public key is tied to specific WCs).\n\nThe protocol can deposit to this key at any time in two steps: pre-registration, followed by a deposit with proof. \nIn this process, no funds are at risk and there is no double entry queue for stake",
+      "createdAt": "2026-08-21T11:55:40.078000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "To clarify, the distinction between registration and topups will only be for the purpose of disallowing double registering. So I wouldn't imagine that it changes anything wrt registration timing, there's just a tighter constraint on what a valid registration is.",
+      "createdAt": "2026-08-21T12:15:15.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "knoshua",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "I don't really get the benefit for staking protocols. You are just shifting the problem from frontrunning deposits to frontrunning preregistrations, which a staking protocol still needs to handle.",
+      "createdAt": "2026-08-21T12:33:17.486000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "The advantage of preregistration is that it doesn’t have to wait in the entry queue and doesn’t require 1 ETH for a pre-deposit (which is non-recoverable if you decide not to deposit later). You can submit a preregistration and make a deposit with a beacon proof almost immediately, guaranteeing that you’ll create a validator with the correct WCs.\n\nCurrently, to deposit a validator in bond-like approaches, you need to send a deposit of 1 ETH to a validator, wait 39 days (current entry queue) for the validator to appear in the registry, and only then deposit the remainder after proving that the validator is in the registry with the correct WCs.\n\nFor 0x02 validator, this means that 2047 out of 2048 ETH do not earn rewards during this time and pass through the entry queue twice.",
+      "createdAt": "2026-08-21T12:58:04.110000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dgusakov",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "<@707508825955237898> So for RP the benefit is that you can transition from pre-deposits to pre-registrations. Operator does pre-registration and prooves it on chain. Once proven the deposit can be safely made.",
+      "createdAt": "2026-08-21T13:37:49.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "knoshua",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "you don't actually need to do the double queue thing, though yes that's what rocket pool is currently doing. So this is about speeding up the process by a day or so in my mind. \n\nI'm just wondering if we are talking about making a change specifically to improve this, if it's not possible to completely avoid the issue.",
+      "createdAt": "2026-08-21T13:46:07.020000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "knoshua",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "this is a proposal to avoid the double queue issue for rocket pool, using a fraud proof approach instead: <https://rpips.rocketpool.net/RPIPs/RPIP-79>",
+      "createdAt": "2026-08-21T13:48:30.824000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "george_avs",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "Yeah, it's true, the time can be reduced, but that will add more complexity. You'll need either oracles, a ZK proof (that your deposit is the first in the pending_deposits), or a challenge period (like in RPIP you shared)",
+      "createdAt": "2026-08-21T13:51:59.267000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dgusakov",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "How can you avoid the full queue?",
+      "createdAt": "2026-08-21T14:04:26.681000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dgusakov",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "The idea is that all protocol have their own protection. This EIP allows for a common solution",
+      "createdAt": "2026-08-21T14:05:44.008000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "knoshua",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "and completely avoiding the problem (nobody needs a solution) just isn't possible?",
+      "createdAt": "2026-08-21T14:14:37.863000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "knoshua",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "the things sjors lists above",
+      "createdAt": "2026-08-21T14:15:58.521000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dgusakov",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "It looks like no. But if you have ideas, let's discuss",
+      "createdAt": "2026-08-21T14:43:50.998000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "general",
+      "parent": "consensus-dev",
+      "content": "For BLS, have you considered a 2-of-2 threshold signature instead?\n\nThe node operator and the delegator would generate public keys A and B.\n\nThey both sign some deposit data, producing S_a and S_b.\n\nThe node operator sends B and S_b to the delegate to combine to make the combined pubkey and signature.\n\nThe combined public key to registered onchain is pubkey= A + B, the combined signature is sig=S_a + S_b\n\nOnce registration is done, the delegator can send the node operator the private key for A, so that the node operator can sign for A+B by themselves",
+      "createdAt": "2026-08-21T23:32:27.895000+00:00",
+      "attachments": []
+    }
+  ]
+}
