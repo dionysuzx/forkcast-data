@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "interop-🌃/_threads/Progressive container issues",
   "date": "2026-09-14",
-  "messageCount": 12,
-  "sourceHash": "db4e1c9d12715f9454ccbe826ff381a05f3a14484fc8e863522520b9b1bd1607",
-  "searchText": "We found an unfixed corner-case, deposits: https://github.com/ChainSafe/lodestar/blob/a0619b279aa57140768859767be392ff5a20f656/packages/types/src/gloas/sszTypes.ts#L242 and don't we have a similar issue in beacon block body? in GLOAS, \"deposits\" must be 0 but it is enforced only at gossip\\stf Yeah, the linked line from lodestar is exactly the deposits deserialization but checked late leading to memory amp from blocks under max payload size with a large number of deposits (~8k) we can probably limit that to 0 in the container, but generally, can't you do the same with deposit requests, since those are unbounded? Yes, I think so. The deserialization DoS primitive is not limited to beacon block gossip with non-canonical deposits but I don't think we can limit the deposits requests anymore, so the limit there is the max gossip limit The spec leaves out deposit requests check: https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/p2p-interface.md#new-verify_execution_requests_limits Aha, understood. They are intentionally left out in CL specs because they are gas bound in the EL 🙏 I can confirm that even with Teku's conservative 10 message byte-cap for unknown parent block roots, lots of beacon block gossip with about 50k deposit requests each can DoS a teku node with 32GB RAM and 8GB heap limits. Requires about 500 beacon block gossip messages. The byte-cap helps but the issue is in deserialization. Sig check does not help because it happens too late yeah.. i have an alternative version of that PR that applies the limits deeper in the ssz, close to each field. But with such approach reference tests need big changes. Let's talk about these stuff later in ACDT <@504202741933932544> regarding the spec test harness, we added this handler ```ts // Only an ssz list limit violation is an expected input error, anything else is a decode bug shouldErrorOnInput: (error: Error, inputNames: Set<string>) =>!inputNames.has(\"post\") && /over limit/.test(error.message) ``` so the `inputNames.has(\"post\")` is what Justin mentioned, and we have a specific error message in our ssz lib so you have a map ( test -> expectedError ) for each of those tests?",
+  "messageCount": 31,
+  "sourceHash": "611311f6fd0dc28e7a4f1a087defae225ac4fe0fa2c4ffea0b079991139860e9",
+  "searchText": "We found an unfixed corner-case, deposits: https://github.com/ChainSafe/lodestar/blob/a0619b279aa57140768859767be392ff5a20f656/packages/types/src/gloas/sszTypes.ts#L242 and don't we have a similar issue in beacon block body? in GLOAS, \"deposits\" must be 0 but it is enforced only at gossip\\stf Yeah, the linked line from lodestar is exactly the deposits deserialization but checked late leading to memory amp from blocks under max payload size with a large number of deposits (~8k) we can probably limit that to 0 in the container, but generally, can't you do the same with deposit requests, since those are unbounded? Yes, I think so. The deserialization DoS primitive is not limited to beacon block gossip with non-canonical deposits but I don't think we can limit the deposits requests anymore, so the limit there is the max gossip limit The spec leaves out deposit requests check: https://github.com/ethereum/consensus-specs/blob/master/specs/gloas/p2p-interface.md#new-verify_execution_requests_limits Aha, understood. They are intentionally left out in CL specs because they are gas bound in the EL 🙏 I can confirm that even with Teku's conservative 10 message byte-cap for unknown parent block roots, lots of beacon block gossip with about 50k deposit requests each can DoS a teku node with 32GB RAM and 8GB heap limits. Requires about 500 beacon block gossip messages. The byte-cap helps but the issue is in deserialization. Sig check does not help because it happens too late yeah.. i have an alternative version of that PR that applies the limits deeper in the ssz, close to each field. But with such approach reference tests need big changes. Let's talk about these stuff later in ACDT <@504202741933932544> regarding the spec test harness, we added this handler ```ts // Only an ssz list limit violation is an expected input error, anything else is a decode bug shouldErrorOnInput: (error: Error, inputNames: Set<string>) =>!inputNames.has(\"post\") && /over limit/.test(error.message) ``` so the `inputNames.has(\"post\")` is what Justin mentioned, and we have a specific error message in our ssz lib so you have a map ( test -> expectedError ) for each of those tests? yeah it's not very nice, works for now though, we should probably encode this on the spec side the same way as clients do if everyone is going to enforce this during deserialization anyways Earlier I messaged <@923866336382316594> about updating the SSZ library to support this. This is a good opportunity to include <@881905303011086387>. So this is the gist of what we're asking: > We discussed adding optional ProgressiveContainer LIMIT fields in the SSZ library. Is this something we could do in ssz-specs? If a LIMIT is defined and you try to deserialize something above that limit, throw an error. can we re-add a limit to deposit requests? 😄 Thanks lol. That was also a question we'd like to discuss. so the implicit limit seems to be 41800 deposit requests if you assume all other lists are maxed out and given the 10Mib gossip limit The problem with that is that it should be a function of the current gaslimit? yeah I wanted to look into that so we can bound the worst cases a bit more, also potuz mentioned that in the chat during the call, just not sure that is ideal solution Or it is just a tiny complication to builders which have to be aware?contract could also queue up requests more? - (1) EL devs said it's to hard for them to account for this, my preference was always to keep sane limits on the cl side - (2) we decided to not mutate the deposit contract and add queuing to it, obviously the current design of the contract is bad, it should be like EIP-8282 contracts no queue means picking the value introduces a risk Yeah I don't think we should add a limit for deposits. Maybe we can fix this if/when we switch to a PQ deposit contract. Use the new system contract queuing approach, like builder deposits. BTW do we remember why Deposits in beacon block body has not been removed completely in 7688 ? Tried to search around and found on traces ok probably to reduce ecosystem impact. EIP-8015 cleans it up Yep I think so to provide a PR imposing a 0 at ssz level in the deposits PL we need a way to specify the limit at ssz lib level, otherwise the PR is just noise oh, i see it has been already added in the ssz-specs <:LFG:1083412070436982864> i'll check in tomorrow",
   "excerpts": [
     {
       "author": "bshastry",
@@ -100,6 +100,158 @@
       "parent": "interop-🌃",
       "content": "so you have a map ( test -> expectedError ) for each of those tests?",
       "createdAt": "2026-09-14T16:17:13.171000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah it's not very nice, works for now though, we should probably encode this on the spec side the same way as clients do if everyone is going to enforce this during deserialization anyways",
+      "createdAt": "2026-09-14T18:35:09.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Earlier I messaged <@923866336382316594> about updating the SSZ library to support this. This is a good opportunity to include <@881905303011086387>. So this is the gist of what we're asking:\n\n> We discussed adding optional ProgressiveContainer LIMIT fields in the SSZ library. Is this something we could do in ssz-specs? If a LIMIT is defined and you try to deserialize something above that limit, throw an error.",
+      "createdAt": "2026-09-14T19:14:08.511000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "can we re-add a limit to deposit requests? 😄",
+      "createdAt": "2026-09-14T19:14:43.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Thanks lol. That was also a question we'd like to discuss.",
+      "createdAt": "2026-09-14T19:15:26.316000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "so the implicit limit seems to be 41800 deposit requests if you assume all other lists are maxed out and given the 10Mib gossip limit",
+      "createdAt": "2026-09-14T19:25:53.481000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "The problem with that is that it should be a function of the current gaslimit?",
+      "createdAt": "2026-09-14T19:28:21.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "yeah I wanted to look into that so we can bound the worst cases a bit more, also potuz mentioned that in the chat during the call, just not sure that is ideal solution",
+      "createdAt": "2026-09-14T19:30:31.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Or it is just a tiny complication to builders which have to be aware?contract could also queue up requests more?",
+      "createdAt": "2026-09-14T19:33:33.514000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nflaig",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "- (1) EL devs said it's to hard for them to account for this, my preference was always to keep sane limits on the cl side\n- (2) we decided to not mutate the deposit contract and add queuing to it, obviously the current design of the contract is bad, it should be like EIP-8282 contracts",
+      "createdAt": "2026-09-14T19:40:30.041000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "no queue means picking the value introduces a risk",
+      "createdAt": "2026-09-14T19:53:45.331000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yeah I don't think we should add a limit for deposits.",
+      "createdAt": "2026-09-14T19:55:36.939000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Maybe we can fix this if/when we switch to a PQ deposit contract.",
+      "createdAt": "2026-09-14T19:57:03.233000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Use the new system contract queuing approach, like builder deposits.",
+      "createdAt": "2026-09-14T19:57:23.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "BTW do we remember why Deposits in beacon block body has not been removed completely in 7688 ?\nTried to search around and found on traces",
+      "createdAt": "2026-09-14T20:01:11.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "ok probably to reduce ecosystem impact. EIP-8015 cleans it up",
+      "createdAt": "2026-09-14T20:08:19.934000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "Yep I think so",
+      "createdAt": "2026-09-14T20:08:43.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "to provide a PR imposing a 0 at ssz level in the deposits PL we need a way to specify the limit at ssz lib level, otherwise the PR is just noise",
+      "createdAt": "2026-09-14T20:10:48.841000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "oh, i see it has been already added in the ssz-specs <:LFG:1083412070436982864>",
+      "createdAt": "2026-09-14T20:24:13.999000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tbenr",
+      "category": "Testing",
+      "parent": "interop-🌃",
+      "content": "i'll check in tomorrow",
+      "createdAt": "2026-09-14T20:24:40.202000+00:00",
       "attachments": []
     }
   ]
