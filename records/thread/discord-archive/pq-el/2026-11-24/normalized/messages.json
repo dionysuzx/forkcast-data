@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "channel": "pq-el",
+  "date": "2026-11-24",
+  "messageCount": 20,
+  "sourceHash": "71d8cb08e9bc4d553f07cd46079b48c942a50f27d9c8e0a4c0cf684f6a8d6969",
+  "searchText": "as i understand it (<@543900561460822016> can correct me if im wrong), without a PROOF frame or equivalent, wallets would have to validate leanSPHINCS signatures through VERIFY frames, but VERIFY frames are stateful (STATICCALL) so they cannot be aggregated, whereas PROOF frames execute in a pure context (which is why they are a different frame type) so they can be aggregated. so if we ship H* without PROOF frame (or equivalent), wallets would need to use leanSPHINCS through VERIFY frames, so when aggregation is shipped they will have to update their code (including the smart account code) to leverage aggregation. so the value of shipping PROOF frames in H* is to be forward-compatible with aggregation so that wallets can transparently take advantage of the cost savings from aggregation once it ships, as opposed to having to update their wallet/account code again what's less clear to me is whether it's feasible to ship aggregation itself in H*. my understanding is that: - to support aggregation at the builder level, the primary blocker is the readiness of leanVM itself. if we are 100% sure that leanVM is production-ready, the remaining questions would be things like figuring out where to put the recursive proof (https://github.com/ethereum/EIPs/pull/12549). so it might be doable to resolve these questions in time for H*? - to support aggregation at the mempool level, besides the readiness of leanVM and other questions we have to resolve for builder aggregation, we also have a lot of networking/mempool questions to answer, such as the exact aggregation strategy that each mempool node is supposed to take (i've done some sims that showed that the strategy currently in the 8288 spec is far from optimal). not so sure whether it's feasible to resolve these questions by H*, by like <@427491045308235776> said above, we don't actually have to -- as long as the protocol itself can deal with aggregated proofs, we can ship mempool aggregation outside of fork schedule so my first question (and i guess that's for <@1481393192950567003> <@427491045308235776> <@750602516613431366>) is -- just how production-ready is leanVM for the purpose of aggregating leanSPHINCS signatures as of today? The current earmark for leanVM readiness including formally verifying the verifiers is July. This should give us enough buffer to account for unknowns, but also not be too late such that it becomes a blocker for shipping H*. I'd say the indication of production-readiness will be once we've completed the external audits. Given we plan to FV the code to the assembly level, it will be interesting to see if external audits do find anything I think right now one of the main blockers for reducing uncertainty with leanVM, is knowing what is adequate performance, which in some sense is a bit dependent on the networking stack and the aggregation topology we potentially go with. It's possible to make leanVM faster at the expense of making it a lot more complicated i don’t think it is very likely we ship aggregation in H* the goal we should be trying to achieve is making it so people who start using PQ crypto in H* will get to take advantage of the aggregation in the future without any additional changes to their account so doing the PROOF frame allows us to turn that on later even if people use it without aggregation initially do you mean elaborating on why you think it's unlikely we ship aggregation in H*? i'm not very caught up with the progress myself but it sounds like others have been testing aggregation on the Dalsugi testnet so just wondering what you think the main blockers are (not saying i think there are no major blockers; just trying to understand) again the goal would not be to ship mempool aggregation, but rather just to support aggregation at the block level so that mempool aggregation can be implemented later out of fork schedule C# should be done (hope it works, will test more carefully tomorrow) we would need 100% confidence in putting leanVM into the protocol in the next ~3 months if we want to deliver H* roughly on time. that just doesn’t seem likely to me. leanVM is a big project and it will just take time for people to really understand it, the implications, test it, formally verify it, etc. I don’t expect that to happen in 3 months. It also is really not necessary upon the launch of H*, the number of PQ signatures will not immediately account for all signatures on the chain. Even if it did, we can support 4kb sigs for every tc without aggregation with fairly well understood improvements to our p2p. So I don’t see a reason to rush aggregation at all that's reasonable -- thanks I doubt aggregation makes hegota, but we _could_ already do segregation: pq sigs travel next to the tx (sidecar in the mempool, separate field in the block), and nodes still verify each. Later we swap that field for one aggregated proof. Since this only slows down frames and can be done with 8288, it's probably fine to ship segregation+aggregation at once. What we need to lock in now is: - where accounts look: the proof frame (or the signature-list entry), the same that 8288 will use - the signature hash commits only to (pk, msg) and the witness length, not the witness bytes. With a proof frame, we can have the frame.target be the verifier (instead of specifying a scheme). (pk, msg) is covered by the sighash, the sig (witness) isn't, and, having segregation/aggregation, it goes in the sidecar. Schemes are precompiles, and anyone can deploy their own verifier, but precompile witnesses get replaced by the proof once aggregation lands, and custom-verifier witnesses stay in the tx. also doubt aggregation makes Hegota one small point: when the proof is the signature, the claims depend on the sighash, so they can't be inside it. So let's not lock in \"only the witness is outside the sighash\", we also need room for claims that are outside it and readable only in VERIFY here are PRs to leanPCS and 8141 to make it work by letting only VERIFY frames read bytes that are outside the sighash: https://github.com/leanEthereum/leanPCS/pull/14 , https://github.com/ethereum/EIPs/pull/12708 Makes sense, yeah. We can put that reasoning in 8141 without naming leanPCS, something like \"any bytes outside the sighash, whether a witness or claims that depend on it, are only readable in VERIFY.\" about the PROOF frame vs sig list conversation: - to me the PROOF frame is a bit of an overkill, it runs no code and will need some special rules to \"behave like a frame\" while the sig list already has them: it's verified before anything runs and the txn in invalid if one fails - leanPCS needs its claims to be outside the signed hash (the sig list already works there) vs frame data that is inside the hash yeah this was my argument too: it's more like a sig than a frame. One argument was that it's easier to add a precompile with than a scheme, and with a proof frame, the scheme is basically decided by which precompile address it targets. If this makes sense to have is one of the remaining open questions I think not sure it's that much easier just because the frame has a scheme byte today too, and even with the address as the verifiier the protocol still has to know which addresses get aggregated? so it feels like the same list just with addresses instead of ids you could drop the scheme id in the frame but yeah, protocol decides what aggregates (I guess?). If we're right, I'm also for the sig list. Sig list with addresses is possible too but looses this argument that for L2s etc it's easier to get a new precompile than a new scheme - I'm not sure this argument even holds. So yeah, feels like we should discuss if we can settle on sig list and update 8288 accordingly. yeah for L2s we could just reserve a range of scheme ids, that does the same job as precompile addresses",
+  "excerpts": [
+    {
+      "author": "derekchiang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "as i understand it (<@543900561460822016> can correct me if im wrong), without a PROOF frame or equivalent, wallets would have to validate leanSPHINCS signatures through VERIFY frames, but VERIFY frames are stateful (STATICCALL) so they cannot be aggregated, whereas PROOF frames execute in a pure context (which is why they are a different frame type) so they can be aggregated.  so if we ship H* without PROOF frame (or equivalent), wallets would need to use leanSPHINCS through VERIFY frames, so when aggregation is shipped they will have to update their code (including the smart account code) to leverage aggregation.  so the value of shipping PROOF frames in H* is to be forward-compatible with aggregation so that wallets can transparently take advantage of the cost savings from aggregation once it ships, as opposed to having to update their wallet/account code again",
+      "createdAt": "2026-11-24T00:23:53.948000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "derekchiang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "what's less clear to me is whether it's feasible to ship aggregation itself in H*.  my understanding is that:\n\n- to support aggregation at the builder level, the primary blocker is the readiness of leanVM itself.  if we are 100% sure that leanVM is production-ready, the remaining questions would be things like figuring out where to put the recursive proof (https://github.com/ethereum/EIPs/pull/12549).  so it might be doable to resolve these questions in time for H*?\n\n- to support aggregation at the mempool level, besides the readiness of leanVM and other questions we have to resolve for builder aggregation, we also have a lot of networking/mempool questions to answer, such as the exact aggregation strategy that each mempool node is supposed to take (i've done some sims that showed that the strategy currently in the 8288 spec is far from optimal).  not so sure whether it's feasible to resolve these questions by H*, by like <@427491045308235776> said above, we don't actually have to -- as long as the protocol itself can deal with aggregated proofs, we can ship mempool aggregation outside of fork schedule\n\nso my first question (and i guess that's for <@1481393192950567003> <@427491045308235776> <@750602516613431366>) is -- just how production-ready is leanVM for the purpose of aggregating leanSPHINCS signatures as of today?",
+      "createdAt": "2026-11-24T00:39:18.583000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "The current earmark for leanVM readiness including formally verifying the verifiers is July. This should give us enough buffer to account for unknowns, but also not be too late such that it becomes a blocker for shipping H*.\n\n\nI'd say the indication of production-readiness will be once we've completed the external audits. Given we plan to FV the code to the assembly level, it will be interesting to see if external audits do find anything",
+      "createdAt": "2026-11-24T00:51:15.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think right now one of the main blockers for reducing uncertainty with leanVM, is knowing what is adequate performance, which in some sense is a bit dependent on the networking stack and the aggregation topology we potentially go with. It's possible to make leanVM faster at the expense of making it a lot more complicated",
+      "createdAt": "2026-11-24T00:53:49.924000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i don’t think it is very likely we ship aggregation in H*",
+      "createdAt": "2026-11-24T00:59:52.771000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "the goal we should be trying to achieve is making it so people who start using PQ crypto in H* will get to take advantage of the aggregation in the future without any additional changes to their account",
+      "createdAt": "2026-11-24T01:00:32.727000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "so doing the PROOF frame allows us to turn that on later even if people use it without aggregation initially",
+      "createdAt": "2026-11-24T01:00:59.091000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "derekchiang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "do you mean elaborating on why you think it's unlikely we ship aggregation in H*?  i'm not very caught up with the progress myself but it sounds like others have been testing aggregation on the Dalsugi testnet so just wondering what you think the main blockers are (not saying i think there are no major blockers; just trying to understand)\n\nagain the goal would not be to ship mempool aggregation, but rather just to support aggregation at the block level so that mempool aggregation can be implemented later out of fork schedule",
+      "createdAt": "2026-11-24T01:46:57.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "t.wambsgans",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "C# should be done (hope it works, will test more carefully tomorrow)",
+      "createdAt": "2026-11-24T03:41:18.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we would need 100% confidence in putting leanVM into the protocol in the next ~3 months if we want to deliver H* roughly on time. that just doesn’t seem likely to me. leanVM is a big project and it will just take time for people to really understand it, the implications, test it, formally verify it, etc. I don’t expect that to happen in 3 months. It also is really not necessary upon the launch of H*, the number of PQ signatures will not immediately account for all signatures on the chain. Even if it did, we can support 4kb sigs for every tc without aggregation with fairly well understood improvements to our p2p. So I don’t see a reason to rush aggregation at all",
+      "createdAt": "2026-11-24T03:49:28.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "derekchiang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "that's reasonable -- thanks",
+      "createdAt": "2026-11-24T05:08:16.350000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I doubt aggregation makes hegota, but we _could_ already do segregation: pq sigs travel next to the tx (sidecar in the mempool, separate field in the block), and nodes still verify each. Later we swap that field for one aggregated proof. Since this only slows down frames and can be done with 8288, it's probably fine to ship segregation+aggregation at once.\nWhat we need to lock in now is:\n- where accounts look: the proof frame (or the signature-list entry), the same that 8288 will use\n- the signature hash commits only to (pk, msg) and the witness length, not the witness bytes.\n\n\nWith a proof frame, we can have the frame.target be the verifier (instead of specifying a scheme). \n(pk, msg) is covered by the sighash, the sig (witness) isn't, and, having segregation/aggregation, it goes in the sidecar. Schemes are precompiles, and anyone can deploy their own verifier, but precompile witnesses get replaced by the proof once aggregation lands, and custom-verifier witnesses stay in the tx.",
+      "createdAt": "2026-11-24T06:05:30.219000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "also doubt aggregation makes Hegota\n\none small point: when the proof is the signature, the claims depend on the sighash, so they can't be inside it. So let's not lock in \"only the witness is outside the sighash\", we also need room for claims that are outside it and readable only in VERIFY\n\nhere are PRs to leanPCS and 8141 to make it work by letting only VERIFY frames read bytes that are outside the sighash:\nhttps://github.com/leanEthereum/leanPCS/pull/14 , https://github.com/ethereum/EIPs/pull/12708",
+      "createdAt": "2026-11-24T08:04:42.951000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Makes sense, yeah. We can put that reasoning in 8141 without naming leanPCS, something like \"any bytes outside the sighash, whether a witness or claims that depend on it, are only readable in VERIFY.\"",
+      "createdAt": "2026-11-24T08:14:53.970000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "about the PROOF frame vs sig list conversation:\n- to me the PROOF frame is a bit of an overkill, it runs no code and will need some special rules to \"behave like a frame\" while the sig list already has them: it's verified before anything runs and the txn in invalid if one fails\n- leanPCS needs its claims to be outside the signed hash (the sig list already works there) vs frame data that is inside the hash",
+      "createdAt": "2026-11-24T08:15:54.797000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah this was my argument too: it's more like a sig than a frame. One argument was that it's easier to add a precompile with than a scheme, and with a proof frame, the scheme is basically decided by which precompile address it targets.\nIf this makes sense to have is one of the remaining open questions I think",
+      "createdAt": "2026-11-24T08:21:32.889000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "not sure it's that much easier just because the frame has a scheme byte today too, and even with the address as the verifiier the protocol still has to know which addresses get aggregated? so it feels like the same list just with addresses instead of ids",
+      "createdAt": "2026-11-24T09:24:47.367000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "you could drop the scheme id in the frame but yeah, protocol decides what aggregates (I guess?).\nIf we're right, I'm also for the sig list.",
+      "createdAt": "2026-11-24T09:37:08.554000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "nero_eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Sig list with addresses is possible too but looses this argument that for L2s etc it's easier to get a new precompile than a new scheme - I'm not sure this argument even holds.\nSo yeah, feels like we should discuss if we can settle on sig list and update 8288 accordingly.",
+      "createdAt": "2026-11-24T09:38:24.504000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah for L2s we could just reserve a range of scheme ids, that does the same job as precompile addresses",
+      "createdAt": "2026-11-24T09:50:24.278000+00:00",
+      "attachments": []
+    }
+  ]
+}
