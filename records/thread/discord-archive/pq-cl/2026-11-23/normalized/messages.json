@@ -1,0 +1,907 @@
+{
+  "schemaVersion": 1,
+  "channel": "pq-cl",
+  "date": "2026-11-23",
+  "messageCount": 110,
+  "sourceHash": "0eb2cdae67080cc2205a700fa8a53709de19f54228838046a922e6906e11c09f",
+  "searchText": "this is why i tried to make it explicit.. <@498331483732312075> yeah, can someone pin the chat? so we don’t have to go through to find the teku branch is happy enough interoping with lighthouse, did some tweaks today to reduce the number of missed aggregations. Was running with 2 nodes, 512 keys each - still quite a small local devnet, but it was happy enough big shout out for the 10k generated keys saving tons of time - appreciate that <@412614104222531604> Is leanVM changing the format of the Stark to get better performance at a memory/compute trade-off? could we have a pq test vector released ? <@845691100072509460> maybe as justin is OOO I think we should be using `2f43bc0f` but not 100% at this point either there are a bunch of open drafts that are changing the proof format, but they aren't merged in yet I think its a moving target at this point and thats why I would prefer to use the sidecar approach for now otherwise everyone has to be on all the time to keep up with the moving target I would recommend that we use v0.16 of leanVM, see here for releases: https://github.com/leanEthereum/leanVM/releases (Linking to commits is a bit confusing) It's easy to make releases in leanVM, so we can always make changes and quickly release a new version vs linking to commits Right, so with a sidecar approach, I should be able to just swap the sidecar, without any (?) clients needing to mess around on their branches right now everyone points to v0.15 so every client team would need to independently bump their clients Yeah, the interface should be the same whats the diff between v15 and 16? 0.16 adds the vrf tree that you started: https://github.com/leanEthereum/leanVM/pull/805 plus some go related bindings fix ok indeed lets use the 16 then in terms of spec, are we still looking at 4c296784bb? some commits after that are things like the aggregate due tweaking etc just that it kind of looks like we'd want to be a couple further at least - `b5d422b255` mentions 805 leanvm... is this going to be an ongoing thing, where the exact leanvm version will be a required consensus-critical dependency? probably during research phase its not unrealistic sure, during research phase why not. but as a general thing it's worth being aware of the transitive scope of this depenency yep fair point Isn’t this the same with any dependency introducing a breaking change or am I misunderstanding? its a fairly nasty dependency to have because it is consensus breaking so we have less control over offering a stable set of rules Yeah I agree, though how does it differ from bls libraries for example? I believe you should be targeting the commit mentioned here: https://discord.com/channels/595666850260713488/1569690373633216644/1573000657785458698 because currently we package things Unless y’all agreed to something else. I’ve made some breaking changes since then which you all should not yet implement. We can pin to another version of the spec for pq-devnet-1. sorry yes thats what im on but newer commits are the ones that would pull in the stuff for 0.16.0 management of spec v. software v. leanvm we can discuss later, but its going to be complicated i think and when i say 'we' i mean all of you, because its not friendly to my timezone so i'll have to just see what you decide BLS is a long-since specified upstream standard (though even there it has proven problematic yeah, we ended up on some random draft) hopefully leanvm can become stable exactly this though yeah it's incorporating a 3rd party's implementation details into a consensus specification in an ad hoc way eventually that won't suffice Yeah we can provide tests, but not today. There were some failing mainnet tests (just not disabled yet) and testing with xmss instead of bls needed some tweaks like config things like “bls_setting” in the vectors. Also they were very slow to generate. We can have these for devnet-1 maybe. it will also near-guarantee a single-source upstream with the associated supply-chain risk (which we've seen with both BLS and KZG) it *Should* also basically break any proof because you cant prove whats coming in is a stable set this is the wei, instead of pinning commits we should pin releases of leanVM and quickly coordinate if we need a new release for a feature. 0.16 lean vm version consensus spec should also refer to specific lean vm version imo btw according to my claude, 0.15 vs 0.16 both ok, no consensus breaking change https://dora.pq-devnet-0.ethpandaops.io looks like lots of key loading issues :/ like I expected some clients take up to 45 mins to load in the keys, if you don't have the cache implemented and thus they missed the genesis LH did something dirty, and hardcoded some mnemonic for kurtosis ? and if the cache uses a diff mnemonic, then it won't work 😂 teku and lodestar also doesn't seem to have a working cache system did you launch a monitor node on the devnet <@412614104222531604> this thing yeah but your other validating nodes are still loading validator keys 😂 i'll fix this.. blame claude not me lol sorry man, its all on you when everything right - congrats claude when a single thing is fucked up - its all on you m8 <@412614104222531604> new lighthouse build is underway with fix for key loading and bump to v0.16 https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/45207467562 do you guys wanna have watchtower on this network ? i know terence said they have no sync implemented `Attestations themselves are fine; it's aggregation and block inclusion that's broken. Validators sign and gossip (76% seen in epoch 9), but only a fraction of those votes end up in blocks in time.` oh shoot.. i didn't look at sync let me look into it btw <@412614104222531604> what node did you have lighthouse monitoring on? your claude didn't find the inventory file? https://github.com/ethpandaops/pq-devnets/blob/master/ansible/inventories/devnet-0/inventory.ini#L22 also just use panda ? for the logs we have just finalized some validators are still loading keys 💀 cc <@680234424037670912> 😂 summary of pq-devnet-0: **pq-devnet-0 status, ~1h25m after genesis (slot 427, epoch 13)** Good news first: all 8 CLs are on one head, no forks, and we are finalizing (justified 12, finalized 10). Epoch 12: 86% attesting on gossip, 77% included on chain. It took 10 epochs to get the first justification, mostly because validators were slow to come online and blocks carry too few attestations. **Open issues per client** **Lighthouse** - Range sync does not work on PQ: `execution_payload_envelopes_by_range` fails with \"Pq payload envelope RPC decoding is not implemented\". A node that falls behind never catches up, penalises every peer for the RPC error and ends up with 0 peers (our observer node is stuck at slot 3). - VC ignores `--xmss-cache-url` for anything but the default mnemonic (the cache lookup uses an embedded pubkey table), so it derives every key: ~35-50 min for 625 keys on 8 cores. **Nimbus** - Both nodes sit at 0-2 peers. Slot starts are up to 28s late (\"Missed multiple heartbeats\", delay up to 28s), peers time out on status/goodbye and score us down; Lighthouse has both banned, Prysm disconnects them for \"bad responses\". One core is pinned at 100%, and the stalls follow bursts of \"Attestation sent\", so it looks like signing on the main loop. - Result: ~135-335 of 625 validators per node attesting, 1 block in the last 170 slots, REST API times out. - Prysm also ignores some Nimbus payload attestations: \"payload att slot does not match\". **Prysm** - Block packing: 17 of its last 20 blocks added no new attestations; 79% of what it does include is more than an epoch old (e.g. block 349 carried attestations for slots 307-309). - VC took ~8 min after genesis to start duties (\"Beacon chain started\" at 14:37:40), with \"did not receive expected response from API\" on the BN meanwhile. - No XMSS cache flag upstream, so ~16 min key derivation for 625 keys. **ethlambda** - 5 of its last 15 blocks carried no attestations; average block brings ~33% of one slot's votes. - Against a Silver BN its VC fails to publish the payload envelope: Silver answers 400 \"Eth-Blob-Data-Included must be true or false\". **Silver** - 9 of its last 16 blocks carried no attestations (13% of a slot's votes per block on average). - Refuses to start with a builder configured on PQ (\"PQ has no PBS\"), fine but worth knowing. - Fixed today: `GET /eth/v1/beacon/states/{id}/validators` without ids returned 400 (pq-silver#28, merged, image rebuilt). **Lodestar** - VC takes ~40 min to derive 625 keys even with `--xmssCacheUrl` set, and logs nothing in between. **Teku** - Best at packing attestations (about 2 slots' worth per block), but the BN is CPU-saturated on 8 cores with 625 validators and at times skipped duties: \"Skipping attestation ... due to unexpected delay in slot processing\". - Loading 625 keys took ~30 min. **Grandine** - Proposes reliably and packs ~79% of a slot's votes per block, but both nodes hold only 4-5 peers and send \"Bad Score\" goodbyes to Lighthouse. Cause not found yet. **Attestations per block (new votes vs one slot's worth, slots 256-427)** Teku 230% · Lodestar 157% · Grandine 79% · Lighthouse 74% · ethlambda 33% · Prysm 19% · Silver 13% · Nimbus 0% (1 block) 28% of slots in that window had no block. **Validator start-up with the precomputed cache (625 keys)** ethlambda 0.2-0.5s · Grandine and Nimbus ready before genesis · Prysm 16 min · Teku ~30 min · Lighthouse 35-50 min · Lodestar 40 min <@412614104222531604> lodestar should have a new image available now which fixes the cache (and your reported issue) regarding peering issue, I faced it too in testing interop, but my claude said Lighthouse was sending gloas payload envelope with pq phase, maybe the issue is on grandine decoding message, checking it now **Prysm** Something similar yes Nimbus asked Lighthouse for an execution payload envelope by root, and Lighthouse's pq-devnet-0 answers with a Gloas-shaped envelope carrying an empty BLS signature. Nimbus couldn't decode that as a PQ envelope, scored it as a protocol violation (-500) and kicked the peer at slot 2. this was a summary from a local devnet run <@412614104222531604>, the new **`ethpandaops/lighthouse:pq-devnet-0`** image is published for amd64 and arm64, commit `e256896e4d`. It fixes PQ sync, the wrong envelope format/peer penalties, and cache loading with your keys. You can now pull it and bounce Lighthouse nodes while keeping their existing data. Local restart and genesis catch-up tests pass; live cross-client recovery is the remaining check. Build: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/45231618304 <@412614104222531604>, could you also fix the **observer config**? The timing settings are in `ansible/inventories/devnet-0/host_vars/lighthouse-geth-3.yaml`, but the actual host is `lighthouse-geth-observe-1`. Rename that file to `lighthouse-geth-observe-1.yaml` and redeploy the observer with the new image. It already contains: ```text --pq-measurement --pq-timing-output=/pq-timing ``` and the persistent mount: ```text {{ lighthouse_datadir }}/pq-timing:/pq-timing ``` Please ensure that host directory is writable by the container user. The running observer currently has neither the flags nor the mount, so it isn't recording the timing data. I’m enabling watchtower i'm running the prover benchmark on the observer node now, but we need the pandaops infra fixed to get the measurements Observer is fixed: host_vars renamed to lighthouse-geth-observe-1.yaml, redeployed on e256896 with --pq-measurement --pq-timing-output=/pq-timing and /data/lighthouse/pq-timing mounted (owned by the container user, run.json + events file are being written). It synced from slot 286 to head in ~3 min with 15 peers, so live cross-client recovery works. lighthouse-geth-1/2 are on e256896 too; geth-2's stuck beacon recovered from slot 480 in ~2 min. One thing left: the new VC can't talk to Silver's BN, \"invalid by",
+  "excerpts": [
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "this is why i tried to make it explicit..",
+      "createdAt": "2026-11-23T03:33:30.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@498331483732312075>",
+      "createdAt": "2026-11-23T03:33:56.651000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah, can someone pin the chat? so we don’t have to go through to find",
+      "createdAt": "2026-11-23T03:36:02.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "the teku branch is happy enough interoping with lighthouse, did some tweaks today to reduce the number of missed aggregations.\nWas running with 2 nodes, 512 keys each - still quite a small local devnet, but it was happy enough\nbig shout out for the 10k generated keys saving tons of time - appreciate that <@412614104222531604>",
+      "createdAt": "2026-11-23T08:11:41.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Is leanVM changing the format of the Stark to get better performance at a memory/compute trade-off?",
+      "createdAt": "2026-11-23T10:50:01.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "could we have a pq test vector released ?",
+      "createdAt": "2026-11-23T10:50:16.457000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@845691100072509460> maybe as justin is OOO",
+      "createdAt": "2026-11-23T10:50:45.104000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think we should be using `2f43bc0f` but not 100% at this point either",
+      "createdAt": "2026-11-23T10:51:12.001000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "there are a bunch of open drafts that are changing the proof format, but they aren't merged in yet",
+      "createdAt": "2026-11-23T10:53:30.654000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think its a moving target at this point and thats why I would prefer to use the sidecar approach for now",
+      "createdAt": "2026-11-23T10:53:48.092000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "otherwise everyone has to be on all the time to keep up with the moving target",
+      "createdAt": "2026-11-23T10:54:02.557000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I would recommend that we use v0.16 of leanVM, see here for releases: https://github.com/leanEthereum/leanVM/releases\n\n(Linking to commits is a bit confusing)\n\nIt's easy to make releases in leanVM, so we can always make changes and quickly release a new version vs linking to commits",
+      "createdAt": "2026-11-23T10:56:49.067000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Right, so with a sidecar approach, I should be able to just swap the sidecar, without any (?) clients needing to mess around on their branches",
+      "createdAt": "2026-11-23T11:01:42.837000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "right now everyone points to v0.15",
+      "createdAt": "2026-11-23T11:01:52.260000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "so every client team would need to independently bump their clients",
+      "createdAt": "2026-11-23T11:02:04.770000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah, the interface should be the same",
+      "createdAt": "2026-11-23T11:03:55.875000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "whats the diff between v15 and 16?",
+      "createdAt": "2026-11-23T11:04:12.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "0.16 adds the vrf tree that you started: https://github.com/leanEthereum/leanVM/pull/805\n\nplus some go related bindings fix",
+      "createdAt": "2026-11-23T11:07:24.599000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "ok",
+      "createdAt": "2026-11-23T11:07:42.992000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "indeed lets use the 16 then",
+      "createdAt": "2026-11-23T11:07:53.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "in terms of spec, are we still looking at 4c296784bb? some commits after that are things like the aggregate due tweaking etc",
+      "createdAt": "2026-11-23T11:23:47.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "just that it kind of looks like we'd want to be a couple further at least - `b5d422b255` mentions 805 leanvm...",
+      "createdAt": "2026-11-23T11:28:23.086000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "is this going to be an ongoing thing, where the exact leanvm version will be a required consensus-critical dependency?",
+      "createdAt": "2026-11-23T11:28:42.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "probably during research phase its not unrealistic",
+      "createdAt": "2026-11-23T11:29:16.404000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "sure, during research phase why not. but as a general thing it's worth being aware of the transitive scope of this depenency",
+      "createdAt": "2026-11-23T11:29:48.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yep fair point",
+      "createdAt": "2026-11-23T11:30:25.660000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Isn’t this the same with any dependency introducing a breaking change or am I misunderstanding?",
+      "createdAt": "2026-11-23T11:34:13.942000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "its a fairly nasty dependency to have because it is consensus breaking",
+      "createdAt": "2026-11-23T11:34:52.469000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "so we have less control over offering a stable set of rules",
+      "createdAt": "2026-11-23T11:35:21.589000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah I agree, though how does it differ from bls libraries for example?",
+      "createdAt": "2026-11-23T11:35:56.609000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I believe you should be targeting the commit mentioned here: https://discord.com/channels/595666850260713488/1569690373633216644/1573000657785458698",
+      "createdAt": "2026-11-23T11:36:02.698000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "because currently we package things",
+      "createdAt": "2026-11-23T11:36:11.116000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Unless y’all agreed to something else.",
+      "createdAt": "2026-11-23T11:36:30.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I’ve made some breaking changes since then which you all should not yet implement. We can pin to another version of the spec for pq-devnet-1.",
+      "createdAt": "2026-11-23T11:37:22.229000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "sorry yes thats what im on but newer commits are the ones that would pull in the stuff for 0.16.0",
+      "createdAt": "2026-11-23T11:37:27.541000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "management of spec v. software v. leanvm we can discuss later, but its going to be complicated i think",
+      "createdAt": "2026-11-23T11:38:06.756000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "and when i say 'we' i mean all of you, because its not friendly to my timezone so i'll have to just see what you decide",
+      "createdAt": "2026-11-23T11:38:26.539000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "BLS is a long-since specified upstream standard (though even there it has proven problematic yeah, we ended up on some random draft)",
+      "createdAt": "2026-11-23T11:38:44.026000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "hopefully leanvm can become stable",
+      "createdAt": "2026-11-23T11:40:13.046000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "exactly this though yeah",
+      "createdAt": "2026-11-23T11:40:16.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it's incorporating a 3rd party's implementation details into a consensus specification in an ad hoc way",
+      "createdAt": "2026-11-23T11:40:41.354000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "eventually that won't suffice",
+      "createdAt": "2026-11-23T11:40:46.135000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah we can provide tests, but not today. There were some failing mainnet tests (just not disabled yet) and testing with xmss instead of bls needed some tweaks like config things like “bls_setting” in the vectors. Also they were very slow to generate. We can have these for devnet-1 maybe.",
+      "createdAt": "2026-11-23T11:41:17.230000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "tersec",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it will also near-guarantee a single-source upstream with the associated supply-chain risk (which we've seen with both BLS and KZG)",
+      "createdAt": "2026-11-23T11:41:45.601000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it *Should* also basically break any proof because you cant prove whats coming in is  a stable set",
+      "createdAt": "2026-11-23T11:42:20.314000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "this is the wei, instead of pinning commits we should pin releases of leanVM and quickly coordinate if we need a new release for a feature.",
+      "createdAt": "2026-11-23T12:01:53.395000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "0.16 lean vm version",
+      "createdAt": "2026-11-23T12:06:11.017000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "consensus spec should also refer to specific lean vm version imo",
+      "createdAt": "2026-11-23T12:06:18.037000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "btw according to my claude, 0.15 vs 0.16 both ok, no consensus breaking change",
+      "createdAt": "2026-11-23T13:30:22.730000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://dora.pq-devnet-0.ethpandaops.io",
+      "createdAt": "2026-11-23T14:29:58.036000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "looks like lots of key loading issues :/",
+      "createdAt": "2026-11-23T14:32:43.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "like I expected",
+      "createdAt": "2026-11-23T14:32:45.834000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "some clients take up to 45 mins to load in the keys, if you don't have the cache implemented",
+      "createdAt": "2026-11-23T14:33:05.321000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "and thus they missed the genesis",
+      "createdAt": "2026-11-23T14:33:10.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "LH did something dirty, and hardcoded some mnemonic for kurtosis ?",
+      "createdAt": "2026-11-23T14:40:35.991000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "and if the cache uses a diff mnemonic, then it won't work 😂",
+      "createdAt": "2026-11-23T14:40:47.250000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "teku and lodestar also doesn't seem to have a working cache system",
+      "createdAt": "2026-11-23T14:41:00.274000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "did you launch a monitor node on the devnet <@412614104222531604>",
+      "createdAt": "2026-11-23T14:53:00.073000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "this thing",
+      "createdAt": "2026-11-23T14:53:08.995000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah",
+      "createdAt": "2026-11-23T14:53:12.422000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "but your other validating nodes are still loading validator keys 😂",
+      "createdAt": "2026-11-23T14:53:43.703000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i'll fix this.. blame claude not me lol",
+      "createdAt": "2026-11-23T14:53:45.784000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "sorry man, its all on you",
+      "createdAt": "2026-11-23T14:53:54.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "when everything right - congrats claude\nwhen a single thing is fucked up - its all on you m8",
+      "createdAt": "2026-11-23T14:54:14.962000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@412614104222531604> new lighthouse build is underway with fix for key loading and bump to v0.16\nhttps://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/45207467562",
+      "createdAt": "2026-11-23T15:39:45.434000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "do you guys wanna have watchtower on this network ?",
+      "createdAt": "2026-11-23T15:42:17.607000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i know terence said they have no sync implemented",
+      "createdAt": "2026-11-23T15:42:28.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "`Attestations themselves are fine; it's aggregation and block inclusion that's broken. Validators sign and gossip (76% seen in epoch 9), but only a fraction of those votes end up in blocks in time.`",
+      "createdAt": "2026-11-23T15:44:20.555000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "oh shoot.. i didn't look at sync",
+      "createdAt": "2026-11-23T15:49:15.527000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "let me look into it",
+      "createdAt": "2026-11-23T15:49:34.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "btw <@412614104222531604> what node did you have lighthouse monitoring on?",
+      "createdAt": "2026-11-23T15:49:51.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "your claude didn't find the inventory file?",
+      "createdAt": "2026-11-23T15:50:04.424000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://github.com/ethpandaops/pq-devnets/blob/master/ansible/inventories/devnet-0/inventory.ini#L22",
+      "createdAt": "2026-11-23T15:50:36.106000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "also just use panda ?",
+      "createdAt": "2026-11-23T15:50:43.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "for the logs",
+      "createdAt": "2026-11-23T15:50:45.075000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we have just finalized",
+      "createdAt": "2026-11-23T15:56:15.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "some validators are still loading keys 💀 cc <@680234424037670912> 😂",
+      "createdAt": "2026-11-23T15:56:34+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "summary of pq-devnet-0:",
+      "createdAt": "2026-11-23T15:57:44.580000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "**pq-devnet-0 status, ~1h25m after genesis (slot 427, epoch 13)**\n\nGood news first: all 8 CLs are on one head, no forks, and we are finalizing (justified 12, finalized 10). Epoch 12: 86% attesting on gossip, 77% included on chain. It took 10 epochs to get the first justification, mostly because validators were slow to come online and blocks carry too few attestations.\n\n**Open issues per client**\n\n**Lighthouse**\n- Range sync does not work on PQ: `execution_payload_envelopes_by_range` fails with \"Pq payload envelope RPC decoding is not implemented\". A node that falls behind never catches up, penalises every peer for the RPC error and ends up with 0 peers (our observer node is stuck at slot 3).\n- VC ignores `--xmss-cache-url` for anything but the default mnemonic (the cache lookup uses an embedded pubkey table), so it derives every key: ~35-50 min for 625 keys on 8 cores.\n\n**Nimbus**\n- Both nodes sit at 0-2 peers. Slot starts are up to 28s late (\"Missed multiple heartbeats\", delay up to 28s), peers time out on status/goodbye and score us down; Lighthouse has both banned, Prysm disconnects them for \"bad responses\". One core is pinned at 100%, and the stalls follow bursts of \"Attestation sent\", so it looks like signing on the main loop.\n- Result: ~135-335 of 625 validators per node attesting, 1 block in the last 170 slots, REST API times out.\n- Prysm also ignores some Nimbus payload attestations: \"payload att slot does not match\".",
+      "createdAt": "2026-11-23T15:57:45.870000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "**Prysm**\n- Block packing: 17 of its last 20 blocks added no new attestations; 79% of what it does include is more than an epoch old (e.g. block 349 carried attestations for slots 307-309).\n- VC took ~8 min after genesis to start duties (\"Beacon chain started\" at 14:37:40), with \"did not receive expected response from API\" on the BN meanwhile.\n- No XMSS cache flag upstream, so ~16 min key derivation for 625 keys.\n\n**ethlambda**\n- 5 of its last 15 blocks carried no attestations; average block brings ~33% of one slot's votes.\n- Against a Silver BN its VC fails to publish the payload envelope: Silver answers 400 \"Eth-Blob-Data-Included must be true or false\".\n\n**Silver**\n- 9 of its last 16 blocks carried no attestations (13% of a slot's votes per block on average).\n- Refuses to start with a builder configured on PQ (\"PQ has no PBS\"), fine but worth knowing.\n- Fixed today: `GET /eth/v1/beacon/states/{id}/validators` without ids returned 400 (pq-silver#28, merged, image rebuilt).\n\n**Lodestar**\n- VC takes ~40 min to derive 625 keys even with `--xmssCacheUrl` set, and logs nothing in between.\n\n**Teku**\n- Best at packing attestations (about 2 slots' worth per block), but the BN is CPU-saturated on 8 cores with 625 validators and at times skipped duties: \"Skipping attestation ... due to unexpected delay in slot processing\".\n- Loading 625 keys took ~30 min.\n\n**Grandine**\n- Proposes reliably and packs ~79% of a slot's votes per block, but both nodes hold only 4-5 peers and send \"Bad Score\" goodbyes to Lighthouse. Cause not found yet.\n\n**Attestations per block (new votes vs one slot's worth, slots 256-427)**\nTeku 230% · Lodestar 157% · Grandine 79% · Lighthouse 74% · ethlambda 33% · Prysm 19% · Silver 13% · Nimbus 0% (1 block)\n28% of slots in that window had no block.",
+      "createdAt": "2026-11-23T15:57:56.326000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "**Validator start-up with the precomputed cache (625 keys)**\nethlambda 0.2-0.5s · Grandine and Nimbus ready before genesis · Prysm 16 min · Teku ~30 min · Lighthouse 35-50 min · Lodestar 40 min",
+      "createdAt": "2026-11-23T15:58:03.111000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wemeetagain",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@412614104222531604> lodestar should have a new image available now which fixes the cache (and your reported issue)",
+      "createdAt": "2026-11-23T16:00:20.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "hangleang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "regarding peering issue, I faced it too in testing interop, but my claude said Lighthouse was sending gloas payload envelope with pq phase, maybe the issue is on grandine decoding message, checking it now",
+      "createdAt": "2026-11-23T16:28:17.782000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "manunlp",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "**Prysm**",
+      "createdAt": "2026-11-23T16:48:43.068000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Something similar yes",
+      "createdAt": "2026-11-23T17:04:35.619000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Nimbus asked Lighthouse for an execution payload envelope by root, and Lighthouse's pq-devnet-0 answers with a Gloas-shaped envelope carrying an empty BLS signature. Nimbus couldn't decode that as a PQ envelope, scored it as a protocol violation (-500) and kicked the peer at slot 2.",
+      "createdAt": "2026-11-23T17:06:17.714000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "agnxsh",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "this was a summary from a local devnet run",
+      "createdAt": "2026-11-23T17:06:40.741000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@412614104222531604>, the new **`ethpandaops/lighthouse:pq-devnet-0`** image is published for amd64 and arm64, commit `e256896e4d`.\n\nIt fixes PQ sync, the wrong envelope format/peer penalties, and cache loading with your keys. You can now pull it and bounce Lighthouse nodes while keeping their existing data. Local restart and genesis catch-up tests pass; live cross-client recovery is the remaining check.\n\nBuild: https://github.com/ethpandaops/eth-client-docker-image-builder/actions/runs/45231618304",
+      "createdAt": "2026-11-23T18:04:12.275000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@412614104222531604>, could you also fix the **observer config**? The timing settings are in `ansible/inventories/devnet-0/host_vars/lighthouse-geth-3.yaml`, but the actual host is `lighthouse-geth-observe-1`.\n\nRename that file to `lighthouse-geth-observe-1.yaml` and redeploy the observer with the new image. It already contains:\n```text\n--pq-measurement --pq-timing-output=/pq-timing\n```\nand the persistent mount:\n```text\n{{ lighthouse_datadir }}/pq-timing:/pq-timing\n```\nPlease ensure that host directory is writable by the container user. The running observer currently has neither the flags nor the mount, so it isn't recording the timing data.",
+      "createdAt": "2026-11-23T18:04:23.724000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I’m enabling watchtower",
+      "createdAt": "2026-11-23T18:13:51.806000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i'm running the prover benchmark on the observer node now, but we need the pandaops infra fixed to get the measurements",
+      "createdAt": "2026-11-23T18:16:43.410000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Observer is fixed: host_vars renamed to lighthouse-geth-observe-1.yaml, redeployed on e256896 with --pq-measurement --pq-timing-output=/pq-timing and /data/lighthouse/pq-timing mounted (owned by the container user, run.json + events file are being written). It synced from slot 286 to head in ~3 min with 15 peers, so live cross-client recovery works. lighthouse-geth-1/2 are on e256896 too; geth-2's stuck beacon recovered from slot 480 in ~2 min. One thing left: the new VC can't talk to Silver's BN, \"invalid byte length: got 48, expected 32\" on the validators endpoint (Silver zero-pads pubkeys to 48 bytes).",
+      "createdAt": "2026-11-23T19:08:33.787000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "**Silver + ethlambda: PQ validator pubkeys in the beacon API should be 32 bytes, not 48**\n\nSpec (consensus-specs `pq` @ 2f43bc0f): `XMSSPubkey(Bytes32)`, `Validator.pubkey: XMSSPubkey`. The 16-zero-byte prefix is for deposits only.\n\nToday Silver's BN and ethlambda's BN/VC use the 48-byte zero-padded form in `/eth/v1/beacon/states/{id}/validators` and duties. Lighthouse and Lodestar use 32 bytes, so mixed pairs break:\n- Silver BN + Lighthouse VC (e256896): `Failed to resolve pubkey to index ... invalid byte length: got 48, expected 32`, never attests\n- ethlambda VC + a 32-byte BN: `pubkey is 32 bytes, expected 48` on every duty\n\nAsk: both return 32-byte keys in validators and duties endpoints; ethlambda's VC accepts 32 bytes (both forms during the switch would be nice).\n\nAlso Silver + ethlambda VC: envelope publish fails with `400 Eth-Blob-Data-Included must be true or false`, the VC doesn't send that header.",
+      "createdAt": "2026-11-23T19:23:30.048000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i can look at what was happening - is your run config somewhere?\n\ni still dont understand how we use 0.16 lean if the changes for that were further ahead from our pinned spec",
+      "createdAt": "2026-11-23T19:41:22.397000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "sorry about that, inadvertently regressed behaviour earlier today: pushed a fix to our `pq-devnet-0` branch",
+      "createdAt": "2026-11-23T19:49:24.742000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@412614104222531604> can we get to these boxes? i'd like to get some logs for that attestation message",
+      "createdAt": "2026-11-23T19:58:27.269000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "ok found the dora link way back.. long history today",
+      "createdAt": "2026-11-23T19:59:38.624000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yes",
+      "createdAt": "2026-11-23T20:02:45.923000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "also just use panda cli for logs ?",
+      "createdAt": "2026-11-23T20:02:58.570000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "proving benchmark results on a `devnet-0` node:",
+      "createdAt": "2026-11-23T20:08:50.700000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "ac33ac38106ee325162b31aead1cea129f4941640d180b6f2e3938e9348368c0"
+        }
+      ]
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "attestations are arriving very late on `devnet-0`",
+      "createdAt": "2026-11-23T20:55:37.193000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "average is like 5 seconds into the slot",
+      "createdAt": "2026-11-23T20:56:10.707000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "some take up to 9 seconds",
+      "createdAt": "2026-11-23T20:56:19.054000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "will see if i can find that, i never installed it",
+      "createdAt": "2026-11-23T21:35:34.181000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://klipy.com/gifs/special-ed-1",
+      "createdAt": "2026-11-23T21:46:14.935000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "turns out it was installed so i told claude to figure it out 😄",
+      "createdAt": "2026-11-23T22:09:03.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "That's the sign of being a very important person! I tried for a long time, but at some point the Panda Guys just stopped replying when I asked them for data points 🙂",
+      "createdAt": "2026-11-23T22:56:04.214000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "ok so part of the reason we probably had a ton of attestations was partially the same reason we're getting orphans... ive adjusted things and we're likely to have less attesttations, but also hopefully less orphans once my next fix goes in.",
+      "createdAt": "2026-11-23T23:01:18.954000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "watch tower builds every 15 minutes ish? i just want to make sure teku gets its latest changes  well in advance of the keys needing updating as its likely to cause issues if it runs on the older image",
+      "createdAt": "2026-11-23T23:26:50.015000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "here is a plot of attestation arrival times - histogram at the bottom is an aggregate over about 50 slots. The blocks are not arriving late though (1 late beacon block @ 2730)",
+      "createdAt": "2026-11-23T23:45:04.969000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-11-23_at_23.41.25.png",
+          "content": "ef89235b1ae362f4f91a7844397fa79de1ff84e27de7752f55bae0dfbc71a49f"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-11-23_at_23.44.27.png",
+          "content": "35d97a93ed9b3d61491f9120b49dd7450f734be3cc48b2c2730f74572bd3b2a4"
+        }
+      ]
+    }
+  ]
+}

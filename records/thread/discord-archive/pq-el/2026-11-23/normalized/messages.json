@@ -1,0 +1,610 @@
+{
+  "schemaVersion": 1,
+  "channel": "pq-el",
+  "date": "2026-11-23",
+  "messageCount": 75,
+  "sourceHash": "606965eeb39fa365155725037e853696252d64fc23b31dba4411c15869fb4a77",
+  "searchText": "<@808969530608451584> or perhaps <@&652918665943056397> where can I find the execution specs PR that everyone is basing the devnet off of? there is this doc with a summary: https://notes.ethereum.org/@pk910/daisugi-devnet-0 but I don't think there's any execution-specs PR? Ah yeah was reading that and thought I missed something. Since it states that we need to make changes on the EL, CL and engine API. I would suggest that we have branches within the execution-specs, consensus-specs and execution-apis before devnets as opposed to using a particular client as a reference. This makes it easier for newer clients to onboard/see the diff and for us to generate test vectors etc. Was there a reason not to do it this way? cc <@281967554572976128> and <@&652918665943056397> 👀 Not sure why it wasn’t done that way since the beginning (probably started like a PoC and the idea for more clients to onboard appeared later, and everything was already set up as is). It was one of the reasons it was difficult to join before that spec file was written. I totally agree that we need a common base, like e.g. bogota-devnet-2 (the latest stable EL-only Hegota devnet), to make it easier for other clients to onboard Makes sense, thanks! Is bogota-devnet-2 the frames version that you are basing the current devnet off of? Bogota Engine API has ILs in it, I think PQ devnet should rather be based on the Amsterdam. Btw, are there any Engine API changes specific to PQ? I based on that, but removed some of the features to be compliant with Daisugi’s current spec. I think the best would be to regenesis on top of a spec that contains bogota-devnet-2 features + implementing the 8288 features that are already implemented in Daisugi. Does it? I think at least bogota-devnet-2 doesn’t require ILs in it, le me check Just checked, it’s EL only and doesn’t requiere them https://notes.ethereum.org/@ethpandaops/bogota-devnet-2 <@281967554572976128> was checking `keccak256(stark_proof)` do you know what was the rationale for adding this into the EL header? > Btw, are there any Engine API changes specific to PQ? The main changes I'd say is adding the EL stark proof into the execution payload and the payload header I’m not sure about this. I missed some weeks of discussions about Daisugi What is useful to know for everyone, the Daisugi updates from \"let's have a place to test the signatures\" to \"let's have a proper devnet\" have started basically last week when PK and team rebuilt it properly. Before that we just contributed so that things could be tested. The signature and aggregation and everything else are now being updated to reflect the latest available material from official repos, but It will take a couple of days more. I think the Nethermind team is already on it Tx signature aggregate? yeah exactly on the EL side (but also leanPCS aggregate) Currently have an agent extracting the patches from lighthouse into the CL specs to see them a bit better. (It seems like we inspect frame txs on the CL to compute the hashes for the dependencies in the dependency frame, which I think CL devs would not want) I would propose the following milestones: - 1) devnets with just leanSPHINCS no aggregation and we collect metrics on what this looks like. This should mostly be an EL change. - 2) devnets with block builder aggregation. This is where starkProof in the block would be added. This would probably not help mempool issues that much only block propagation. - 3a) devnets with leanPCS added. This would further increase the mempool traffic and potentially the compute needed by the builder - 3b) devnets with mempool aggregation. 3b is massive, though I think <@857052906495017000> has been working on this for a while now? (1) is useful to get metrics on because its the bare minimum for having PQ in H* I have a few spec / api PRs open - https://github.com/ethereum/execution-specs/pull/4052 based on Spencer's work - https://github.com/ethereum/execution-apis/pull/1028 - https://github.com/ethereum/consensus-specs/pull/5858 So far we have focused on implementation as a lot of the complexity is in the mempool side of things which wouldn't be covered by these tests. Going forward with more clients though we should ofc use spec tests as the reference, not an implementation <@427491045308235776> On keccak256(stark_proof): with aggregation, individual signatures never go on chain. Each transaction only declares its claim (scheme, digest, public key) in a DEP_VERIFY frame, and the block's STARK proof is the only evidence that those signatures are valid. No other header field covers that proof, so its hash is committed in the EL header, alongside block_deps_hash (the commitment to the claims). This binds the exact proof to the block hash: a block cannot be relayed or rebuilt with a different or missing proof under the same hash. On the devnet, the CL recomputes the block hash, deriving the deps hash from the frame transactions, and rejects any mismatch regardless of the EL's verdict. Engine API: ExecutionPayload only gains starkProof. Context: https://eips.ethereum.org/EIPS/eip-8288 This is our reading of the design rationale; <@&652918665943056397> can confirm the original intent. The milestones make sense to us. Related to (1), we already run native (non-aggregated) SPHINCS frame accounts on devnet-0: the account contract verifies the signature in its VERIFY frame, with no block proof, and our wallet supports this mode alongside aggregation. This is a contract-level approach rather than EL-native verification, and it still uses the current SPHINCS profile rather than upstream leanSPHINCS, but it can provide early data on signature size and verification cost. On (2), we are waiting for <@&652918665943056397> 's latest leanVM implementation before updating our side, since it changes the aggregation key and requires a new genesis. To get meaningful metrics for (1) and (2), the network will need sustained load rather than a handful of wallet transactions. I think <@&1416139337179074590> s will cover this in the next steps with a spammer generating frame transactions with leanSPHINCS signatures, which would show how mempool traffic, block propagation and builder compute behave under realistic signature sizes. Nice! For (1) I think Kev is aiming to EL-native verification (correct me Kev if I'm wrong). A proposal for that while keeping 8288 compatibility that we are working on it https://github.com/ethereum/EIPs/pull/12672 Hey <@427491045308235776> ! Stefano from Nethermind here 🙂 The main rationale for having `hash(proof)` in the block header rather than the full proof was to avoid bloating headers with quite large objects (~300 kB). Think about light clients or nodes fetching block headers during sync: EIP-8288 would have added ~300 kB per header. The hash still commits the block to the exact proof bytes. - We started the discussion here: https://github.com/ethereum/EIPs/pull/12479, initially proposing to move the proof into the block body while keeping its hash in the header. - We then converged on the approach in https://github.com/ethereum/EIPs/pull/12549, where proofs are transmitted separately from both headers and bodies. This also allows nodes to fetch and prune proofs independently, without increasing block body sizes. <@348512261955911691> <@232483425318207488> can add more 🙂 Is there complexity in the mempool even if we start off with no aggregation? My thinking is that if the claims are seen as public inputs to the proof and the block is not valid without verifying a proof. Though its not clear to me, why this implies the proof needs to go into the header especially given that the proof is not canonical. Not saying its wrong, just that its not obvious to me 😄 The CL reading frame transaction and deriving the dep hash seems like an anti-pattern no? This means that the CL needs to know the structure of a frame transaction rather than treating it as an opaque set of bytes? yeah it seems like we all agree on verifying SPHINCS signatures using a native library and not as bytecode unless I'm missing something Trying to understand: So for a node thats syncing they would download the headers and then use the hash(proof) to request the proof? (And then I guess the same for lightclients) If so, my thinking was that we could just use the blockHash to request the proof since verifying a proof is \"cheap\" or perhaps I'm missing something? I agree with these milestones! I'd just split 3b into two steps: - 3b) Single-hop mempool aggregation, to have preliminary benchmarks on networking overhead. - 3c) Full recursive mempool aggregation with a configurable aggregation tick. More benchmarks on networking. On networking, we've also drafted an [IHAVE/IWANT-style protocol extension](https://github.com/ethereum/EIPs/pull/12423) for proof wrapper propagation. Is an aggregation tick here, how often a node will aggregate, ie every 2 seconds or every five seconds I aggregate everything in my mempool? Do you also have a feeling for how this intersects with the new networking protocol being done by <@857052906495017000> et al and or at what stage we will know whether we need to make large changes to the networking stack on the EL side? Yeah that's right. We collaborated with <@857052906495017000> on that networking EIP, and it's compatible with 8077. In terms of whether we need to make deeper changes to the stack, we still need to do benchmarking to determine that. The networking specs have been in flux but now that they are stabilising we can start working on this We would still need some changes but that would remove a lot of the complexity Makes sense, to me this seems like the most minimal thing we could do to ship PQ EL so it might make sense to know whether its even viable I think <@348512261955911691> / <@281967554572976128> for the cryptography, do you depend on leanVM? <@1481393192950567003> I think we forgot to add bindings for C# 😄 Maybe <@348512261955911691> you could link to how you are relying on it, so we can add it into leanVM and publish on nuget? (We are switching leanVM from the sidecar to FFI, so it may need to wait until tomorrow) Just for leanSPHINCS we'd depend on https://github.com/leanEthereum/leanVM/tree/main/crates/lean_sphincs. Not sure if you are referring to Daisugi specifically or to the general solution My agent has finished extracting the CL changes currently on daisugi to here btw: https://github.com/ethereum/consensus-specs/pull/5859 Ah I meant for leanSPHINCs and also for aggregation. What version of leanVM do you folks rely on? I'll let Marc answer better, but AFAIK, in Daisugi https://github.com/nethermindEth/lean-bindings is being used in a commit that uses leanVM's `f7ba4999` <@427491045308235776> I agree with the plan. As <@1162286831354790020> mentioned we are waiting to merge the new sphincs.art parameters on daisugi, About 1) (just leanSPHINCS no aggregation ) do you envision a verification using a solidity contract or how ? precompile ? I was thinking natively as a dependency/proof frame because then we would need to solve <@543900561460822016> 's question on how we integrate it, or atleast have some default behaviour just saying , in this way we are going a big backward (Because we have already some form of aggregation in the testnet). But yeah sometime you need to step back in order to go forward . I wonder, is this the case ? > merge the new sphincs.art parameters on daisugi Does this mean upgrading leanVM? yes and some part of the client and the wallet leanVM is already. ready the current version of leanVM in main has the right parameters they jut need to be integrated in the testnet yep agreed! One decision that I think we want to make/at least be informed about is whether just leanSPHINCS with no aggregation is a thing we should ship in H* pefect , the let's go with 1) then which wallet was this? here is the thing at the moment we do not have a wallet that supports frame so we have been using P11 walltet",
+  "excerpts": [
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@808969530608451584> or perhaps <@&652918665943056397> where can I find the execution specs PR that everyone is basing the devnet off of?",
+      "createdAt": "2026-11-23T12:05:10.618000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "there is this doc with a summary: https://notes.ethereum.org/@pk910/daisugi-devnet-0\nbut I don't think there's any execution-specs PR?",
+      "createdAt": "2026-11-23T12:07:59.473000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Ah yeah was reading that and thought I missed something.\n\nSince it states that we need to make changes on the EL, CL and engine API. I would suggest that we have branches within the execution-specs, consensus-specs and execution-apis before devnets as opposed to using a particular client as a reference.\n\nThis makes it easier for newer clients to onboard/see the diff and for us to generate test vectors etc.\n\nWas there a reason not to do it this way? cc <@281967554572976128> and <@&652918665943056397>  👀",
+      "createdAt": "2026-11-23T12:17:42.849000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Not sure why it wasn’t done that way since the beginning (probably started like a PoC and the idea for more clients to onboard appeared later, and everything was already set up as is). It was one of the reasons it was difficult to join before that spec file was written. \n\nI totally agree that we need a common base, like e.g. bogota-devnet-2 (the latest stable EL-only Hegota devnet), to make it easier for other clients to onboard",
+      "createdAt": "2026-11-23T12:23:40.441000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Makes sense, thanks!\n\nIs bogota-devnet-2 the frames version that you are basing the current devnet off of?",
+      "createdAt": "2026-11-23T12:27:46.255000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Bogota Engine API has ILs in it, I think PQ devnet should rather be based on the Amsterdam. Btw, are there any Engine API changes specific to PQ?",
+      "createdAt": "2026-11-23T12:29:56.617000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I based on that, but removed some of the features to be compliant with Daisugi’s current spec.\n\nI think the best would be to regenesis on top of a spec that contains bogota-devnet-2 features + implementing the 8288 features that are already implemented in Daisugi.",
+      "createdAt": "2026-11-23T12:31:08.902000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Does it? I think at least bogota-devnet-2 doesn’t require ILs in it, le me check",
+      "createdAt": "2026-11-23T12:33:01.271000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Just checked, it’s EL only and doesn’t requiere them https://notes.ethereum.org/@ethpandaops/bogota-devnet-2",
+      "createdAt": "2026-11-23T12:33:26.168000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@281967554572976128> was checking `keccak256(stark_proof)` do you know what was the rationale for adding this into the EL header?",
+      "createdAt": "2026-11-23T12:38:13.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "> Btw, are there any Engine API changes specific to PQ?\n\nThe main changes I'd say is adding the EL stark proof into the execution payload and the payload header",
+      "createdAt": "2026-11-23T12:41:44.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I’m not sure about this. I missed some weeks of discussions about Daisugi",
+      "createdAt": "2026-11-23T12:43:13.355000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "What is useful to know for everyone, the Daisugi updates from \"let's have a place to test the signatures\" to \"let's have a proper devnet\" have started basically last week when PK and team rebuilt it properly. Before that we just contributed so that things could be tested. The signature and aggregation and everything else are now being updated to reflect the latest available material from official repos, but It will take a couple of days more. I think the Nethermind team is already on it",
+      "createdAt": "2026-11-23T12:56:11.890000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Tx signature aggregate?",
+      "createdAt": "2026-11-23T12:57:16.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah exactly on the EL side (but also leanPCS aggregate)",
+      "createdAt": "2026-11-23T13:14:20.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Currently have an agent extracting the patches from lighthouse into the CL specs to see them a bit better. (It seems like we inspect frame txs on the CL to compute the hashes for the dependencies in the dependency frame, which I think CL devs would not want) \n\nI would propose the following milestones:\n\n- 1) devnets with just leanSPHINCS no aggregation and we collect metrics on what this looks like. This should mostly be an EL change.\n\n- 2) devnets with block builder aggregation. This is where starkProof in the block would be added. This would probably not help mempool issues that much only block propagation.\n\n- 3a) devnets with leanPCS added. This would further increase the mempool traffic and potentially the compute needed by the builder\n\n- 3b) devnets with mempool aggregation.\n\n3b is massive, though I think <@857052906495017000> has been working on this for a while now?",
+      "createdAt": "2026-11-23T14:50:50.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "(1) is useful to get metrics on because its the bare minimum for having PQ in H*",
+      "createdAt": "2026-11-23T14:52:13.333000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marchhill",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I have a few spec / api PRs open\n- https://github.com/ethereum/execution-specs/pull/4052 based on Spencer's work\n- https://github.com/ethereum/execution-apis/pull/1028\n- https://github.com/ethereum/consensus-specs/pull/5858\nSo far we have focused on implementation as a lot of the complexity is in the mempool side of things which wouldn't be covered by these tests. Going forward with more clients though we should ofc use spec tests as the reference, not an implementation",
+      "createdAt": "2026-11-23T15:21:46.062000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jhon_fp",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@427491045308235776>  On keccak256(stark_proof): with aggregation, individual signatures never go on chain. Each transaction only declares its claim (scheme, digest, public key) in a DEP_VERIFY frame, and the block's STARK proof is the only evidence that those signatures are valid. No other header field covers that proof, so its hash is committed in the EL header, alongside block_deps_hash (the commitment to the claims). This binds the exact proof to the block hash: a block cannot be relayed or rebuilt with a different or missing proof under the same hash. On the devnet, the CL recomputes the block hash, deriving the deps hash from the frame transactions, and rejects any mismatch regardless of the EL's verdict. Engine API: ExecutionPayload only gains starkProof.\n\nContext: https://eips.ethereum.org/EIPS/eip-8288\n\nThis is our reading of the design rationale; <@&652918665943056397> can confirm the original intent.",
+      "createdAt": "2026-11-23T15:26:05.532000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ulisse195",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "The milestones make sense to us. \nRelated to (1), we already run native (non-aggregated) SPHINCS frame accounts on devnet-0: the account contract verifies the signature in its VERIFY frame, with no block proof, and our wallet supports this mode alongside aggregation. This is a contract-level approach rather than EL-native verification, and it still uses the current SPHINCS profile rather than upstream leanSPHINCS, but it can provide early data on signature size and verification cost. \n\nOn (2), we are waiting for <@&652918665943056397> 's  latest leanVM implementation before updating our side, since it changes the aggregation key and requires a new genesis.\n\nTo get meaningful metrics for (1) and (2), the network will need sustained load rather than a handful of wallet transactions. I think <@&1416139337179074590> s will cover this in the next steps with a spammer generating frame transactions with leanSPHINCS signatures, which would show how mempool traffic, block propagation and builder compute behave under realistic signature sizes.",
+      "createdAt": "2026-11-23T15:37:44.595000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Nice! For (1) I think Kev is aiming to EL-native verification (correct me Kev if I'm wrong). A proposal for that while keeping 8288 compatibility that we are working on it https://github.com/ethereum/EIPs/pull/12672",
+      "createdAt": "2026-11-23T15:44:26.972000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "deanstef",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Hey <@427491045308235776> ! Stefano from Nethermind here 🙂\n\nThe main rationale for having `hash(proof)` in the block header rather than the full proof was to avoid bloating headers with quite large objects (~300 kB). Think about light clients or nodes fetching block headers during sync: EIP-8288 would have added ~300 kB per header. The hash still commits the block to the exact proof bytes.\n\n- We started the discussion here: https://github.com/ethereum/EIPs/pull/12479, initially proposing to move the proof into the block body while keeping its hash in the header.\n\n- We then converged on the approach in https://github.com/ethereum/EIPs/pull/12549, where proofs are transmitted separately from both headers and bodies. This also allows nodes to fetch and prune proofs independently, without increasing block body sizes.\n\n<@348512261955911691> <@232483425318207488> can add more 🙂",
+      "createdAt": "2026-11-23T15:55:12.318000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Is there complexity in the mempool even if we start off with no aggregation?",
+      "createdAt": "2026-11-23T16:30:34.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "My thinking is that if the claims are seen as public inputs to the proof and the block is not valid without verifying a proof. \n\nThough its not clear to me, why this implies the proof needs to go into the header especially given that the proof is not canonical. Not saying its wrong, just that its not obvious to me 😄\n\nThe CL reading frame transaction and deriving the dep hash seems like an anti-pattern no? This means that the CL needs to know the structure of a frame transaction rather than treating it as an opaque set of bytes?",
+      "createdAt": "2026-11-23T16:40:05.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah it seems like we all agree on verifying SPHINCS signatures using a native library and not as bytecode unless I'm missing something",
+      "createdAt": "2026-11-23T16:41:46.445000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Trying to understand: So for a node thats syncing they would download the headers and then use the hash(proof) to request the proof? \n\n(And then I guess the same for lightclients)\n\nIf so, my thinking was that we could just use the blockHash to request the proof since verifying a proof is \"cheap\" or perhaps I'm missing something?",
+      "createdAt": "2026-11-23T16:48:11.874000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "deanstef",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I agree with these milestones! I'd just split 3b into two steps:\n\n- 3b) Single-hop mempool aggregation, to have preliminary benchmarks on networking overhead.\n- 3c) Full recursive mempool aggregation with a configurable aggregation tick. More benchmarks on networking.\n\nOn networking, we've also drafted an [IHAVE/IWANT-style protocol extension](https://github.com/ethereum/EIPs/pull/12423) for proof wrapper propagation.",
+      "createdAt": "2026-11-23T16:50:56.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Is an aggregation tick here, how often a node will aggregate, ie every 2 seconds or every five seconds I aggregate everything in my mempool?\n\nDo you also have a feeling for how this intersects with the new networking protocol being done by <@857052906495017000> et al and or at what stage we will know whether we need to make large changes to the networking stack on the EL side?",
+      "createdAt": "2026-11-23T16:55:41.438000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marchhill",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah that's right. We collaborated with <@857052906495017000> on that networking EIP, and it's compatible with 8077. In terms of whether we need to make deeper changes to the stack, we still need to do benchmarking to determine that. The networking specs have been in flux but now that they are stabilising we can start working on this",
+      "createdAt": "2026-11-23T17:12:55.471000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "marchhill",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We would still need some changes but that would remove a lot of the complexity",
+      "createdAt": "2026-11-23T17:13:17.174000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Makes sense, to me this seems like the most minimal thing we could do to ship PQ EL so it might make sense to know whether its even viable I think",
+      "createdAt": "2026-11-23T17:18:27.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@348512261955911691> / <@281967554572976128> for the cryptography, do you depend on leanVM?",
+      "createdAt": "2026-11-23T17:18:56.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@1481393192950567003> I think we forgot to add bindings for C# 😄\n\nMaybe <@348512261955911691> you could link to how you are relying on it, so we can add it into leanVM and publish on nuget?\n\n(We are switching leanVM from the sidecar to FFI, so it may need to wait until tomorrow)",
+      "createdAt": "2026-11-23T17:21:22.960000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Just for leanSPHINCS we'd depend on https://github.com/leanEthereum/leanVM/tree/main/crates/lean_sphincs. Not sure if you are referring to Daisugi specifically or to the general solution",
+      "createdAt": "2026-11-23T17:27:17.909000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "My agent has finished extracting the CL changes currently on daisugi to here btw: https://github.com/ethereum/consensus-specs/pull/5859",
+      "createdAt": "2026-11-23T17:27:55.898000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Ah I meant for leanSPHINCs and also for aggregation.\n\nWhat version of leanVM do you folks rely on?",
+      "createdAt": "2026-11-23T17:30:04.300000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I'll let Marc answer better, but AFAIK, in Daisugi https://github.com/nethermindEth/lean-bindings is being used in a commit that uses leanVM's `f7ba4999`",
+      "createdAt": "2026-11-23T17:46:32.552000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@427491045308235776>  I agree with the plan. As <@1162286831354790020> mentioned we are waiting to merge the new sphincs.art parameters on daisugi, About 1)  (just leanSPHINCS no aggregation ) do you envision a verification using a solidity contract or how ? precompile ?",
+      "createdAt": "2026-11-23T19:34:44.686000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I was thinking natively as a dependency/proof frame because then we would need to solve <@543900561460822016> 's question on how we integrate it, or atleast have some default behaviour",
+      "createdAt": "2026-11-23T19:36:23.815000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "just saying , in this way we are going a big backward (Because we have already some form of aggregation in the testnet). But yeah sometime you need to step back in order to go forward .  I wonder, is this the case ?",
+      "createdAt": "2026-11-23T19:36:31.646000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "> merge the new sphincs.art parameters on daisugi\n\nDoes this mean upgrading leanVM?",
+      "createdAt": "2026-11-23T19:36:45.467000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yes and some part of the client and the wallet",
+      "createdAt": "2026-11-23T19:37:01.490000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "leanVM is already. ready",
+      "createdAt": "2026-11-23T19:37:08.767000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "the current version of leanVM  in main has the right parameters",
+      "createdAt": "2026-11-23T19:37:23.315000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "they jut need to be integrated in the testnet",
+      "createdAt": "2026-11-23T19:37:29.851000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yep agreed! One decision that I think we want to make/at least be informed about is whether just leanSPHINCS with no aggregation is a thing we should ship in H*",
+      "createdAt": "2026-11-23T19:37:38.173000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "pefect , the let's go with 1) then",
+      "createdAt": "2026-11-23T19:37:56.436000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "which wallet was this?",
+      "createdAt": "2026-11-23T19:37:58.032000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "here is the thing",
+      "createdAt": "2026-11-23T19:38:05.705000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "at the moment we do not have a wallet that supports frame so we have been using P11 walltet",
+      "createdAt": "2026-11-23T19:38:22.282000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "nicetry",
+      "createdAt": "2026-11-23T19:38:26.141000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://nicetry.xyz/",
+      "createdAt": "2026-11-23T19:38:44.850000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "How are frames transaction folks doing it?",
+      "createdAt": "2026-11-23T19:38:55.997000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "love the name!",
+      "createdAt": "2026-11-23T19:39:09.879000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "no clue. I have been asking same cc <@281967554572976128>",
+      "createdAt": "2026-11-23T19:39:20.825000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "maybe <@543900561460822016> / <@808969530608451584> knows?",
+      "createdAt": "2026-11-23T19:40:58.396000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We have a patched spamoor in daisugi-devnet-0 that sends frame transactions with leanSPHINCS signatures via eth_sendProofWrapper.\nhttps://github.com/ethpandaops/spamoor/pull/318 with this plugin: https://github.com/pk910/spamoor-plugins/tree/main/pq-frame-tx\nIt's all a bit vibe coded,  but generates a steady stream of txs so far 🙂\nI'm not aware of any other wallet that sends out frame txs yet",
+      "createdAt": "2026-11-23T20:15:10.327000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we need to start involve real wallet (metamask et al)",
+      "createdAt": "2026-11-23T20:17:15.584000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "P11 guys did nicetry only for the testnet but they will not intend to maintain",
+      "createdAt": "2026-11-23T20:17:38.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I agree that education/communication is important,  <@421767904053297152> brought this up a few hours ago actually. It feels like we are still at the stage where protocol changes/decisions are not stable yet though, so metamask and others would inevitably feel a lot of churn if they were involved in the devnets right now I think",
+      "createdAt": "2026-11-23T20:24:20.132000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "ok then let''s use nicetry for now",
+      "createdAt": "2026-11-23T20:25:40.161000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "looking forward see 1) in action",
+      "createdAt": "2026-11-23T20:25:47.338000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "who is working on it ? can i help somehow?",
+      "createdAt": "2026-11-23T20:26:03.744000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I was thinking we could probably just reuse the spamoor stuff that pk linked above since we will need to integrate this all into ethpandaops infrastructure anyways\n\nWe can still use nicetry, though spamoor is what we usually use so would say thats better to have as a default for testing",
+      "createdAt": "2026-11-23T20:28:53.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think we need:\n\n- execution-specs: Built ontop of the latest frames devnet\n     - Make a decision on whether we go with PROOF frame or not. I would choose this as a default tbh and then change in the future and or work on it in parallel\n\n- consensus-specs: I think we only need to change it because the ExecutionPayload version is changing",
+      "createdAt": "2026-11-23T20:36:50.538000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "sure we can use spamoor (it's great) . nicetry is for people that want to try the testnet via the browser",
+      "createdAt": "2026-11-23T20:41:07.925000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I’d advise changing the CL if we can hold off a version change for a few more weeks",
+      "createdAt": "2026-11-23T22:33:42.191000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "That way we can test complete isolation El and CL features",
+      "createdAt": "2026-11-23T22:34:00.748000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "deanstef",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Thinking at loud here. \n\nI'm wondering what we gain from introducing PROOF frames without aggregation, given that we can already achieve the same functionality with EIP-8288, which we'll need eventually anyway.\n\nI understand the main concern is proving performance, but we've already demonstrated that aggregating ~20 leanSPHINCS signatures is feasible on Daisugi.\n\nFrom my understanding, PROOF without aggregation might be more convenient when there are only a few PQ signatures, but it doesn't scale well as their number increases. It would also require changes to the block format and validation rules when transitioning to EIP-8288.\n\nSo my main question is: what do we gain from a PROOF-only stage in 1) that we don't already have with one-hop aggregation on Daisugi?",
+      "createdAt": "2026-11-23T22:37:41.359000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "deanstef",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We're integrating leanVM into Nethermind (.NET) through a native Rust library via FFI, check [lean-bindings](https://github.com/NethermindEth/lean-bindings).\n\nWe use it for native leanSPHINCS verification and recursive STARK proving/verification. We're pinned to leanVM `f7ba4999`.\n\nBut, <@348512261955911691> can add more here 🙂",
+      "createdAt": "2026-11-23T22:44:04.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "deanstef",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Netermind's 8288 implementation is already up to date to the default params. We just need a network restart to activate them cc <@808969530608451584>",
+      "createdAt": "2026-11-23T22:46:06.446000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "You mean advise against changing the CL?",
+      "createdAt": "2026-11-23T22:46:17.881000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yup",
+      "createdAt": "2026-11-23T23:04:34.185000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Ahh yeah mostly agree with this!\n\nI think there is a possibility that we ship any of the following:\n\n- PROOF without aggregation: (the benefit here is that the changes are somewhat minimal, so it can be done quickly but it doesn't scale (ie we can't have a block full of leanSPHINCs signatures). I think this is still useful to have because it is the minimal PQ thing that we _could_ ship if we wanted to ship something urgently. It also is useful for developing a baseline and doing the bare minimum for getting a devnet working with frames.\n\n- PROOF with builder aggregation: This is the natural next step and it adds the plumbing necessary to support aggregation (including the changes to the block format and validation rules for verifying a stark proof and potentially new rules for syncing proofs given the block header). This seems like a bigger lift which was why I suggested not jumping to it immediately.\n\n- PROOF with mempool aggregation: This shouldn't require a fork once we have PROOF with builder aggregation because its all happening in the mempool, though I imagine that the devils in the details here.\n\nOn Daisugi ~20 leanSPHINCS, I think leanVM should be somewhere close to 500/s so perhaps this includes network latency(?). If so, then I think for me its been hard to extrapolate numbers from small devnets to what mainnet may perform at",
+      "createdAt": "2026-11-23T23:14:54.482000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I just saw Marc's PR to leanVM: https://github.com/leanEthereum/leanVM/pull/852 🙂",
+      "createdAt": "2026-11-23T23:16:29.484000+00:00",
+      "attachments": []
+    }
+  ]
+}
