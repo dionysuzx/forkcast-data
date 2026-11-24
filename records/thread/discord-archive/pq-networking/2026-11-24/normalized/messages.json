@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "pq-networking",
   "date": "2026-11-24",
-  "messageCount": 2,
-  "sourceHash": "2c6be6b975351b56c6cb83d21282b8459216a9ad920430560f490595e4c7d042",
-  "searchText": "Posted fast proof broadcast protocol (framed it as an EIP in the write up) https://notes.ethereum.org/@kamilsa/rk_I4TMJme TLDR It is based on the 8411 with waggle ([link](https://github.com/ethereum/EIPs/pull/12671/changes)) : proof is chunked and then merkle tree is built on top. Root is signed by leanXMSS. Chunk size is ~3KB, signature size is 2.4KB, so we send signature only with the first chunk to the remote peer Also vibed a Lighthouse branch on top of the pq-devnet-0 branch: https://github.com/kamilsa/lighthouse/tree/leanvm-proof-broadcast Kurtosis instructions: https://gist.github.com/kamilsa/8eedc3a0e9ac162be22353b824d64d17 cc <@427491045308235776> <@554799849288105986> <@412614104222531604> Posted fast proof broadcast protocol (",
+  "messageCount": 34,
+  "sourceHash": "7ed72c8a22004be9812e752a0f5c5e72d59e0f491f7e45991ae7b9149b6a0d41",
+  "searchText": "Posted fast proof broadcast protocol (framed it as an EIP in the write up) https://notes.ethereum.org/@kamilsa/rk_I4TMJme TLDR It is based on the 8411 with waggle ([link](https://github.com/ethereum/EIPs/pull/12671/changes)) : proof is chunked and then merkle tree is built on top. Root is signed by leanXMSS. Chunk size is ~3KB, signature size is 2.4KB, so we send signature only with the first chunk to the remote peer Also vibed a Lighthouse branch on top of the pq-devnet-0 branch: https://github.com/kamilsa/lighthouse/tree/leanvm-proof-broadcast Kurtosis instructions: https://gist.github.com/kamilsa/8eedc3a0e9ac162be22353b824d64d17 cc <@427491045308235776> <@554799849288105986> <@412614104222531604> Posted fast proof broadcast protocol ( I believe this is within expectation! I'd say that the proof size is not directly related to the number of votes that the proof covers, but to the amount of work it took to make the proof. Lets say \"amount of work\" is equal to the number of instructions. I will use example numbers to make it easy for me to do the math. - verifying an XMSS signature is 10 instructions - verifying a stark proof is 123 instructions Now lets say that 1 instruction adds 3B to the proof size. **Case 1a:** I want to aggregate 200 XMSS signatures This maps to verifying 200 XMSS signatures so the proof size is 200 * 10 * 3 = 6KB **Case 1b: **I want to aggregate 400 XMSS signatures This maps to verifying 400 XMSS signatures so the proof size is 400 * 10 * 3 = 12KB I think at this point, the idea of more signatures means a bigger proof makes sense, and its what usually happens when we verify signatures in a committee. **Case 2:** I want to aggregate 400 XMSS signatures, then I want to aggregate one additional signature Aggregating the first 400 XMSS signatures will give us a 12KB stark proof. However, when we add an additional signature we are actually verifying the existing stark proof and then verifying an XMSS signature. This is different to verifying 401 signatures in one go like the previous cases. So the proof size would be (123 + 10) * 3 = 399 bytes Or a different TLDR is that every time leanVM is called, it is compressing the computation again are we going to be bandwidth bound or compute bound? Its still not very clear to me We can squeeze a lot from networking if we get away from gossipsub. But we can't do much if there are validators that need 5 seconds to aggregate 16 to 1 (which is why we allow proposer to include a proof from a slot before the previous one) do we have bandwidth consumptions metrics from the devnet-0? E.g. can we check if we are hitting 50Mbps uplink/downlink on the devnet yeah exactly my point ,we might make networking lightning fast but that won't solve aggregation overhead yeah just ask panda for it it should have the metrics available for it <@&1416139337179074590> can you help me find these metrics if they exist? I meant [panda](https://github.com/ethpandaops/panda) cli the tool lol It's due to a technical reason, an optimization leanVM uses in WHIR (the polynomial commitment scheme), where some parts of the Merkle leaves (containing zeros) are omitted in the proof (\"pruned leaves\"). Committing to 25 variables where the polynomial is fully utilised, ends up being bigger than a half-used polynomial at 26 variables. Now I'm curious this last statement doesn't make any sense to me. A \"half used polynomial in K+1\" vars should be the same dimension as a fully used in K vars. Assuming here multi linear polynomials this sounds to me like 2^(k+1)/2 = 2^k metrics from one client - `4.86M` is MB so x8 for Mbit doesn't look like we are hitting that limit atm looks like inbound / down: ~24Mbit/s, outbound / up: ~ 32Mbit/s for silver node. this is what my agent returned looks similar? its very spikey in my measurements do you have a bandwidth profile during some arbitrary slot? similar to what [xray](https://xray.ethquokkaops.io/) produces for the mainnet not on the current devnet nodes - I can spin up an external follower node and get that that would be great. If you need xray source code its here https://github.com/ethp2p/xray (in case you want to feed it to your agent) Okay, this is what I got btw keep in mind, there is no traffic on devnet 0 like we have 0 txs and 0 blob txs you're right, I should I said a 51% used polynomial (so that it forces you to use the next variable) I still don't get it, shouldn't this be even a larger proof. Sorry to bug but since I am casually starting to study the WHIR paper by your recommendation this seems relevant 😅 what about we create a cryptography channel in Post-Quantum? we have a cryptography channel in Execution R&D btw Though maybe it should be in the cross layer section hi all! Wanted to share a small exploration on whether in an emergency scenario we could rely on builders: https://notes.ethereum.org/F8vCrMzLSxqeiLEhIUG5fw?view= The basic idea is that the last k proposers get to propagate an aggregate in a lightweight global proof topic. The main arguments are that 1) we assume that there is a honest proposer every k blocks anyway and 2) builders are incentivised to prevent their block from being reorged, so that their MEV isn't stolen. -- To me it seems that doing something like this would be a compromise similar to other avenues that were proposed, such as having EIP-7870 nodes not being part of the subnets and / or higher bandwidth assumptions, as suggested by <@425567222635954178> and <@439032863904628745> (other possible compromises: https://notes.ethereum.org/_rGnW7YuRWurwyA8zFhsog) My motivation for this exploration was that the \"autoresearch\" type p2p simulations I have been running in the background show that EIP-7870 nodes clearly cannot be part of the subnets (wip agent draft: https://notes.ethereum.org/SvvNoKS1TxyHD_iqN1ZyAQ) , and so relying on proposers/builders for a sinlge fork seems like an option also 🙂 <@857052906495017000> can you describe what seacast is briefly? Is it meant to as an alternative to waggle with an application protocol like 8411 ? I tried searching this channel and didn't find anything and this document doesn't seem to be for human consumption https://github.com/cskiraly/seacast-spec/blob/main/seacast.md",
   "excerpts": [
     {
       "author": ".just_kk",
@@ -20,6 +20,285 @@
       "parent": "",
       "content": "Posted fast proof broadcast protocol (",
       "createdAt": "2026-11-24T09:40:48.692000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I believe this is within expectation! \n\nI'd say that the proof size is not directly related to the number of votes that the proof covers, but to the amount of work it took to make the proof.\n\nLets say \"amount of work\" is equal to the number of instructions.\n\nI will use example numbers to make it easy for me to do the math.\n\n- verifying an XMSS signature is 10 instructions\n- verifying a stark proof is 123 instructions\n\nNow lets say that 1 instruction adds 3B to the proof size.\n\n**Case 1a:** I want to aggregate 200 XMSS signatures\n\nThis maps to verifying 200 XMSS signatures so the proof size is 200 * 10 * 3 = 6KB\n\n**Case 1b: **I want to aggregate 400 XMSS signatures\n\nThis maps to verifying 400 XMSS signatures so the proof size is 400 * 10 * 3 = 12KB\n\nI think at this point, the idea of more signatures means a bigger proof makes sense, and its what usually happens when we verify signatures in a committee.\n\n**Case 2:** I want to aggregate 400 XMSS signatures, then I want to aggregate one additional signature\n\nAggregating the first 400 XMSS signatures will give us a 12KB stark proof. However, when we add an additional signature we are actually verifying the existing stark proof and then verifying an XMSS signature. This is different to verifying 401 signatures in one go like the previous cases.\n\nSo the proof size would be (123 + 10) * 3 = 399 bytes",
+      "createdAt": "2026-11-24T10:37:55.239000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Or a different TLDR is that every time leanVM is called, it is compressing the computation again",
+      "createdAt": "2026-11-24T10:39:40.718000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "are we going to be bandwidth bound or compute bound? Its still not very clear to me",
+      "createdAt": "2026-11-24T10:44:18.184000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We can squeeze a lot from networking if we get away from gossipsub. But we can't do much if there are validators that need 5 seconds to aggregate 16 to 1 (which is why we allow proposer to include a proof from a slot before the previous one)",
+      "createdAt": "2026-11-24T10:46:21.186000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "do we have bandwidth consumptions metrics from the devnet-0? E.g. can we check if we are hitting 50Mbps uplink/downlink on the devnet",
+      "createdAt": "2026-11-24T10:48:13.234000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah exactly my point ,we might make networking lightning fast but that won't solve aggregation overhead",
+      "createdAt": "2026-11-24T10:48:27.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yeah just ask panda for it",
+      "createdAt": "2026-11-24T10:48:36.528000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it should have the metrics available for it",
+      "createdAt": "2026-11-24T10:48:52.706000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@&1416139337179074590> can you help me find these metrics if they exist?",
+      "createdAt": "2026-11-24T10:49:24.356000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I meant [panda](https://github.com/ethpandaops/panda) cli the tool",
+      "createdAt": "2026-11-24T10:49:45.804000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "lol",
+      "createdAt": "2026-11-24T10:49:48.194000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "t.wambsgans",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "It's due to a technical reason, an optimization leanVM uses in WHIR (the polynomial commitment scheme), where some parts of the Merkle leaves (containing zeros) are omitted in the proof (\"pruned leaves\"). Committing to 25 variables where the polynomial is fully utilised, ends up being bigger than a half-used polynomial at 26 variables.",
+      "createdAt": "2026-11-24T11:14:42.053000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Now I'm curious this last statement doesn't make any sense to me. A \"half used polynomial in K+1\" vars should be the same dimension as a fully used in K vars. Assuming here multi linear polynomials this sounds to me like 2^(k+1)/2 = 2^k",
+      "createdAt": "2026-11-24T11:22:40.544000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "metrics from one client - `4.86M` is MB so x8 for Mbit",
+      "createdAt": "2026-11-24T11:29:54.208000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "f302c5b0dcfaf257a4a28d6cea6bc34968e82c8dd6017d0f79b03166a1b50975"
+        },
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "5e23490700d0d6c0b81404ff5758df1bcd2dbbd2857c7a49c553318452966e28"
+        }
+      ]
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "doesn't look like we are hitting that limit atm",
+      "createdAt": "2026-11-24T11:32:02.847000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "looks like inbound / down: ~24Mbit/s,  outbound / up: ~ 32Mbit/s for silver node.",
+      "createdAt": "2026-11-24T11:34:40.899000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "this is what my agent returned",
+      "createdAt": "2026-11-24T11:36:18.357000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "89b486a88acffa98491d3935a5317e2125b77171f61170a7c44b61a394bb241c"
+        }
+      ]
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "looks similar? its very spikey in my measurements",
+      "createdAt": "2026-11-24T11:39:53.428000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "do you have a bandwidth profile during some arbitrary slot? similar to what [xray](https://xray.ethquokkaops.io/) produces for the mainnet",
+      "createdAt": "2026-11-24T11:46:54.206000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "vladimir_ea",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "not on the current devnet nodes - I can spin up an external follower node and get that",
+      "createdAt": "2026-11-24T11:48:51.981000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "that would be great. If you need xray source code its here https://github.com/ethp2p/xray  (in case you want to feed it to your agent)",
+      "createdAt": "2026-11-24T11:51:00.684000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".just_kk",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Okay, this is what I got",
+      "createdAt": "2026-11-24T11:52:37.305000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "a67125c3deb05fc9845c739d59dddeb1932fc52b5335bea0f7ad5e23b59cd243"
+        }
+      ]
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "btw keep in mind, there is no traffic on devnet 0",
+      "createdAt": "2026-11-24T12:01:04.317000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "like we have 0 txs",
+      "createdAt": "2026-11-24T12:01:08.895000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "and 0 blob txs",
+      "createdAt": "2026-11-24T12:01:11.897000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "t.wambsgans",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "you're right, I should I said a 51% used polynomial (so that it forces you to use the next variable)",
+      "createdAt": "2026-11-24T12:18:43.996000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I still don't get it, shouldn't this be even a larger proof. Sorry to bug but since I am casually starting to study the WHIR paper by your recommendation this seems relevant 😅",
+      "createdAt": "2026-11-24T12:27:17.749000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "t.wambsgans",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "what about we create a cryptography channel in Post-Quantum?",
+      "createdAt": "2026-11-24T12:29:27.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we have a cryptography channel in Execution R&D btw",
+      "createdAt": "2026-11-24T12:30:25.044000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Though maybe it should be in the cross layer section",
+      "createdAt": "2026-11-24T12:30:43.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "yannvonlanthen",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "hi all! \n\nWanted to share a small exploration on whether in an emergency scenario we could rely on builders: https://notes.ethereum.org/F8vCrMzLSxqeiLEhIUG5fw?view=\n\nThe basic idea is that the last k proposers get to propagate an aggregate in a lightweight global proof topic. The main arguments are that 1) we assume that there is a honest proposer every k blocks anyway and 2) builders are incentivised to prevent their block from being reorged, so that their MEV isn't stolen.\n\n-- \n\nTo me it seems that doing something like this would be a compromise similar to other avenues that were proposed, such as having EIP-7870 nodes not being part of the subnets and / or higher bandwidth assumptions, as suggested by <@425567222635954178> and <@439032863904628745> (other possible compromises: https://notes.ethereum.org/_rGnW7YuRWurwyA8zFhsog)\n\nMy motivation for this exploration was that the \"autoresearch\" type p2p simulations I have been running in the background show that EIP-7870 nodes clearly cannot be part of the subnets (wip agent draft: https://notes.ethereum.org/SvvNoKS1TxyHD_iqN1ZyAQ) , and so relying on proposers/builders for a sinlge fork seems like an option also 🙂",
+      "createdAt": "2026-11-24T13:58:23.669000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pawandhananjay",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@857052906495017000> can you describe what seacast is briefly? Is it meant to as an alternative to waggle with an application protocol like 8411 ? I tried searching this channel and didn't find anything and this document doesn't seem to be for human consumption  https://github.com/cskiraly/seacast-spec/blob/main/seacast.md",
+      "createdAt": "2026-11-24T20:09:58.732000+00:00",
       "attachments": []
     }
   ]

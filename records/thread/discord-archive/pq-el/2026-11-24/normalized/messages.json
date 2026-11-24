@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "pq-el",
   "date": "2026-11-24",
-  "messageCount": 20,
-  "sourceHash": "71d8cb08e9bc4d553f07cd46079b48c942a50f27d9c8e0a4c0cf684f6a8d6969",
-  "searchText": "as i understand it (<@543900561460822016> can correct me if im wrong), without a PROOF frame or equivalent, wallets would have to validate leanSPHINCS signatures through VERIFY frames, but VERIFY frames are stateful (STATICCALL) so they cannot be aggregated, whereas PROOF frames execute in a pure context (which is why they are a different frame type) so they can be aggregated. so if we ship H* without PROOF frame (or equivalent), wallets would need to use leanSPHINCS through VERIFY frames, so when aggregation is shipped they will have to update their code (including the smart account code) to leverage aggregation. so the value of shipping PROOF frames in H* is to be forward-compatible with aggregation so that wallets can transparently take advantage of the cost savings from aggregation once it ships, as opposed to having to update their wallet/account code again what's less clear to me is whether it's feasible to ship aggregation itself in H*. my understanding is that: - to support aggregation at the builder level, the primary blocker is the readiness of leanVM itself. if we are 100% sure that leanVM is production-ready, the remaining questions would be things like figuring out where to put the recursive proof (https://github.com/ethereum/EIPs/pull/12549). so it might be doable to resolve these questions in time for H*? - to support aggregation at the mempool level, besides the readiness of leanVM and other questions we have to resolve for builder aggregation, we also have a lot of networking/mempool questions to answer, such as the exact aggregation strategy that each mempool node is supposed to take (i've done some sims that showed that the strategy currently in the 8288 spec is far from optimal). not so sure whether it's feasible to resolve these questions by H*, by like <@427491045308235776> said above, we don't actually have to -- as long as the protocol itself can deal with aggregated proofs, we can ship mempool aggregation outside of fork schedule so my first question (and i guess that's for <@1481393192950567003> <@427491045308235776> <@750602516613431366>) is -- just how production-ready is leanVM for the purpose of aggregating leanSPHINCS signatures as of today? The current earmark for leanVM readiness including formally verifying the verifiers is July. This should give us enough buffer to account for unknowns, but also not be too late such that it becomes a blocker for shipping H*. I'd say the indication of production-readiness will be once we've completed the external audits. Given we plan to FV the code to the assembly level, it will be interesting to see if external audits do find anything I think right now one of the main blockers for reducing uncertainty with leanVM, is knowing what is adequate performance, which in some sense is a bit dependent on the networking stack and the aggregation topology we potentially go with. It's possible to make leanVM faster at the expense of making it a lot more complicated i don’t think it is very likely we ship aggregation in H* the goal we should be trying to achieve is making it so people who start using PQ crypto in H* will get to take advantage of the aggregation in the future without any additional changes to their account so doing the PROOF frame allows us to turn that on later even if people use it without aggregation initially do you mean elaborating on why you think it's unlikely we ship aggregation in H*? i'm not very caught up with the progress myself but it sounds like others have been testing aggregation on the Dalsugi testnet so just wondering what you think the main blockers are (not saying i think there are no major blockers; just trying to understand) again the goal would not be to ship mempool aggregation, but rather just to support aggregation at the block level so that mempool aggregation can be implemented later out of fork schedule C# should be done (hope it works, will test more carefully tomorrow) we would need 100% confidence in putting leanVM into the protocol in the next ~3 months if we want to deliver H* roughly on time. that just doesn’t seem likely to me. leanVM is a big project and it will just take time for people to really understand it, the implications, test it, formally verify it, etc. I don’t expect that to happen in 3 months. It also is really not necessary upon the launch of H*, the number of PQ signatures will not immediately account for all signatures on the chain. Even if it did, we can support 4kb sigs for every tc without aggregation with fairly well understood improvements to our p2p. So I don’t see a reason to rush aggregation at all that's reasonable -- thanks I doubt aggregation makes hegota, but we _could_ already do segregation: pq sigs travel next to the tx (sidecar in the mempool, separate field in the block), and nodes still verify each. Later we swap that field for one aggregated proof. Since this only slows down frames and can be done with 8288, it's probably fine to ship segregation+aggregation at once. What we need to lock in now is: - where accounts look: the proof frame (or the signature-list entry), the same that 8288 will use - the signature hash commits only to (pk, msg) and the witness length, not the witness bytes. With a proof frame, we can have the frame.target be the verifier (instead of specifying a scheme). (pk, msg) is covered by the sighash, the sig (witness) isn't, and, having segregation/aggregation, it goes in the sidecar. Schemes are precompiles, and anyone can deploy their own verifier, but precompile witnesses get replaced by the proof once aggregation lands, and custom-verifier witnesses stay in the tx. also doubt aggregation makes Hegota one small point: when the proof is the signature, the claims depend on the sighash, so they can't be inside it. So let's not lock in \"only the witness is outside the sighash\", we also need room for claims that are outside it and readable only in VERIFY here are PRs to leanPCS and 8141 to make it work by letting only VERIFY frames read bytes that are outside the sighash: https://github.com/leanEthereum/leanPCS/pull/14 , https://github.com/ethereum/EIPs/pull/12708 Makes sense, yeah. We can put that reasoning in 8141 without naming leanPCS, something like \"any bytes outside the sighash, whether a witness or claims that depend on it, are only readable in VERIFY.\" about the PROOF frame vs sig list conversation: - to me the PROOF frame is a bit of an overkill, it runs no code and will need some special rules to \"behave like a frame\" while the sig list already has them: it's verified before anything runs and the txn in invalid if one fails - leanPCS needs its claims to be outside the signed hash (the sig list already works there) vs frame data that is inside the hash yeah this was my argument too: it's more like a sig than a frame. One argument was that it's easier to add a precompile with than a scheme, and with a proof frame, the scheme is basically decided by which precompile address it targets. If this makes sense to have is one of the remaining open questions I think not sure it's that much easier just because the frame has a scheme byte today too, and even with the address as the verifiier the protocol still has to know which addresses get aggregated? so it feels like the same list just with addresses instead of ids you could drop the scheme id in the frame but yeah, protocol decides what aggregates (I guess?). If we're right, I'm also for the sig list. Sig list with addresses is possible too but looses this argument that for L2s etc it's easier to get a new precompile than a new scheme - I'm not sure this argument even holds. So yeah, feels like we should discuss if we can settle on sig list and update 8288 accordingly. yeah for L2s we could just reserve a range of scheme ids, that does the same job as precompile addresses",
+  "messageCount": 82,
+  "sourceHash": "63946a024342e8e5a2680c17a66ab3958d48410bd807d622cbded22d5ab9492d",
+  "searchText": "as i understand it (<@543900561460822016> can correct me if im wrong), without a PROOF frame or equivalent, wallets would have to validate leanSPHINCS signatures through VERIFY frames, but VERIFY frames are stateful (STATICCALL) so they cannot be aggregated, whereas PROOF frames execute in a pure context (which is why they are a different frame type) so they can be aggregated. so if we ship H* without PROOF frame (or equivalent), wallets would need to use leanSPHINCS through VERIFY frames, so when aggregation is shipped they will have to update their code (including the smart account code) to leverage aggregation. so the value of shipping PROOF frames in H* is to be forward-compatible with aggregation so that wallets can transparently take advantage of the cost savings from aggregation once it ships, as opposed to having to update their wallet/account code again what's less clear to me is whether it's feasible to ship aggregation itself in H*. my understanding is that: - to support aggregation at the builder level, the primary blocker is the readiness of leanVM itself. if we are 100% sure that leanVM is production-ready, the remaining questions would be things like figuring out where to put the recursive proof (https://github.com/ethereum/EIPs/pull/12549). so it might be doable to resolve these questions in time for H*? - to support aggregation at the mempool level, besides the readiness of leanVM and other questions we have to resolve for builder aggregation, we also have a lot of networking/mempool questions to answer, such as the exact aggregation strategy that each mempool node is supposed to take (i've done some sims that showed that the strategy currently in the 8288 spec is far from optimal). not so sure whether it's feasible to resolve these questions by H*, by like <@427491045308235776> said above, we don't actually have to -- as long as the protocol itself can deal with aggregated proofs, we can ship mempool aggregation outside of fork schedule so my first question (and i guess that's for <@1481393192950567003> <@427491045308235776> <@750602516613431366>) is -- just how production-ready is leanVM for the purpose of aggregating leanSPHINCS signatures as of today? The current earmark for leanVM readiness including formally verifying the verifiers is July. This should give us enough buffer to account for unknowns, but also not be too late such that it becomes a blocker for shipping H*. I'd say the indication of production-readiness will be once we've completed the external audits. Given we plan to FV the code to the assembly level, it will be interesting to see if external audits do find anything I think right now one of the main blockers for reducing uncertainty with leanVM, is knowing what is adequate performance, which in some sense is a bit dependent on the networking stack and the aggregation topology we potentially go with. It's possible to make leanVM faster at the expense of making it a lot more complicated i don’t think it is very likely we ship aggregation in H* the goal we should be trying to achieve is making it so people who start using PQ crypto in H* will get to take advantage of the aggregation in the future without any additional changes to their account so doing the PROOF frame allows us to turn that on later even if people use it without aggregation initially do you mean elaborating on why you think it's unlikely we ship aggregation in H*? i'm not very caught up with the progress myself but it sounds like others have been testing aggregation on the Dalsugi testnet so just wondering what you think the main blockers are (not saying i think there are no major blockers; just trying to understand) again the goal would not be to ship mempool aggregation, but rather just to support aggregation at the block level so that mempool aggregation can be implemented later out of fork schedule C# should be done (hope it works, will test more carefully tomorrow) we would need 100% confidence in putting leanVM into the protocol in the next ~3 months if we want to deliver H* roughly on time. that just doesn’t seem likely to me. leanVM is a big project and it will just take time for people to really understand it, the implications, test it, formally verify it, etc. I don’t expect that to happen in 3 months. It also is really not necessary upon the launch of H*, the number of PQ signatures will not immediately account for all signatures on the chain. Even if it did, we can support 4kb sigs for every tc without aggregation with fairly well understood improvements to our p2p. So I don’t see a reason to rush aggregation at all that's reasonable -- thanks I doubt aggregation makes hegota, but we _could_ already do segregation: pq sigs travel next to the tx (sidecar in the mempool, separate field in the block), and nodes still verify each. Later we swap that field for one aggregated proof. Since this only slows down frames and can be done with 8288, it's probably fine to ship segregation+aggregation at once. What we need to lock in now is: - where accounts look: the proof frame (or the signature-list entry), the same that 8288 will use - the signature hash commits only to (pk, msg) and the witness length, not the witness bytes. With a proof frame, we can have the frame.target be the verifier (instead of specifying a scheme). (pk, msg) is covered by the sighash, the sig (witness) isn't, and, having segregation/aggregation, it goes in the sidecar. Schemes are precompiles, and anyone can deploy their own verifier, but precompile witnesses get replaced by the proof once aggregation lands, and custom-verifier witnesses stay in the tx. also doubt aggregation makes Hegota one small point: when the proof is the signature, the claims depend on the sighash, so they can't be inside it. So let's not lock in \"only the witness is outside the sighash\", we also need room for claims that are outside it and readable only in VERIFY here are PRs to leanPCS and 8141 to make it work by letting only VERIFY frames read bytes that are outside the sighash: https://github.com/leanEthereum/leanPCS/pull/14 , https://github.com/ethereum/EIPs/pull/12708 Makes sense, yeah. We can put that reasoning in 8141 without naming leanPCS, something like \"any bytes outside the sighash, whether a witness or claims that depend on it, are only readable in VERIFY.\" about the PROOF frame vs sig list conversation: - to me the PROOF frame is a bit of an overkill, it runs no code and will need some special rules to \"behave like a frame\" while the sig list already has them: it's verified before anything runs and the txn in invalid if one fails - leanPCS needs its claims to be outside the signed hash (the sig list already works there) vs frame data that is inside the hash yeah this was my argument too: it's more like a sig than a frame. One argument was that it's easier to add a precompile with than a scheme, and with a proof frame, the scheme is basically decided by which precompile address it targets. If this makes sense to have is one of the remaining open questions I think not sure it's that much easier just because the frame has a scheme byte today too, and even with the address as the verifiier the protocol still has to know which addresses get aggregated? so it feels like the same list just with addresses instead of ids you could drop the scheme id in the frame but yeah, protocol decides what aggregates (I guess?). If we're right, I'm also for the sig list. Sig list with addresses is possible too but looses this argument that for L2s etc it's easier to get a new precompile than a new scheme - I'm not sure this argument even holds. So yeah, feels like we should discuss if we can settle on sig list and update 8288 accordingly. yeah for L2s we could just reserve a range of scheme ids, that does the same job as precompile addresses I've written about tick options and tickless designs here: https://ethresear.ch/t/eip-8288-the-networking-side-of-recursive-aggregation/26263 There are several design questions with ticks: - are nodes **ticking together**? We've settled on not doing this 1-2 months ago - what is the **tick interval value**? doesn't make too much settling on it until the proving machinary settles a bit - do nodes need the **same tick value**? not necessarily the right choice - what if you **can't make your tick**? until this is defined, we are a bit in dreamland. Nodes have other jobs to do, sometimes they miss a tick. - **do we even need a tick**? I was exploring **tickless** designs. Obviously, you need to pace your aggregation and announcements based on something, so that's a large design space. I'm convinced we cannot study all these in random IM channels, and we should better study them. We already studied some of them, but I sometimes feel only agents are reading those studies 😉 Maybe one misconception to clarify. There is already complexity in the mempool, it is just not well known. Always were. There is a simple view of the globally syncronized mempool pushing txs around, but below that there are dozens of implementation decisions and safegards against DoS, local policies, etc. Yeah I agree, there I was talking about additional complexity I scrolled to the bottom and it has a few suggestions for two EIPs, did you by chance make PRs to those EIPs with the changes? Does this argument also hold for 8KB signatures? the problem of going with no aggregation is (IMHO) not the p2p ( or the mempool) is the block. With such massive signatures (~8kk) the number of transactions fitting in the block are limited last time I did the math it was still OK, but it was still 2KB. Naive question, but I lost track of this detail between the threads: what forced us to 8KB? not all, thanks for the reminder! what does it mean ok ? Stateless schemes with a huge lifetime and other requirements (e.g. hardware signers and MPC support) required several choices and iterations that led to the current size. See here for more details: https://sphincs.art/ I can relaunch the devnet, but do we wanna wait for ethrex and do some local kurtosis tests first? I wouldn't like for us to be a blocker on this. I don't know what these new changes are or whether they're specified somewhere so I can implement them. Right now we have a follower node implementing the current spec but to be part of the relaunch I'll need to know what the new spec changes are I think that if the ideas of this devnet are mature enough and now we want to onboard more clients, we need to improve the specs (e.g. use a common ground like bogota-devnet-2 instead of a PoC-like branch), let the clients know about it (not sure how many besides us and Nethermind know of it), give them time to implement the changes, and once we have a couple of clients ready we could launch (I'm not saying anything new here, just stating regular multi-client devnet process). IMO we should do this relaunch with Nethermind because I think it has value, for what it means and also for the people that have been working on it, and in the meantime we can work on what I said above, and target a broader relaunch with hopefully +2 clients +1 on Ivan's plan to relaunch now and then maybe define a better way to keep track of upcoming updates i thought it was like 4kb sig? i don't think everyone will migrate to PQ immediately, so most likely it is only a marginal increase of strain on the network. but even if everyone does move over quickly because it is very pressing, we're only talking 1-3mb. this is definitely in the range of feasible by just applying networking techniques we understand such as improving block propagation, improving tx gossip, segwit, etc Another piece of info in favour of smaller sig size is that in the current Safe PoC we need the sigs to be under 5kb for the Safe transaction service to work isn't it 7-8 kB these days? becacue we optimized for aggregation .... Our default is honestly not great we chose it in a way that doesn't optimise for (i) permutation per sig (ii) sig size. We sho",
   "excerpts": [
     {
       "author": "derekchiang",
@@ -164,6 +164,508 @@
       "parent": "",
       "content": "yeah for L2s we could just reserve a range of scheme ids, that does the same job as precompile addresses",
       "createdAt": "2026-11-24T09:50:24.278000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I've written about tick options and tickless designs here: https://ethresear.ch/t/eip-8288-the-networking-side-of-recursive-aggregation/26263\n\nThere are several design questions with ticks:\n- are nodes **ticking together**? We've settled on not doing this 1-2 months ago\n- what is the **tick interval value**? doesn't make too much settling on it until the proving machinary settles a bit\n- do nodes need the **same tick value**? not necessarily the right choice\n- what if you **can't make your tick**? until this is defined, we are a bit in dreamland. Nodes have other jobs to do, sometimes they miss a tick.\n- **do we even need a tick**? I was exploring **tickless** designs. Obviously, you need to pace your aggregation and announcements based on something, so that's a large design space.\n\nI'm convinced we cannot study all these in random IM channels, and we should better study them. We already studied some of them, but I sometimes feel only agents are reading those studies 😉",
+      "createdAt": "2026-11-24T10:30:33.403000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Maybe one misconception to clarify. There is already complexity in the mempool, it is just not well known. Always were. There is a simple view of the globally syncronized mempool pushing txs around, but below that there are dozens of implementation decisions and safegards against DoS, local policies, etc.",
+      "createdAt": "2026-11-24T10:33:01.120000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah I agree, there I was talking about additional complexity",
+      "createdAt": "2026-11-24T12:21:09.516000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I scrolled to the bottom and it has a few suggestions for two EIPs, did you by chance make PRs to those EIPs with the changes?",
+      "createdAt": "2026-11-24T12:22:57.021000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Does this argument also hold for 8KB signatures?",
+      "createdAt": "2026-11-24T12:35:08.830000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "the problem of going with no aggregation is (IMHO) not the p2p ( or the mempool) is the block. With such massive signatures (~8kk) the number of transactions fitting in the block are limited",
+      "createdAt": "2026-11-24T12:41:59.515000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "last time I did the math it was still OK, but it was still 2KB. Naive question, but I lost track of this detail between the threads: what forced us to 8KB?",
+      "createdAt": "2026-11-24T13:26:24.827000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "cskiraly",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "not all, thanks for the reminder!",
+      "createdAt": "2026-11-24T13:28:17.817000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "what does it mean ok ?",
+      "createdAt": "2026-11-24T13:44:04.509000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Stateless schemes with a huge lifetime and other requirements (e.g. hardware signers and MPC support) required several choices and iterations that led to the current size. See here for more details: https://sphincs.art/",
+      "createdAt": "2026-11-24T13:49:59.575000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "pk910",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I can relaunch the devnet, but do we wanna wait for ethrex and do some local kurtosis tests first?",
+      "createdAt": "2026-11-24T13:55:46.911000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I wouldn't like for us to be a blocker on this. I don't know what these new changes are or whether they're specified somewhere so I can implement them. \n\nRight now we have a follower node implementing the current spec but to be part of the relaunch I'll need to know what the new spec changes are",
+      "createdAt": "2026-11-24T14:02:23.857000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think that if the ideas of this devnet are mature enough and now we want to onboard more clients, we need to improve the specs (e.g. use a common ground like bogota-devnet-2 instead of a PoC-like branch), let the clients know about it (not sure how many besides us and Nethermind know of it), give them time to implement the changes, and once we have a couple of clients ready we could launch (I'm not saying anything new here, just stating regular multi-client devnet process).\n\nIMO we should do this relaunch with Nethermind because I think it has value, for what it means and also for the people that have been working on it, and in the meantime  we can work on what I said above, and target a broader relaunch with hopefully +2 clients",
+      "createdAt": "2026-11-24T14:08:12.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "+1 on Ivan's plan to relaunch now and then maybe define a better way to keep track of upcoming updates",
+      "createdAt": "2026-11-24T14:11:52.170000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i thought it was like 4kb sig? i don't think everyone will migrate to PQ immediately, so most likely it is only a marginal increase of strain on the network. but even if everyone does move over quickly because it is very pressing, we're only talking 1-3mb. this is definitely in the range of feasible by just applying networking techniques we understand such as improving block propagation, improving tx gossip, segwit, etc",
+      "createdAt": "2026-11-24T15:07:21.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Another piece of info in favour of smaller sig size is that in the current Safe PoC we need the sigs to be under 5kb for the Safe transaction service to work",
+      "createdAt": "2026-11-24T15:28:11.699000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "soispoke",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "isn't it 7-8 kB these days?",
+      "createdAt": "2026-11-24T15:29:25.089000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "becacue we optimized for aggregation ....",
+      "createdAt": "2026-11-24T15:30:17.415000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Our default is honestly not great we chose it in a way that doesn't optimise for (i) permutation per sig (ii) sig size. We should probably go down a little bit.",
+      "createdAt": "2026-11-24T15:30:21.425000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "How is it more aggregation friendly ? I don't think it is the case",
+      "createdAt": "2026-11-24T15:30:37.361000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "what do we get from relaunching?",
+      "createdAt": "2026-11-24T15:50:36.313000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Please let's use the thread https://discord.com/channels/595666850260713488/1572742161932484798 🙏",
+      "createdAt": "2026-11-24T15:51:45.644000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we get this <@427491045308235776>",
+      "createdAt": "2026-11-24T15:55:47.363000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Quick claude explains what is good or bad for aggregation in the parameter set so we can refer to it later <@750602516613431366> :\n\nWhat's good or bad for leanVM aggregation in general (cost ≈ number of hash calls; signature bytes are almost free in the proof)\n\nPermutations are the main thing. In leanVM's benchmarks, cost per signature tracks Keccak calls, at about 6 VM cycles each including glue. Signature bytes only add memory cells, which are small next to that.\n\nFORS (usually half or more of the cost): each tree costs a+1 permutations, so the total is k·(a+1). Fewer, taller trees and FORS+C are good. Many short trees are bad.\n\nLayers (d): each extra layer costs a full WOTS verification plus leaf compression, about 70+ permutations. d=1 is best and d≥3 is bad.\nWOTS: use w=4 and a WOTS+C target sum well above the mean so the verifier walks few steps (~64). Large w (16, 256) multiplies chain steps and is bad.\n\nTree height h: about 1 permutation per level, so it's cheap. Don't increase it beyond the lifetime you need, but it's rarely the bottleneck.\n\nGeneral principle: push work to the signer or keygen (grinding, larger trees, caches) and away from the verifier. Bigger signatures are fine if they come from fewer chain steps. They're bad if they come from extra layers or trees.\n\nSecondary costs: bytes per hash call (more lanes absorbed means more XOR glue) and signature size for the gossip network before aggregation. They're real, but much smaller.",
+      "createdAt": "2026-11-24T15:55:59.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "So yeah it is clear that our default doesn't score great on these axis compared to the ones we've been using for PoC with Safe",
+      "createdAt": "2026-11-24T15:56:34.232000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Maybe a followup, why do we need this? ie what is the goal here?\n\nBecause there are currently no execution specs, so other nodes won't be able to join easily and it seems like we haven't gone through the process of doing the most minimal thing needed (just adding in SPHINCS with no aggregation)",
+      "createdAt": "2026-11-24T15:58:24.382000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Since it's ready it would enable far more testing. We can then experiment with and without aggregation on the network.",
+      "createdAt": "2026-11-24T15:59:25.893000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Some things that are obvious to improve without even going in the complexity increase / exotic solutions. The ones we've been playing with are leanSphincs-f and leanSphincs-s https://github.com/nconsigny/SPHINCS- : \n\n- Layers are the biggest difference. EthLib verifies three WOTS signatures where ours verifies one. That alone explains about 146 of the gap and it's why even our base set (same FORS) is ~27% cheaper.\n\n- FORS is the second difference. EthLib keeps 24 short trees which is really not a great set. leanSPHINCS-s uses 13 taller trees and cuts FORS cost by 36%, paid for with signer work",
+      "createdAt": "2026-11-24T15:59:46.757000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@750602516613431366> total: -s costs about 1.9× less to aggregate than EthLib's default and its signatures are about 46% smaller .... \n\nWhat do you think ?",
+      "createdAt": "2026-11-24T16:00:45.641000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We had proposed smaller FORS many time, e.g. 19/9. FORS+C is bad for MPC",
+      "createdAt": "2026-11-24T16:03:46.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "TLDR ; if you want to optimize for aggregation let me know. It turns out that optimising for the future is also optimizing for the current EVM... No reason not to do it IMO. \n\nBTW : I would love to be able to move forward with Safe and not have to figure out critical things last minute (i.e me last week realizing we need to change Safe accounts)",
+      "createdAt": "2026-11-24T16:03:55.666000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I don't believe we need a testnet to do this\n\nMy thinking is we start off with execution specs (I do understand that we've done some work already which should make it easy to make specs)",
+      "createdAt": "2026-11-24T16:05:08.690000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Noted Kev! We just updated the NiceTry wallet to SPHINCS.art parameters anyway",
+      "createdAt": "2026-11-24T16:05:47.322000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Yeah I've been saying for a while now that I don't think we should bend 1 inch of the protocol for MPC friendliness... So many options out there. But yeah right now it seems to be the case that we sacrifized ~40% on the MPC altar 😓",
+      "createdAt": "2026-11-24T16:06:19.257000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Or maybe put another way, I don't think we need other clients to join daisugi for this. Perhaps we have nethermind only on the daisugi testnet and keep it small. \n\nThen start on pq-el-devnet-0 with the specs based off of bogota-devnet-0 and the most minimal thing",
+      "createdAt": "2026-11-24T16:06:35.615000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Well the reason the signature is this big is mainly targeting 2^30 lifetime tbh",
+      "createdAt": "2026-11-24T16:08:40.739000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "wait but was the signature size not 4kb like just a couple weeks ago?",
+      "createdAt": "2026-11-24T16:13:16.347000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "matteoxyz3",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "If you put FORS+C in there, the signature size goes from 7740 to 7568. Doesn't really change much.",
+      "createdAt": "2026-11-24T16:13:23.764000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "Screenshot_2026-11-24_at_17.11.57.png",
+          "content": "4fc346cecdd4dda9f880da8549c10a9431558e4bc854cfdcabba75fef57631b9"
+        }
+      ]
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I will bring the Safe team in the loop for the next discussions. I will also prepare myself to have the full picture and impact of every single parameter set. We can't keep doing theoretical things. We have to ship code that will secure Billions in the next few months whether ACD enshrines one parameter set or not",
+      "createdAt": "2026-11-24T16:14:16.324000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "(not talking about leanVM here but literally PQ Safes)",
+      "createdAt": "2026-11-24T16:16:01.066000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "how about discuss stuff like this in tomorrow PQTS https://github.com/ethereum/pm/issues/2312 ?",
+      "createdAt": "2026-11-24T16:38:20.158000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Would appreciate if some client teams <@755590043632140352> <@543900561460822016> <@281967554572976128> could join this one 🙏",
+      "createdAt": "2026-11-24T16:49:09.848000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i have a conflict at that time",
+      "createdAt": "2026-11-24T16:58:44.200000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I can't make it either, but also it seems to me that it won't be consensus-related... although people from offchainlabs may be directly interested cc <@893978089024008254>",
+      "createdAt": "2026-11-24T16:59:35.292000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Will go!",
+      "createdAt": "2026-11-24T17:03:57.956000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Maybe worth delaying then ? It's a bit painful for me to discuss this over and over so I would prefer keeping this  for a full house",
+      "createdAt": "2026-11-24T17:04:32.940000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Just an idea but I think it'd be **ideal** now that all these topics gained a lot of attention from core devs to do an introductory call on leanVM, leanSPHINCS, leanXMSS, their status of development, ETAs, etc. I think this will help clarify a lot of uncertainty around it and help client teams to prioritise better.\n\nI know that a lot of this has been discussed multiple times, though, but one more time with more core devs (at least one or two representatives per team) involved won't hurt",
+      "createdAt": "2026-11-24T17:38:58.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Agreed, I think that's even better than delaying. We should have this in ACDE next week",
+      "createdAt": "2026-11-24T17:40:05.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "niard.eth",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Great added to the agenda https://github.com/ethereum/pm/issues/2316#issuecomment-7140337443",
+      "createdAt": "2026-11-24T18:13:44.196000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "gurukamath",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Just want to circle back on whether this is still the agreed upon plan. What do clients think? Would be nice to get the specs around these steps so we can start testing them out.",
+      "createdAt": "2026-11-24T18:53:58.623000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@755590043632140352> <@543900561460822016> would it help if i push back one hour later?",
+      "createdAt": "2026-11-24T18:55:44.265000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it is good idea to also discuss on ACDE but is next week",
+      "createdAt": "2026-11-24T18:56:04.145000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "the question is . do you want to update the testnet to reflect the parameters in sphincs.art? if yes we need to relaunch if not not 🙂",
+      "createdAt": "2026-11-24T18:58:12.932000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ivanlitteri",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I agree with Kev's milestones suggestions. The current spec that aims for (1) that I know of is https://github.com/ethereum/EIPs/pull/12672. It's not complete yet, but I am currently implementing it and will define what it misses with implementation",
+      "createdAt": "2026-11-24T18:58:21.818000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i could make 1 hr later tomorrow",
+      "createdAt": "2026-11-24T18:58:35.459000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "ok will update the call accordingly",
+      "createdAt": "2026-11-24T18:58:50.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".asanso",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "see you guys tomorrow whoever wants/can join",
+      "createdAt": "2026-11-24T18:59:06.223000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "derekchiang",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i had similar thoughts about PROOF frames vs siglist.  to me it only makes sense for something to be a frame if ordering is important.  but in the case of signatures/proofs, those are always declared upfront for the transaction, so it's not clear to me why they should be frames unless there's some reason why PROOF frames could be put in any frame positions other than the very beginning.  curious why <@543900561460822016> prefers PROOF frames over siglist?",
+      "createdAt": "2026-11-24T19:03:56.855000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "mainly because of the feedback i received from L2s around permisionlessly adding more protocol-defined schemes. they find it much easier to add a precompile to target from a PROOF frame than to extend the signature list",
+      "createdAt": "2026-11-24T19:05:10.640000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "also it feels more extensible in the future. maybe we will have zk tech that allows us to STARK evm execution and we can compress frames without even needing lean pcs",
+      "createdAt": "2026-11-24T19:06:03.443000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "i also feel like it handles the ARBITRARY case a bit better than the signature list. ARBITRARY has always been kinda wart to me",
+      "createdAt": "2026-11-24T19:06:38.148000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Here is my take on adding the PROOF frame to 8141: https://github.com/ethereum/EIPs/pull/12714",
+      "createdAt": "2026-11-24T19:59:51.910000+00:00",
       "attachments": []
     }
   ]

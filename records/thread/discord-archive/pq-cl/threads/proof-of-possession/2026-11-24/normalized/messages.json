@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "pq-cl/_threads/Proof of possession",
   "date": "2026-11-24",
-  "messageCount": 4,
-  "sourceHash": "7276446520dd65f95ba3653f4831628a0f84de5e09398a0e00e2395ac234a185",
-  "searchText": "Thanks for clarifying. Yeah so agree then worth more eyes then. I wonder if we could also change how things work in sys-asm and re-use queue bytecode for shared system-contracts. Since, as I mention in the PR, looks like what you (or claude) did was particular tunning reg the inhibitor and hwo fee is calculated since there is no system contract call on every block to update it. Maybe trying to reuse would end up being more complicated than a proper review from scratch; but also sharing could make the surface to review smaller. Not sure what would be the best; maybe others have an opinion. A related thing I mention in the PR: the leanXMSS signature verifier passes all the tests generated in Ethlib which is the spec maintained by the EF cryptography team. Some days ago I added more border-cases since existing test-vectors were week, and I'm planning to FV. But I don't believe the Ethlib EVM semantics are strong enough for FV to guarantee not requiring a normal audit (but prob that's later in the process) (Edit: we still need the freeze from leanXMSS design to do any of this) it's hard to reuse in this case since I wanted to add a backoff when blocks came without any prereg. Opposed to builder deposits, we really want these to be coming in *before* the fork <@543900561460822016> <@194432762315407360> <@1057495364564946944> don't play hard to catch, we all know this doesn't ship without your signing over it ;). I'll pay the beer next time we meet, as long as Lucas Saldanha is not around",
+  "messageCount": 32,
+  "sourceHash": "7631bc3ebc71e4a03474f22f0a6b7f470a4fcfe6294cae665edcadb7d1475726",
+  "searchText": "Thanks for clarifying. Yeah so agree then worth more eyes then. I wonder if we could also change how things work in sys-asm and re-use queue bytecode for shared system-contracts. Since, as I mention in the PR, looks like what you (or claude) did was particular tunning reg the inhibitor and hwo fee is calculated since there is no system contract call on every block to update it. Maybe trying to reuse would end up being more complicated than a proper review from scratch; but also sharing could make the surface to review smaller. Not sure what would be the best; maybe others have an opinion. A related thing I mention in the PR: the leanXMSS signature verifier passes all the tests generated in Ethlib which is the spec maintained by the EF cryptography team. Some days ago I added more border-cases since existing test-vectors were week, and I'm planning to FV. But I don't believe the Ethlib EVM semantics are strong enough for FV to guarantee not requiring a normal audit (but prob that's later in the process) (Edit: we still need the freeze from leanXMSS design to do any of this) it's hard to reuse in this case since I wanted to add a backoff when blocks came without any prereg. Opposed to builder deposits, we really want these to be coming in *before* the fork <@543900561460822016> <@194432762315407360> <@1057495364564946944> don't play hard to catch, we all know this doesn't ship without your signing over it ;). I'll pay the beer next time we meet, as long as Lucas Saldanha is not around how different is it from the other queue? Reg today's topic on the call on keeping the leanXMSS verifier bytecode in leanxmss-evm-verifier vs also moving it to sys-asm (which would avoid one extra contract deployment). I'm happy with that too; but would prefer some opinion from sys-asm owners if this feels good. If so, I can stack another PR on top of the open one and move it there. (cc <@1126229231572094976> ) The PR description has this summary. Wrote it there mostly while importing the original geas that was included in an earlier version of the EIP. Although i think is good to discuss if this makes sense. okay taking a look. this fee mechanism kinda concerns me. it is trying to do a lot by having long running avg of registrations. but i dont really see the point of it because you can still register nearly 1m per day at the current rates, so a malicious actor could fairly cheaply register many millions of \"fake\" registrations before the fork. which is the whole point the fee tries to avoid. the real dos mechanism is the cost of the registration. it's already like 270k gas, probably no adversary would want to pay that much eth to just delay the registration queue a few hours i would make the fee a smaller fixed fee, if at all, and remove the dynamic pre-fork fee calculation will repost on github too the only difference is that instead of only increasing by request, we also decrease each block that passes, so that the price can be used to stop onboarding spammers but keep onboarding a large set before the fork this was also a consideration, I am happy if it makes it simpler to reason and audit: just set a fixed fee and let it be The only thing we care about is that we need to be able to consume it in the CL faster than the spammer can spam on the EL at a reasonable cost well once the fork starts you can have the normal registration fee mechanism that sounds more complicated to me, to have a fee mechanism that changes pre/post fork, but I'm definitely talking out of my butt here, I'll trust whatever you think it's safe. The only constraints I have is that - Assume that post fork the CL can consume Y preregs per block - Pre fork, a spammer willing to spend X dollars should not be able to spam more than Y prereg per block for a long time (say hours/days) - Pre and post fork an honest party willing to pre-register should be able to pay very little to do so if they wait enough slots do you have estimate for Y? right now there is target 128 and max 256 is that the right estimate? it's very cheap, I was counting with about 1000 request per slot should be fine So I was putting a target of 128 counting with a spammer that would take several months and still not be able to spam more than days on the CL after the fork happens We can bench Y if you need this i feel like we can put a fixed fee of ~0.001 or 0.0005 maybe and call it a day this sounds reasonable to me, I do not think there's any attacks like for builders in which there was an incentive in being first in the fork which led to the current mechanism There is a little problem perhaps after the first fork if it's cheap to spam you could prevent and force the exit of a validator that deposited late after the fork and short before the second fork (the actual PQ fork) and prevent it from ever landing the prereg in time. But I am not claiming this issue is important AFAICS well once the fork is active we will have the exponential fee basically, the fee only updates when the system calls come in. so on deployment we'd fix the fee to some value. then on the first system call it would start calculating the correct fee the exponential fee gets drained every time the queue is drained correct? I thought you wanted to ditch this and just keep the fixed fee all thoughout ok, got it, yeah this seems fine to me no i was just saying the exponential fee pre-fork doesn't fully stop the spam any ways, so we could just pick a fixed value and if people are willing to pay for it they in theory could spam Makes sense, considering a registration is already quite expensive. I can change the current PR to charge a fixed fee before the fork. Reg changes in my PR, IIUC means: - The ctor sets the inhibitor again, so becomes identical to `builder_exits`. - Before the fork (i.e: while the inhibitor is set), registrations are still queued and they pay the fiexd fee. - From the first system call on we do what `builder_exits` does reg dynamic fees as the usual DoS protection for CL processing... so same logic as existing ones. - The inhibitor would now have different semantics (i.e: \"fixed fee\", and not \"registrations disabled\" as in the other system contracts). This also means closing the queue from the system call calldata needs a different value (I can use a second sentinel unless we prefer something else). LMK if this makes sense. Question: do we also want to drop the max adds per block to make things closer to existing system contracts? This would allow to remove the new \"last block\" slot, which is a difference with existing contracts (i.e: before the fork no system call resets the count, so the cap needs to know when a new block starts). cc <@755590043632140352> ? As a side note, there will be a fee drop at fork activation, where we switch from the fixed fee to the dynamic one (i.e: a sudden drop to 1 wei). I don't think it's a big deal, since if many wait for the fork to register cheaper, the dynamic fee will rise anyway.",
   "excerpts": [
     {
       "author": "jsign",
@@ -36,6 +36,236 @@
       "parent": "pq-cl",
       "content": "<@543900561460822016> <@194432762315407360> <@1057495364564946944> don't play hard to catch, we all know this doesn't ship without your signing over it ;). I'll pay the beer next time we meet, as long as Lucas Saldanha is not around",
       "createdAt": "2026-11-24T00:06:22.197000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "how different is it from the other queue?",
+      "createdAt": "2026-11-24T15:09:56.262000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "Reg today's topic on the call on keeping the leanXMSS verifier bytecode in leanxmss-evm-verifier vs also moving it to sys-asm (which would avoid one extra contract deployment). \nI'm happy with that too; but would prefer some opinion from sys-asm owners if this feels good. If so, I can stack another PR on top of the open one and move it there. (cc <@1126229231572094976> )",
+      "createdAt": "2026-11-24T15:10:00.526000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "The PR description has this summary. Wrote it there mostly while importing the original geas that was included in an earlier version of the EIP. Although i think is good to discuss if this makes sense.",
+      "createdAt": "2026-11-24T15:11:41.361000+00:00",
+      "attachments": [
+        {
+          "type": "image/webp",
+          "origin_name": "image.png",
+          "content": "98a8c6a54d99ebd6cf6c6d98bd99397a0cca0f66fd574643319d686d97cbba3b"
+        }
+      ]
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "okay taking a look. this fee mechanism kinda concerns me. it is trying to do a lot by having long running avg of registrations. but i dont really see the point of it because you can still register nearly 1m per day at the current rates, so a malicious actor could fairly cheaply register many millions of \"fake\" registrations before the fork. which is the whole point the fee tries to avoid. the real dos mechanism is the cost of the registration. it's already like 270k gas, probably no adversary would want to pay that much eth to just delay the registration queue a few hours\n\ni would make the fee a smaller fixed fee, if at all, and remove the dynamic pre-fork fee calculation",
+      "createdAt": "2026-11-24T16:08:10.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "will repost on github too",
+      "createdAt": "2026-11-24T16:08:19.051000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "the only difference is that instead of only increasing by request, we also decrease each block that passes, so that the price can be used to stop onboarding spammers but keep onboarding a large set before the fork",
+      "createdAt": "2026-11-24T16:33:34.231000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "this was also a consideration, I am happy if it makes it simpler to reason and audit: just set a fixed fee and let it be",
+      "createdAt": "2026-11-24T16:34:46.888000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "The only thing we care about is that we need to be able to consume it in the CL faster than the spammer can spam on the EL at a reasonable cost",
+      "createdAt": "2026-11-24T16:35:26.182000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "well once the fork starts you can have the normal registration fee mechanism",
+      "createdAt": "2026-11-24T16:36:37.680000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "that sounds more complicated to me, to have a fee mechanism that changes pre/post fork, but I'm definitely talking out of my butt here, I'll trust whatever you think it's safe. The only constraints I have is that\n\n- Assume that post fork the CL can consume Y preregs per block\n- Pre fork, a spammer willing to spend X dollars should not be able to spam  more than Y prereg per block for a long time (say hours/days)\n- Pre and post fork an honest party willing to pre-register should be able to pay very little to do so if they wait enough slots",
+      "createdAt": "2026-11-24T16:39:50.733000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "do you have estimate for Y?",
+      "createdAt": "2026-11-24T16:41:27.273000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "right now there is target 128 and max 256",
+      "createdAt": "2026-11-24T16:42:46.976000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "is that the right estimate?",
+      "createdAt": "2026-11-24T16:42:58.480000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "it's very cheap, I was counting with about 1000 request per slot should be fine",
+      "createdAt": "2026-11-24T17:00:50.056000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "So I was putting a target of 128 counting with a spammer that would take several months and still not be able to spam more than days on the CL after the fork happens",
+      "createdAt": "2026-11-24T17:01:40.758000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "We can bench Y if you need this",
+      "createdAt": "2026-11-24T17:02:05.883000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "i feel like we can put a fixed fee of ~0.001 or 0.0005 maybe and call it a day",
+      "createdAt": "2026-11-24T17:06:03.679000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "this sounds reasonable to me, I do not think there's any attacks like for builders in which there was an incentive in being first in the fork which led to the current mechanism",
+      "createdAt": "2026-11-24T17:06:48.953000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "There is a little problem perhaps after the first fork if it's cheap to spam you could prevent and force the exit of a validator that deposited late after the fork and short before the second fork (the actual PQ fork) and prevent it from ever landing the prereg in time.",
+      "createdAt": "2026-11-24T17:40:19.018000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "But I am not claiming this issue is important AFAICS",
+      "createdAt": "2026-11-24T17:40:35.291000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "well once the fork is active we will have the exponential fee",
+      "createdAt": "2026-11-24T17:45:41.285000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "basically, the fee only updates when the system calls come in. so on deployment we'd fix the fee to some value. then on the first system call it would start calculating the correct fee",
+      "createdAt": "2026-11-24T17:46:11.246000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "the exponential fee gets drained every time the queue is drained correct? I thought you wanted to ditch this and just keep the fixed fee all thoughout",
+      "createdAt": "2026-11-24T17:46:32.476000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "potuz",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "ok, got it, yeah this seems fine to me",
+      "createdAt": "2026-11-24T17:46:52.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "lightclient",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "no i was just saying the exponential fee pre-fork doesn't fully stop the spam any ways, so we could just pick a fixed value and if people are willing to pay for it they in theory could spam",
+      "createdAt": "2026-11-24T17:47:27.872000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "Makes sense, considering a registration is already quite expensive. I can change the current PR to charge a fixed fee before the fork.\n\nReg changes in my PR, IIUC means:\n- The ctor sets the inhibitor again, so becomes identical to `builder_exits`.\n- Before the fork (i.e: while the inhibitor is set), registrations are still queued and they pay the fiexd fee.\n- From the first system call on we do what `builder_exits` does reg dynamic fees as the usual DoS protection for CL processing... so same logic as existing ones.\n- The inhibitor would now have different semantics (i.e: \"fixed fee\", and not \"registrations disabled\" as in the other system contracts). This also means closing the queue from the system call calldata needs a different value (I can use a second sentinel unless we prefer something else).\n\nLMK if this makes sense.",
+      "createdAt": "2026-11-24T20:16:46.947000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "Question: do we also want to drop the max adds per block to make things closer to existing system contracts? This would allow to remove the new \"last block\" slot, which is a difference with existing contracts (i.e: before the fork no system call resets the count, so the cap needs to know when a new block starts). cc <@755590043632140352> ?",
+      "createdAt": "2026-11-24T20:16:50.430000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jsign",
+      "category": "Post-Quantum",
+      "parent": "pq-cl",
+      "content": "As a side note, there will be a fee drop at fork activation, where we switch from the fixed fee to the dynamic one (i.e: a sudden drop to 1 wei). I don't think it's a big deal, since if many wait for the fork to register cheaper, the dynamic fee will rise anyway.",
+      "createdAt": "2026-11-24T20:17:02.233000+00:00",
       "attachments": []
     }
   ]
