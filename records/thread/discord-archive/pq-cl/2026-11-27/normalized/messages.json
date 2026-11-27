@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "channel": "pq-cl",
   "date": "2026-11-27",
-  "messageCount": 1,
-  "sourceHash": "1c5da574855418854d860774df8b5c8f720c0341e694602831878db26fbcf4d2",
-  "searchText": "Hey, could you try running the [minimal reference tests here](https://github.com/ethereum/consensus-specs/actions/runs/45914857891) please? Ignore the failing coverage step, that's not important. These tests should be compatible with `pq-devnet-1`.",
+  "messageCount": 36,
+  "sourceHash": "f9628e91107168f552be29b65691674acbdae8c41ecdd926cad4a9e224f9bd5d",
+  "searchText": "Hey, could you try running the [minimal reference tests here](https://github.com/ethereum/consensus-specs/actions/runs/45914857891) please? Ignore the failing coverage step, that's not important. These tests should be compatible with `pq-devnet-1`. starting some network load on pq-devnet-0. Ran the minimal tests from that exact run (`b73c6956`). **7,673 of 8,657 cases pass; not fully green.** Ignored the coverage-step failure as requested. Fixed and pushed to `sigp/lighthouse:pq-devnet-1` at `5325f038ba`: legacy-deposit key/VRF derivation used SHA instead of Keccak, malformed aggregate bitfields could be ignored as duplicates, and unknown proposer indices were ignored instead of rejected. Also added PQ reference-test adapters. Remaining: 246 partial-column bitmap SSZ root failures (`BitList` vs `ProgressiveBitList`); 31 cases involving unsupported requests; 15 pre-PQ upgrade load failures from our PQ-only validator/builder layout; 692 harness limitations/skips. All 167 epoch, 83 sanity, 82 fork-choice, 409 implemented-operation and 117 supported-networking cases pass. Full breakdown and reproduction commands: https://github.com/sigp/lighthouse/blob/5325f038bae7e537f8f528fc25bd2d0093c1a8d4/testing/ef_tests/PQ_REFERENCE_RESULTS.md Is there a way we could keep minimal preset working in the future? currently looks like 6s slot time just straight up not working on a local kurtosis setup. ``` Minimal preset, slot 67: - No justification: about 4% of validators attested the correct target. - Missed proposals: 34 of 67 slots. Nimbus missed 6 of 6, Grandine 7 of 8, Prysm 7 of 11. - Same failure in every client's logs: aggregates finish proving after their deadline. - Grandine: PQ aggregate of slot 25 was proven too late - ethlambda: late=1 on its proofs - Prysm and Lodestar VCs: requests for the aggregate time out - Lighthouse: Block was broadcast too late … system may be overloaded ``` set gofast:true at the end? it'll depend on how we go getting it fast enough but it might be really key limited Potential breakout call items (Fri 27th Nov) `Paul Harris already replied suggesting gofast:true. Worth a correction so nobody chases it.` claude gets your sarcasm with less keys minimal is working Thanks. I think the tests are actually incompatible with pq-devnet-1, because of the pulled in changes from master. Oops. We can start using reference tests for the next devnet. Call starting in one minute: https://ethereumfoundation.zoom.us/j/89354417194?pwd=5C2NS0WYPLxSt77A4qcLLvncqOZOyU.1 https://dora.pq-devnet-1.ethpandaops.io we are live pq-devnet-0 is shut down. pq-devnet-1 launched <@119818938845495298> could we cancel the Friday call, leaving only the Tuesday one? Networking changes for the next devnet single layer XMSS and DVT support Sorry guys my son refused to sleep last night, so I overslept for the meeting 😩 Frustrating because I wanted to say some things during the meeting. But I suppose I can just say them here instead. # PQ-Devnets - Lock in on the Goal We need to be clear about what the PQ devnets are for. **The central question is whether PQ-Gasper is viable at the scale we care about, or whether we should pursue PQ-DC instead.** These devnets should help us make that decision. They are experiments, not simply milestones on the way to shipping a predetermined design. Getting clients to interoperate is necessary. Getting a small network to finalize is necessary. Neither establishes that PQ-Gasper can handle mainnet-sized committees within the available time. We need to understand whether validators can sign, whether aggregators can collect and prove those signatures, whether the resulting proofs can propagate, and whether proposers can combine them before their proposal. We need to understand those operations together, on realistic hardware, under realistic contention. **That is the purpose of the exercise.** I’m concerned that we’re starting to organize the work around successive bundles of features: another devnet, another aggregation schedule, another networking mechanism. Each change might be reasonable individually. But if we change several things simultaneously, what exactly have we learned when the next network performs better—or worse? Our Goal right now should be to determine what we need to measure for the next devnet to make that decision. We touched on this through out the meeting, I'd say right now the main things are: - networking simulations which we should have next week - realistic devnets that corroborate the simulations - whether we need leanVM performance to be significantly better For example, theres not really a need to hook up the staking contracts because thats not going to be a decider, but adding networking changes into the following devnets makes sense Though I think we should start it in parallel as noted in the call, so it gets pipelined also no need to test the transition from bls to pq I've been attempting to figure out how we could get measurements on a devnet with committee geometries reflective of mainnet, without necessarily needing a devnet that massive. Initially I had some ideas, like making committee geometry configurable. But that results in some validators having multiple duties per epoch.. which is not only a large change, but I think it puts roughly the same load on machines as simply having more keys on less nodes I think Csaba is working on a networking methodology document that should explain this. I like <@199561711278227457> 's idea of running small devnets of size 100/200/300 alongside simulations. Then checking if the simulations agree with devnets and if so, we scale up the simulations The spec did introduce a new config (`X_MAX_COMMITTEE_COUNT_PER_SLOT`) that can help test this btw. We should use this. yes that's good for testing the *proving load* of mainnet (provided the devnet has at least 65536 validators) We can't test the *merging load* of mainnet without more committees per slot (more validators). But that's not as tight of a requirement from what I can see based on benchmarks I was actually thinking of possibly having a spec that would rotate through `X_MAX_COMMITTTEE_COUNT_PER_SLOT` every 8 epochs or so. Then we could test all this with a single devnet Would it be possible to set up tests in kurtosis or maybe two separate machines to test computations? There is a node A which we profile and there is a node S which represents and entire network and sends pre-signed messages to node A at some schedule, we pretend there is infinite bandwidth for this test to see how the CPU side of a node performs. There can be other messages like a payload, beacon block, transactions in a mempool to make a constant load on the CPU. Node S can also have many p2p identities to fill up the connection pool of node A. It doesn't sound like an easy setup but this is something that we can be constantly replaying to check clients performance improvements without running large devnets. with this kind of setup clients also can test various aggregation strategies and their performance https://eipsinsight.com/calls/one-off-pqcl/005 https://forkcast.org/calls/pqcl/005/?summary=notes LeanVM dependence on networking could someone pls remind me why did we push out the aggregation deadline from 6 to 7.2 s?",
   "excerpts": [
     {
       "author": "jtraglia",
@@ -12,6 +12,292 @@
       "parent": "",
       "content": "Hey, could you try running the [minimal reference tests here](https://github.com/ethereum/consensus-specs/actions/runs/45914857891) please? Ignore the failing coverage step, that's not important. These tests should be compatible with `pq-devnet-1`.",
       "createdAt": "2026-11-27T03:41:37.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "starting some network load on pq-devnet-0.",
+      "createdAt": "2026-11-27T09:29:59.408000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Ran the minimal tests from that exact run (`b73c6956`). **7,673 of 8,657 cases pass; not fully green.** Ignored the coverage-step failure as requested.\n\nFixed and pushed to `sigp/lighthouse:pq-devnet-1` at `5325f038ba`: legacy-deposit key/VRF derivation used SHA instead of Keccak, malformed aggregate bitfields could be ignored as duplicates, and unknown proposer indices were ignored instead of rejected. Also added PQ reference-test adapters.\n\nRemaining: 246 partial-column bitmap SSZ root failures (`BitList` vs `ProgressiveBitList`); 31 cases involving unsupported requests; 15 pre-PQ upgrade load failures from our PQ-only validator/builder layout; 692 harness limitations/skips. All 167 epoch, 83 sanity, 82 fork-choice, 409 implemented-operation and 117 supported-networking cases pass.\n\nFull breakdown and reproduction commands:\nhttps://github.com/sigp/lighthouse/blob/5325f038bae7e537f8f528fc25bd2d0093c1a8d4/testing/ef_tests/PQ_REFERENCE_RESULTS.md",
+      "createdAt": "2026-11-27T10:14:43.712000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Is there a way we could keep minimal preset working in the future?\ncurrently looks like 6s slot time just straight up not working on a local kurtosis setup. \n```\nMinimal preset, slot 67:\n- No justification: about 4% of validators attested the correct target.\n- Missed proposals: 34 of 67 slots. Nimbus missed 6 of 6, Grandine 7 of 8, Prysm 7 of 11.\n- Same failure in every client's logs: aggregates finish proving after their deadline.\n  - Grandine: PQ aggregate of slot 25 was proven too late\n  - ethlambda: late=1 on its proofs\n  - Prysm and Lodestar VCs: requests for the aggregate time out\n  - Lighthouse: Block was broadcast too late … system may be overloaded\n```",
+      "createdAt": "2026-11-27T11:41:03.822000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "set gofast:true at the end?",
+      "createdAt": "2026-11-27T11:44:25.811000+00:00",
+      "attachments": []
+    },
+    {
+      "author": ".paulharris",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "it'll depend on how we go getting it fast enough but it might be really key limited",
+      "createdAt": "2026-11-27T11:44:55.604000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Potential breakout call items (Fri 27th Nov)",
+      "createdAt": "2026-11-27T12:39:04.503000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "`Paul Harris already replied suggesting gofast:true. Worth a correction so nobody chases it.`",
+      "createdAt": "2026-11-27T12:49:00.416000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "claude gets your sarcasm",
+      "createdAt": "2026-11-27T12:49:26.493000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "with less keys minimal is working",
+      "createdAt": "2026-11-27T12:49:39.362000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Thanks. I think the tests are actually incompatible with pq-devnet-1, because of the pulled in changes from master. Oops. We can start using reference tests for the next devnet.",
+      "createdAt": "2026-11-27T12:58:35.096000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Call starting in one minute: https://ethereumfoundation.zoom.us/j/89354417194?pwd=5C2NS0WYPLxSt77A4qcLLvncqOZOyU.1",
+      "createdAt": "2026-11-27T13:59:05.293000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://dora.pq-devnet-1.ethpandaops.io",
+      "createdAt": "2026-11-27T14:04:29.519000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "we are live",
+      "createdAt": "2026-11-27T14:04:32.076000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "pq-devnet-0 is shut down.",
+      "createdAt": "2026-11-27T14:55:10.478000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "pq-devnet-1 launched",
+      "createdAt": "2026-11-27T15:26:08.781000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "<@119818938845495298> could we cancel the Friday call, leaving only the Tuesday one?",
+      "createdAt": "2026-11-27T15:38:34.513000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Networking changes for the next devnet",
+      "createdAt": "2026-11-27T15:39:03.908000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "single layer XMSS and DVT support",
+      "createdAt": "2026-11-27T15:58:08.865000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Sorry guys my son refused to sleep last night, so I overslept for the meeting 😩 \nFrustrating because I wanted to say some things during the meeting. But I suppose I can just say them here instead.",
+      "createdAt": "2026-11-27T16:22:40.752000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "# PQ-Devnets - Lock in on the Goal\n\nWe need to be clear about what the PQ devnets are for.\n\n**The central question is whether PQ-Gasper is viable at the scale we care about, or whether we should pursue PQ-DC instead.** These devnets should help us make that decision. They are experiments, not simply milestones on the way to shipping a predetermined design.\n\nGetting clients to interoperate is necessary. Getting a small network to finalize is necessary. Neither establishes that PQ-Gasper can handle mainnet-sized committees within the available time.\n\nWe need to understand whether validators can sign, whether aggregators can collect and prove those signatures, whether the resulting proofs can propagate, and whether proposers can combine them before their proposal. We need to understand those operations together, on realistic hardware, under realistic contention.\n\n**That is the purpose of the exercise.**\n\nI’m concerned that we’re starting to organize the work around successive bundles of features: another devnet, another aggregation schedule, another networking mechanism. Each change might be reasonable individually. But if we change several things simultaneously, what exactly have we learned when the next network performs better—or worse?\n\nOur Goal right now should be to determine what we need to measure for the next devnet to make that decision.",
+      "createdAt": "2026-11-27T16:25:05.495000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We touched on this through out the meeting, I'd say right now the main things are:\n\n-  networking simulations which we should have next week\n- realistic devnets that corroborate the simulations\n- whether we need leanVM performance to be significantly better",
+      "createdAt": "2026-11-27T16:29:00.449000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "For example, theres not really a need to hook up the staking contracts because thats not going to be a decider, but adding networking changes into the following devnets makes sense\n\nThough I think we should start it in parallel as noted in the call, so it gets pipelined",
+      "createdAt": "2026-11-27T16:31:12.778000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "also no need to test the transition from bls to pq",
+      "createdAt": "2026-11-27T16:31:39.383000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I've been attempting to figure out how we could get measurements on a devnet with committee geometries reflective of mainnet, without necessarily needing a devnet that massive. Initially I had some ideas, like making committee geometry configurable. But that results in some validators having multiple duties per epoch.. which is not only a large change, but I think it puts roughly the same load on machines as simply having more keys on less nodes",
+      "createdAt": "2026-11-27T16:32:04.761000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I think Csaba is working on a networking methodology document that should explain this.\n\nI like <@199561711278227457> 's idea of running small devnets of size 100/200/300 alongside simulations. Then checking if the simulations agree with devnets and if so, we scale up the simulations",
+      "createdAt": "2026-11-27T16:34:54.251000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "jtraglia",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "The spec did introduce a new config (`X_MAX_COMMITTEE_COUNT_PER_SLOT`) that can help test this btw. We should use this.",
+      "createdAt": "2026-11-27T16:37:28.334000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "yes that's good for testing the *proving load* of mainnet (provided the devnet has at least 65536 validators)",
+      "createdAt": "2026-11-27T16:58:24.121000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "We can't test the *merging load* of mainnet without more committees per slot (more validators). But that's not as tight of a requirement from what I can see based on benchmarks",
+      "createdAt": "2026-11-27T16:59:02.349000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "ethdreamer",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "I was actually thinking of possibly having a spec that would rotate through `X_MAX_COMMITTTEE_COUNT_PER_SLOT` every 8 epochs or so. Then we could test all this with a single devnet",
+      "createdAt": "2026-11-27T16:59:52.727000+00:00",
+      "attachments": [
+        {
+          "type": "image/png",
+          "origin_name": "image.png",
+          "content": "2dd3590dcefd8abbde93af70b6fb46946535ecddaebcaa643478804ac39ded46"
+        }
+      ]
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "Would it be possible to set up tests in kurtosis or maybe two separate machines to test computations? There is a node A which we profile and there is a node S which represents and entire network and sends pre-signed messages to node A at some schedule, we pretend there is infinite bandwidth for this test to see how the CPU side of a node performs. There can be other messages like a payload, beacon block, transactions in a mempool to make a constant load on the CPU. Node S can also have many p2p identities to fill up the connection pool of node A.\n\nIt doesn't sound like an easy setup but this is something that we can be constantly replaying to check clients performance improvements without running large devnets.",
+      "createdAt": "2026-11-27T17:16:39.819000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "m.kalinin",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "with this kind of setup clients also can test various aggregation strategies and their performance",
+      "createdAt": "2026-11-27T17:18:09.729000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "dhanush0512",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://eipsinsight.com/calls/one-off-pqcl/005",
+      "createdAt": "2026-11-27T17:40:52.429000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "wolovim",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "https://forkcast.org/calls/pqcl/005/?summary=notes",
+      "createdAt": "2026-11-27T17:44:04.517000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "kevaundray",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "LeanVM dependence on networking",
+      "createdAt": "2026-11-27T18:38:43.852000+00:00",
+      "attachments": []
+    },
+    {
+      "author": "barnabasbusa",
+      "category": "Post-Quantum",
+      "parent": "",
+      "content": "could someone pls remind me why did we push out the aggregation deadline from 6 to 7.2 s?",
+      "createdAt": "2026-11-27T18:50:58.121000+00:00",
       "attachments": []
     }
   ]
